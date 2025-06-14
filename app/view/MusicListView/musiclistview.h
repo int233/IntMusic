@@ -12,8 +12,7 @@
 
 #include "app/util/Interface/musicdatastruct.h"
 #include "app/util/Interface/iplaylist.h"
-// #include "app/util/PlayList/playlistmanager.h"
-#include "app/util/MusicPlayer/musicservice.h"
+#include "app/util/MusicService/musicservice.h"
 #include "app/util/Interface/api.h"
 
 class MusicListView : public QWidget {

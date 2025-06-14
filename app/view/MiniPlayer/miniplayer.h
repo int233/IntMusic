@@ -10,7 +10,7 @@
 
 #include <QHBoxLayout>
 
-#include "app/util/MusicPlayer/musicservice.h"
+#include "app/util/MusicService/musicservice.h"
 #include "app/util/Interface/musicdatastruct.h"
 
 class MiniPlayer : public QWidget

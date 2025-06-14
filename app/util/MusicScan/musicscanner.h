@@ -45,7 +45,7 @@ private:
     explicit MusicScanner(QObject *parent = nullptr);
     ConfigManager &configManager;
     QStringList m_supportedFormats = {"*.mp3", "*.flac", "*.wav", "*.ogg", "*.m4a"};
-    int maxFiles = 100;
+    int maxFiles = 100000;
 
     QThread *workerThread;
     MusicScannerWorker *worker;
