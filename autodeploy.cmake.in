@@ -1,0 +1,82 @@
+# autodeploy.cmake.in
+# 模板文件，用于自动部署在MXE环境动态编译的QT应用
+# @VAR@ 占位符将由 configure_file 命令在配置阶段替换。
+
+function(resolve_dependencies target_file search_paths resolved_deps_var)
+    set(queue ${target_file})
+    set(processed "")
+    set(final_deps "")
+    set(SYSTEM_DLL_BLACKLIST
+        KERNEL32.dll USER32.dll GDI32.dll SHELL32.dll ADVAPI32.dll
+        MSVCRT.dll WS2_32.dll COMCTL32.dll ole32.dll OLEAUT32.dll
+        IMM32.dll WINMM.dll VERSION.dll ntdll.dll RPCRT4.dll
+    )
+    set(processed_names "")
+
+    while(queue)
+        list(POP_FRONT queue current_file)
+        list(FIND processed "${current_file}" _index)
+        if(_index GREATER -1)
+            continue()
+        endif()
+        list(APPEND processed "${current_file}")
+
+        execute_process(
+            COMMAND "@CMAKE_OBJDUMP@" -p "${current_file}"
+            OUTPUT_VARIABLE objdump_output RESULT_VARIABLE result ERROR_QUIET
+        )
+        if(result EQUAL 0)
+            string(REGEX MATCHALL "([a-zA-Z0-9_.+-]+\\.[dD][lL][lL])" dll_matches "${objdump_output}")
+            
+            foreach(dep_dll ${dll_matches})
+                string(TOUPPER ${dep_dll} dep_dll_upper)
+                list(FIND processed_names ${dep_dll_upper} _index_p)
+                list(FIND SYSTEM_DLL_BLACKLIST ${dep_dll_upper} _index_b)
+
+                if(_index_p LESS 0 AND _index_b LESS 0)
+                    list(APPEND processed_names ${dep_dll_upper})
+                    set(found_path "")
+                    foreach(search_dir ${search_paths})
+                        set(test_path "${search_dir}/${dep_dll}")
+                        if(EXISTS "${test_path}")
+                            set(found_path "${test_path}")
+                            break()
+                        endif()
+                    endforeach()
+                    if(found_path)
+                        list(APPEND queue ${found_path})
+                        list(APPEND final_deps ${found_path})
+                        message(STATUS "  -> Found dependency: ${found_path}")
+                    endif()
+                endif()
+            endforeach()
+        endif()
+    endwhile()
+    set(${resolved_deps_var} ${final_deps} PARENT_SCOPE)
+endfunction()
+
+
+set(INSTALLED_EXE_PATH "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@/@TARGET_NAME@.exe")
+set(SEARCH_PATHS "@SEARCH_PATHS@")
+set(QT_PLUGIN_DIR "@QT_PLUGIN_DIR@") 
+set(DEST_DIR "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@") 
+
+if(EXISTS "${INSTALLED_EXE_PATH}")
+    message(STATUS "--- [Install] Analyzing dependencies for: ${INSTALLED_EXE_PATH}")
+    resolve_dependencies("${INSTALLED_EXE_PATH}" "${SEARCH_PATHS}" ALL_REQUIRED_DLLS)
+
+    if(ALL_REQUIRED_DLLS)
+        message(STATUS "--- [Install] Copying automatically resolved dependencies ---")
+        file(INSTALL ${ALL_REQUIRED_DLLS} DESTINATION "${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_BINDIR@")
+    endif()
+else()
+    message(WARNING "--- [Install] Main executable not found, skipping dependency deployment: ${INSTALLED_EXE_PATH}")
+endif()
+
+message(STATUS "--- [Install] Copying Qt plugins from ${QT_PLUGIN_DIR} ---")
+file(INSTALL DESTINATION "${DEST_DIR}" TYPE DIRECTORY FILES "${QT_PLUGIN_DIR}/platforms")
+file(INSTALL DESTINATION "${DEST_DIR}" TYPE DIRECTORY FILES "${QT_PLUGIN_DIR}/imageformats")
+file(INSTALL DESTINATION "${DEST_DIR}" TYPE DIRECTORY FILES "${QT_PLUGIN_DIR}/styles")
+file(INSTALL DESTINATION "${DEST_DIR}" TYPE DIRECTORY FILES "${QT_PLUGIN_DIR}/sqldrivers")
+
+message(STATUS "--- [Install] Deployment script finished ---")

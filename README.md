@@ -22,6 +22,15 @@
 
 ## 开发（VS Code）
 
+### 环境
+
+编译环境使用https://github.com/int233/qt-docker中的Dcoker
+
+```powershell
+git clone https://github.com/int233/qt-docker.git
+cd qt-docker
+docker build -f Dockerfile.windows.shared -t qt-build-windows:shared.6.8.3 .
+```
 
 ### 下载
 
@@ -30,8 +39,14 @@ git clone https://github.com/int233/MusicPlayer.git
 cd MusicPlayer
 git checkout QT
 ```
-
 ### 编译
+
+#### build IntMusic via terminal
+```powershell
+docker run --rm -v "{IntMusic_Folder}:/project" qt-build-windows:shared.6.8.3  bash -c "cmake -B /project/build/debug/ -S /project  -DCMAKE_TOOLCHAIN_FILE=/opt/mxe/usr/x86_64-w64-mingw32.shared/share/cmake/mxe-conf.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build /project/build/debug && cmake --install /project/build/debug --prefix /project/build/debug"
+
+```
+#### build IntMusic via vscode
 
 - [tasks.json 文件](.vscode/tasks.json)中存在debug和release两条构建链：
 

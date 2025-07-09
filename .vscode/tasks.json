@@ -15,53 +15,59 @@
                 "build"
             ]
         },
+        // {
+        //     "label": "prepare-build-windows",
+        //     "type": "shell",
+        //     "options": {
+        //         "cwd": "${workspaceFolder}",
+        //     },
+        //     "command": "powershell",
+        //     "args": [
+        //         "-ExecutionPolicy", "Bypass",
+        //         "-File", "${workspaceFolder}/scripts/prepare-build.ps1",
+        //         "-WorkspaceFolder", "${workspaceFolder}"
+        //     ]
+        // },
         {
-            "label": "mkdir-windows",
+            "label": "prepare-build-windows",
             "type": "shell",
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
             },
-            "command": "mkdir",
+            "command": "docker",
             "args": [
-                "-Force",
-                "build"
+                "run",
+                "-it",
+                "--rm",
+                "-v",
+                "${workspaceFolder}:/project",
+                "qt-build-windows:shared.6.8.3",
+                "/bin/bash",
+                "-c",
+                "'cmake --build /project/build/debug --target clean'",
             ]
         },
         // Windows Debug
         {
-            "label": "make-debug-windows",
-            "type": "shell",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "command": "cmake",
-            "args": [
-                "-Bbuild/debug",
-                "-GNinja",
-                "\"-DCMAKE_MAKE_PROGRAM=${config:NINJA_PROGRAM_WIN}\"",
-                "\"-DCMAKE_BUILD_TYPE:STRING=Debug\"",
-                "\"-DCMAKE_PROJECT_INCLUDE_BEFORE:FILEPATH=${config:QT_AUTO_SETUP_WIN}\"",
-                "\"-DCMAKE_PREFIX_PATH:PATH=${config:CMAKE_PREFIX_PATH_WIN}\""
-            ],
-            "dependsOn": [
-                "mkdir-windows"
-            ]
-        },
-        {
             "label": "make-build-debug-windows",
             "type": "shell",
             "options": {
-                "cwd": "${workspaceFolder}"
+                "cwd": "${workspaceFolder}",
             },
-            "command": "cmake",
+            "command": "docker",
             "args": [
-                "--build",
-                "./build/debug",
-                "--target",
-                "all"
+                "run",
+                "-it",
+                "--rm",
+                "-v",
+                "${workspaceFolder}:/project",
+                "qt-build-windows:shared.6.8.3",
+                "/bin/bash",
+                "-c",
+                "'cmake -B /project/build/debug/ -S /project  -DCMAKE_TOOLCHAIN_FILE=${config:CMAKE_TOOLCHAIN_FILE} -DCMAKE_BUILD_TYPE=Debug && cmake --build /project/build/debug'",
             ],
             "dependsOn": [
-                "make-debug-windows"
+                "prepare-build-windows"
             ]
         },
         {
@@ -70,12 +76,16 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "command": "cmake",
+            "command": "docker",
             "args": [
-                "--install",
-                "./build/debug",
-                "--prefix",
-                "${workspaceFolder}/build/debug"
+                "run",
+                "-it",
+                "-v",
+                "${workspaceFolder}:/project",
+                "qt-build-windows:shared.6.8.3",
+                "/bin/bash",
+                "-c",
+                "'cmake --install /project/build/debug --prefix /project/build/debug'"
             ],
             "dependsOn": [
                 "make-build-debug-windows"
@@ -150,11 +160,12 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "command": "cmake",
+            "command": "C:/Qt/Tools/CMake_64/bin/cmake.exe",
             "args": [
                 "-Bbuild/release",
                 "-GNinja",
                 "-DCMAKE_MAKE_PROGRAM=${config:NINJA_PROGRAM_WIN}",
+                "\"-DCMAKE_TOOLCHAIN_FILE:FILEPATH=../mingw-toolchain.cmake\"",
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DCMAKE_PROJECT_INCLUDE_BEFORE=${config:QT_AUTO_SETUP_WIN}",
                 "-DCMAKE_PREFIX_PATH=${config:CMAKE_PREFIX_PATH_WIN}"
@@ -167,7 +178,7 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "command": "cmake",
+            "command": "C:/Qt/Tools/CMake_64/bin/cmake.exe",
             "args": [
                 "--build",
                 "./build/release",
@@ -184,7 +195,7 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "command": "cmake",
+            "command": "C:/Qt/Tools/CMake_64/bin/cmake.exe",
             "args": [
                 "--install",
                 "./build/release",

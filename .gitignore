@@ -84,3 +84,7 @@ CMakeLists.txt.user*
 
 *.flac
 c_cpp_properties.json
+
+# aqtinstall
+# ------------
+6.8.3/
