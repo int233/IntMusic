@@ -5,10 +5,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug-windows", 
+            "name": "Debug-server-windows", 
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/debug/bin/IntMusic.exe",
+            "program": "${workspaceFolder}/build/debug/bin/IntMusicServer.exe",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

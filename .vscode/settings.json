@@ -102,7 +102,10 @@
         "__memory": "cpp",
         "qstandardpaths": "cpp",
         "qvector": "cpp",
-        "qstringlist": "cpp"
+        "qstringlist": "cpp",
+        "qdiriterator": "cpp",
+        "qsettings": "cpp",
+        "qabstractfileiconprovider": "cpp"
     },
 
     "CMAKE_TOOLCHAIN_FILE": "/opt/mxe/usr/x86_64-w64-mingw32.shared/share/cmake/mxe-conf.cmake",
@@ -110,5 +113,8 @@
     "cmake.autoSelectActiveFolder": false,
     "cmake.buildBeforeRun": false,
     "cmake.configureOnEdit": false,
-    "cmake.configureOnOpen": false
+    "cmake.configureOnOpen": false,
+    "C_Cpp.default.includePath": [
+        "C:\\Qt\\6.8.3\\mingw_64\\include\\**"
+    ]
 }

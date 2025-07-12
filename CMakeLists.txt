@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.17)
 project(IntMusic VERSION 0.1 LANGUAGES CXX)
 set(CMAKE_VERBOSE_MAKEFILE ON)
-# 设置C++标准
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 cmake_policy(SET CMP0007 NEW)
@@ -12,8 +11,8 @@ find_package(Qt6 6.8.3 REQUIRED COMPONENTS
     Core
     Gui
     Widgets
-    Multimedia
     Sql
+    Network
     LinguistTools
 )
 find_package(PkgConfig REQUIRED)
@@ -27,10 +26,9 @@ pkg_check_modules(AV REQUIRED IMPORTED_TARGET
 pkg_check_modules(MARIADB REQUIRED IMPORTED_TARGET libmariadb)
 
 qt_standard_project_setup()
-
-# 包含当前目录
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
-# 配置TagLib构建
+
+# -------------------- 配置 TagLib 构建 --------------------
 include(ExternalProject)
 set(TAGLIB_VERSION 2.0.2)
 set(TAGLIB_INSTALL_DIR ${CMAKE_BINARY_DIR}/taglib-install)
@@ -59,53 +57,100 @@ ExternalProject_Add(
     BUILD_BYPRODUCTS 
         ${TAGLIB_INSTALL_DIR}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}tag${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
+set(TAGLIB_LIBRARIES ${TAGLIB_INSTALL_DIR}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}tag${CMAKE_STATIC_LIBRARY_SUFFIX})
+set(TAGLIB_INCLUDE_DIRS ${TAGLIB_INSTALL_DIR}/include)
 
-# 添加可执行文件
+# -------------------- 配置 BASS --------------------
+set(BASS_INSTALL_DIR ${CMAKE_BINARY_DIR}/bass-install)
+set(BASS_SOURCE_DIR ${CMAKE_BINARY_DIR}/bass_project-prefix/src/bass_project)
+set(BASSFLAC_SOURCE_DIR ${CMAKE_BINARY_DIR}/bassflac_project-prefix/src/bassflac_project)
+set(BASS_INCLUDE_DIRS ${BASS_INSTALL_DIR}/include)
+set(BASS_LIB_DIR ${BASS_INSTALL_DIR}/lib)
+set(BASS_BIN_DIR ${BASS_INSTALL_DIR}/bin)
+
+ExternalProject_Add(
+    bass_project
+    URL "https://www.un4seen.com/files/bass24.zip" # Windows 版本
+    DOWNLOAD_NO_PROGRESS 1
+    SOURCE_DIR ${CMAKE_BINARY_DIR}/bass_src
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+
+    INSTALL_COMMAND
+        ${CMAKE_COMMAND} -E make_directory ${BASS_INCLUDE_DIRS} ${BASS_LIB_DIR} ${BASS_BIN_DIR} &&
+        ${CMAKE_COMMAND} -E copy ${BASS_SOURCE_DIR}/c/bass.h ${BASS_INCLUDE_DIRS}/bass.h &&
+        ${CMAKE_COMMAND} -E copy ${BASS_SOURCE_DIR}/c/x64/bass.lib ${BASS_LIB_DIR}/bass.lib &&
+        ${CMAKE_COMMAND} -E copy ${BASS_SOURCE_DIR}/x64/bass.dll ${BASS_BIN_DIR}/bass.dll
+)
+
+ExternalProject_Add(
+    bassflac_project
+    URL "https://www.un4seen.com/files/bassflac24.zip"
+    DOWNLOAD_NO_PROGRESS 1
+    CONFIGURE_COMMAND ""
+    BUILD_COMMAND ""
+    INSTALL_COMMAND
+        ${CMAKE_COMMAND} -E copy ${BASSFLAC_SOURCE_DIR}/c/bassflac.h ${BASS_INCLUDE_DIRS}/bassflac.h &&
+        ${CMAKE_COMMAND} -E copy ${BASSFLAC_SOURCE_DIR}/c/x64/bassflac.lib ${BASS_LIB_DIR}/bassflac.lib &&
+        ${CMAKE_COMMAND} -E copy ${BASSFLAC_SOURCE_DIR}/x64/bassflac.dll ${BASS_BIN_DIR}/bassflac.dll
+)
+
+set(BASS_LIBRARIES
+    ${BASS_LIB_DIR}/bass.lib
+    ${BASS_LIB_DIR}/bassflac.lib
+)
+
+# -------------------- 定义可执行文件 --------------------
 function(scan_sources dir result)
     file(GLOB_RECURSE sources "${dir}/*.cpp")
     set(${result} ${sources} PARENT_SCOPE)
 endfunction()
-scan_sources("app" INTMUSIC_SOURCES)
-qt_add_executable(IntMusic 
-    ${INTMUSIC_SOURCES} 
-    resources.qrc
-)
 
-qt_add_translations(
-    TARGETS IntMusic
-    TS_FILES IntMusic_zh_CN.ts
-)
+# --- 构建后端 Server ---
+scan_sources("src/server" SERVER_SOURCES)
+scan_sources("src/utils" UTILS_SOURCES)
+if(SERVER_SOURCES)
+    add_executable(IntMusicServer 
+        ${SERVER_SOURCES}
+        ${UTILS_SOURCES}
+        resources.qrc
+    )
+    
+    target_include_directories(IntMusicServer PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/server
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/utils
+        ${TAGLIB_INCLUDE_DIRS}
+        ${BASS_INCLUDE_DIRS}
+    )
+    target_compile_definitions(IntMusicServer PRIVATE TAGLIB_STATIC)
+    
+    target_link_libraries(IntMusicServer PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Widgets
+        Qt6::Sql
+        Qt6::Network
+        ${TAGLIB_LIBRARIES}
+        PkgConfig::AV
+        PkgConfig::MARIADB
+        # BASS
+    )
+    add_dependencies(IntMusicServer taglib)
+else()
+    message(STATUS "No sources found for server, skipping IntMusicServer target.")
+endif()
 
-# 包含目录
-target_include_directories(IntMusic PRIVATE
-    ${TAGLIB_INSTALL_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/app
-)
-
-target_compile_definitions(IntMusic PRIVATE 
-    TAGLIB_STATIC
-)
-
-# 链接库
-target_link_libraries(IntMusic PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Widgets
-    Qt6::Multimedia
-    Qt6::Sql
-    ${TAGLIB_INSTALL_DIR}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}tag${CMAKE_STATIC_LIBRARY_SUFFIX}
-
-    PkgConfig::AV
-    PkgConfig::MARIADB
-    # secur32
-)
-
-# 添加依赖关系
-add_dependencies(IntMusic taglib)
+# -------------------- 安装与部署 --------------------
 
 include(GNUInstallDirs)
 
-install(TARGETS IntMusic
+install(
+    FILES ${BASS_BIN_DIR}/bass.dll ${BASS_BIN_DIR}/bassflac.dll
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    COMPONENT Runtime
+)
+
+install(TARGETS IntMusicServer 
     BUNDLE  DESTINATION .
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -149,5 +194,5 @@ if(WIN32)
 
     endfunction()
 
-    setup_autodeploy_from_template(IntMusic)
+    setup_autodeploy_from_template(IntMusicServer)
 endif()
