@@ -1,0 +1,23 @@
+{
+  "color": {
+    "background": "#101418",
+    "surface": "#171d22",
+    "surfaceRaised": "#20272d",
+    "primary": "#49a078",
+    "accent": "#d8b15f",
+    "text": "#f2f4f3",
+    "mutedText": "#aab3b0",
+    "danger": "#d65f5f"
+  },
+  "radius": {
+    "control": 6,
+    "card": 8
+  },
+  "spacing": {
+    "xs": 4,
+    "sm": 8,
+    "md": 16,
+    "lg": 24,
+    "xl": 32
+  }
+}

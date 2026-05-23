@@ -1,0 +1,9 @@
+{
+  "name": "intmusic_harmony_client",
+  "version": "0.1.0",
+  "description": "HarmonyOS control client for IntMusic Local Music Core",
+  "main": "",
+  "author": "IntMusic contributors",
+  "license": "MIT",
+  "dependencies": {}
+}

@@ -80,9 +80,24 @@ CMakeLists.txt.user*
 .rcc/
 .uic/
 /build*/
+target/
 .cache/
 
+# Rust
+*.rlib
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+apps/client-flutter/build/
+apps/client-flutter/.dart_tool/
+packaging/dist/
+
 *.flac
+!tests/audio-fixtures/**/*.flac
+!tests/tag-fixtures/**/*.flac
 c_cpp_properties.json
 
 # aqtinstall

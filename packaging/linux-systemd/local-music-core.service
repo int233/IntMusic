@@ -1,0 +1,13 @@
+[Unit]
+Description=IntMusic Local Music Core
+After=network.target sound.target
+
+[Service]
+ExecStart=/usr/bin/local-music-core serve
+Restart=on-failure
+User=musiccore
+Group=musiccore
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

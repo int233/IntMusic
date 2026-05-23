@@ -1,6 +1,0 @@
-<RCC>
-    <qresource prefix="/">
-        <file>resource/rolecategories.txt</file>
-        <file>resource/intmusic_logo.ico</file>
-    </qresource>
-</RCC>

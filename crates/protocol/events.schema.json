@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intmusic.local/schemas/events.schema.json",
+  "title": "IntMusic WebSocket Event",
+  "type": "object",
+  "required": ["id", "type", "time", "payload"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "type": {
+      "type": "string",
+      "enum": [
+        "core.ready",
+        "scan.started",
+        "scan.progress",
+        "scan.finished",
+        "scan.problem_found",
+        "library.changed",
+        "album.updated",
+        "track.updated",
+        "zone.created",
+        "zone.removed",
+        "playback.state_changed",
+        "playback.position",
+        "playback.queue_changed",
+        "playback.signal_path_changed",
+        "output.added",
+        "output.removed",
+        "output.changed",
+        "settings.changed"
+      ]
+    },
+    "time": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  }
+}

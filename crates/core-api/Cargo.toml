@@ -1,0 +1,31 @@
+[package]
+name = "core-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+core-config = { path = "../core-config" }
+core-db = { path = "../core-db" }
+discovery = { path = "../discovery" }
+futures-util.workspace = true
+hex.workspace = true
+library-scanner = { path = "../library-scanner" }
+lofty.workspace = true
+output-cpal = { path = "../output-cpal" }
+playback = { path = "../playback" }
+protocol = { path = "../protocol" }
+search-index = { path = "../search-index" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+uuid.workspace = true

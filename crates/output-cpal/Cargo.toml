@@ -1,0 +1,14 @@
+[package]
+name = "output-cpal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+audio-engine = { path = "../audio-engine" }
+cpal.workspace = true
+protocol = { path = "../protocol" }
+serde.workspace = true
+tracing.workspace = true
