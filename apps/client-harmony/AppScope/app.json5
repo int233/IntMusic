@@ -1,0 +1,8 @@
+{
+  "app": {
+    "bundleName": "dev.intmusic.client",
+    "vendor": "intmusic",
+    "versionCode": 1,
+    "versionName": "0.1.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "module": {
+    "name": "entry",
+    "type": "entry",
+    "srcEntry": "./ets/entryability/EntryAbility.ets",
+    "description": "IntMusic HarmonyOS client",
+    "mainElement": "EntryAbility",
+    "deviceTypes": ["phone", "tablet"],
+    "pages": "$profile:main_pages",
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "IntMusic",
+        "exported": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+[workspace]
+members = [
+    "crates/audio-engine",
+    "crates/core-api",
+    "crates/core-cli",
+    "crates/core-config",
+    "crates/core-daemon",
+    "crates/core-db",
+    "crates/discovery",
+    "crates/library-scanner",
+    "crates/output-cpal",
+    "crates/output-linux",
+    "crates/output-windows",
+    "crates/playback",
+    "crates/protocol",
+    "crates/search-index",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["IntMusic contributors"]
+repository = "https://github.com/int233/MusicPlayer"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "ws"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+cpal = "0.16"
+directories = "6"
+futures-util = "0.3"
+hex = "0.4"
+lofty = "0.22"
+mdns-sd = "0.19.2"
+notify = "8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rodio = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "runtime-tokio-rustls", "sqlite", "uuid"] }
+symphonia = { version = "0.5", features = ["flac", "mp3", "pcm"] }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "0.9"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+urlencoding = "2"
+uuid = { version = "1", features = ["serde", "v4", "v7"] }
+walkdir = "2"

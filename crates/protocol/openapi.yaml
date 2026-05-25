@@ -1,0 +1,128 @@
+openapi: 3.1.0
+info:
+  title: IntMusic Local Music Core API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:49330/api/v1
+paths:
+  /status:
+    get:
+      summary: Return core status and library counts.
+      responses:
+        "200":
+          description: Core status.
+  /library/roots:
+    get:
+      summary: List library roots.
+      responses:
+        "200":
+          description: Library roots.
+    post:
+      summary: Add a library root.
+      responses:
+        "200":
+          description: Added root.
+  /scan/start:
+    post:
+      summary: Start a full library scan.
+      responses:
+        "202":
+          description: Scan accepted.
+  /albums:
+    get:
+      summary: List albums.
+      responses:
+        "200":
+          description: Paged albums.
+  /artists:
+    get:
+      summary: List artists.
+      responses:
+        "200":
+          description: Paged artists.
+  /tracks:
+    get:
+      summary: List tracks.
+      responses:
+        "200":
+          description: Paged tracks.
+  /search:
+    get:
+      summary: Search tracks, albums, and artists.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Search response.
+  /outputs:
+    get:
+      summary: List core-local and registered remote audio outputs.
+      responses:
+        "200":
+          description: Output devices.
+  /renderers:
+    get:
+      summary: List registered playback renderers.
+      responses:
+        "200":
+          description: Registered renderers.
+  /renderers/register:
+    post:
+      summary: Register or refresh a client playback renderer.
+      responses:
+        "200":
+          description: Registered renderer.
+  /renderers/{client_id}/state:
+    post:
+      summary: Report renderer playback state.
+      responses:
+        "200":
+          description: Playback state.
+  /tracks/{track_id}/stream:
+    get:
+      summary: Stream an audio file to a renderer.
+      responses:
+        "200":
+          description: Full audio stream.
+        "206":
+          description: Partial audio stream.
+  /zones:
+    get:
+      summary: List playback zones.
+      responses:
+        "200":
+          description: Playback zones.
+  /zones/play-many:
+    post:
+      summary: Start the same track on multiple zones.
+      responses:
+        "200":
+          description: Playback state for each target zone.
+  /zones/{zone_id}/play:
+    post:
+      summary: Start playback in a zone.
+      responses:
+        "200":
+          description: Playback state.
+  /zones/{zone_id}/transfer:
+    post:
+      summary: Move current playback from one zone to another.
+      responses:
+        "200":
+          description: Target and source playback states.
+  /zones/{zone_id}/pause:
+    post:
+      summary: Pause playback in a zone.
+      responses:
+        "200":
+          description: Playback state.
+  /diagnostics:
+    get:
+      summary: Return diagnostic data.
+      responses:
+        "200":
+          description: Diagnostic data.
