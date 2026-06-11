@@ -1,20 +1,69 @@
-use std::{collections::HashMap, fs::File, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fs::File,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use cpal::traits::HostTrait;
 use protocol::{PlaybackState, PlaybackTransportState};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{oneshot, RwLock};
 
 #[derive(Clone)]
 pub struct PlaybackController {
     states: Arc<RwLock<HashMap<String, PlaybackState>>>,
-    outputs: Arc<Mutex<HashMap<String, PlaybackOutput>>>,
+    worker: PlaybackWorker,
 }
 
 struct PlaybackOutput {
     _stream: OutputStream,
     sink: Sink,
+}
+
+#[derive(Clone)]
+struct PlaybackWorker {
+    tx: Arc<StdMutex<mpsc::Sender<PlaybackCommand>>>,
+}
+
+enum PlaybackCommand {
+    Snapshot {
+        zone_id: String,
+        response: oneshot::Sender<Option<OutputSnapshot>>,
+    },
+    Play {
+        zone_id: String,
+        output_id: Option<String>,
+        path: PathBuf,
+        position_ms: u64,
+        response: oneshot::Sender<Result<OutputSnapshot>>,
+    },
+    Resume {
+        zone_id: String,
+        response: oneshot::Sender<Option<OutputSnapshot>>,
+    },
+    Pause {
+        zone_id: String,
+        response: oneshot::Sender<Option<OutputSnapshot>>,
+    },
+    Stop {
+        zone_id: String,
+        response: oneshot::Sender<()>,
+    },
+    Seek {
+        zone_id: String,
+        position_ms: u64,
+        response: oneshot::Sender<Result<Option<OutputSnapshot>>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct OutputSnapshot {
+    position_ms: u64,
+    is_empty: bool,
+    is_paused: bool,
 }
 
 impl PlaybackController {
@@ -23,7 +72,7 @@ impl PlaybackController {
         states.insert("local".to_string(), stopped_state("local"));
         Self {
             states: Arc::new(RwLock::new(states)),
-            outputs: Arc::new(Mutex::new(HashMap::new())),
+            worker: PlaybackWorker::start(),
         }
     }
 
@@ -32,31 +81,22 @@ impl PlaybackController {
     }
 
     pub async fn state_for_zone(&self, zone_id: &str) -> PlaybackState {
-        let output_state = {
-            let outputs = self.outputs.lock().await;
-            outputs.get(zone_id).map(|output| {
-                (
-                    duration_millis(output.sink.get_pos()),
-                    output.sink.empty(),
-                    output.sink.is_paused(),
-                )
-            })
-        };
+        let output_state = self.worker.snapshot(zone_id).await;
 
         let mut states = self.states.write().await;
         let state = states
             .entry(zone_id.to_string())
             .or_insert_with(|| stopped_state(zone_id));
 
-        if let Some((position_ms, is_empty, is_paused)) = output_state {
-            if is_empty {
+        if let Some(snapshot) = output_state {
+            if snapshot.is_empty {
                 state.state = PlaybackTransportState::Stopped;
                 state.position_ms = 0;
                 state.track_id = None;
                 state.track_title = None;
             } else {
-                state.position_ms = position_ms;
-                state.state = if is_paused {
+                state.position_ms = snapshot.position_ms;
+                state.state = if snapshot.is_paused {
                     PlaybackTransportState::Paused
                 } else {
                     PlaybackTransportState::Playing
@@ -88,39 +128,17 @@ impl PlaybackController {
     ) -> Result<PlaybackState> {
         let path = path.as_ref().to_path_buf();
         let title = title.into();
-        let file = File::open(&path)
-            .with_context(|| format!("failed to open audio file {}", path.display()))?;
-        let source = Decoder::try_from(file)
-            .with_context(|| format!("failed to decode audio file {}", path.display()))?;
-
-        let stream = open_stream(output_id)?;
-        let sink = Sink::connect_new(stream.mixer());
-        sink.append(source);
-        if position_ms > 0 {
-            sink.try_seek(Duration::from_millis(position_ms))
-                .map_err(|error| anyhow::anyhow!("failed to seek current track: {error:?}"))?;
-        }
-        sink.play();
-
-        let mut outputs = self.outputs.lock().await;
-        if let Some(previous) = outputs.remove(zone_id) {
-            previous.sink.stop();
-        }
-        outputs.insert(
-            zone_id.to_string(),
-            PlaybackOutput {
-                _stream: stream,
-                sink,
-            },
-        );
-        drop(outputs);
+        let snapshot = self
+            .worker
+            .play(zone_id, output_id, path, position_ms)
+            .await?;
 
         let playback = PlaybackState {
             zone_id: zone_id.to_string(),
             state: PlaybackTransportState::Playing,
             track_id: Some(track_id),
             track_title: Some(title),
-            position_ms,
+            position_ms: snapshot.position_ms,
             queue_revision: 0,
         };
         self.states
@@ -135,19 +153,14 @@ impl PlaybackController {
     }
 
     pub async fn resume_zone(&self, zone_id: &str) -> PlaybackState {
-        let position_ms = if let Some(output) = self.outputs.lock().await.get(zone_id) {
-            output.sink.play();
-            Some(duration_millis(output.sink.get_pos()))
-        } else {
-            None
-        };
+        let snapshot = self.worker.resume(zone_id).await;
         let mut states = self.states.write().await;
         let state = states
             .entry(zone_id.to_string())
             .or_insert_with(|| stopped_state(zone_id));
         state.state = PlaybackTransportState::Playing;
-        if let Some(position_ms) = position_ms {
-            state.position_ms = position_ms;
+        if let Some(snapshot) = snapshot {
+            state.position_ms = snapshot.position_ms;
         }
         state.clone()
     }
@@ -157,19 +170,14 @@ impl PlaybackController {
     }
 
     pub async fn pause_zone(&self, zone_id: &str) -> PlaybackState {
-        let position_ms = if let Some(output) = self.outputs.lock().await.get(zone_id) {
-            output.sink.pause();
-            Some(duration_millis(output.sink.get_pos()))
-        } else {
-            None
-        };
+        let snapshot = self.worker.pause(zone_id).await;
         let mut states = self.states.write().await;
         let state = states
             .entry(zone_id.to_string())
             .or_insert_with(|| stopped_state(zone_id));
         state.state = PlaybackTransportState::Paused;
-        if let Some(position_ms) = position_ms {
-            state.position_ms = position_ms;
+        if let Some(snapshot) = snapshot {
+            state.position_ms = snapshot.position_ms;
         }
         state.clone()
     }
@@ -179,9 +187,7 @@ impl PlaybackController {
     }
 
     pub async fn stop_zone(&self, zone_id: &str) -> PlaybackState {
-        if let Some(output) = self.outputs.lock().await.remove(zone_id) {
-            output.sink.stop();
-        }
+        self.worker.stop(zone_id).await;
         let mut states = self.states.write().await;
         let state = states
             .entry(zone_id.to_string())
@@ -198,18 +204,233 @@ impl PlaybackController {
     }
 
     pub async fn seek_zone(&self, zone_id: &str, position_ms: u64) -> Result<PlaybackState> {
-        if let Some(output) = self.outputs.lock().await.get(zone_id) {
-            output
-                .sink
-                .try_seek(Duration::from_millis(position_ms))
-                .map_err(|error| anyhow::anyhow!("failed to seek current track: {error:?}"))?;
-        }
+        let snapshot = self.worker.seek(zone_id, position_ms).await?;
         let mut states = self.states.write().await;
         let state = states
             .entry(zone_id.to_string())
             .or_insert_with(|| stopped_state(zone_id));
-        state.position_ms = position_ms;
+        state.position_ms = snapshot.map_or(position_ms, |snapshot| snapshot.position_ms);
         Ok(state.clone())
+    }
+}
+
+impl PlaybackWorker {
+    fn start() -> Self {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("intmusic-playback".to_string())
+            .spawn(move || playback_worker_loop(rx))
+            .expect("failed to start playback worker thread");
+        Self {
+            tx: Arc::new(StdMutex::new(tx)),
+        }
+    }
+
+    async fn snapshot(&self, zone_id: &str) -> Option<OutputSnapshot> {
+        let (response, rx) = oneshot::channel();
+        if self
+            .send(PlaybackCommand::Snapshot {
+                zone_id: zone_id.to_string(),
+                response,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    async fn play(
+        &self,
+        zone_id: &str,
+        output_id: Option<&str>,
+        path: PathBuf,
+        position_ms: u64,
+    ) -> Result<OutputSnapshot> {
+        let (response, rx) = oneshot::channel();
+        self.send(PlaybackCommand::Play {
+            zone_id: zone_id.to_string(),
+            output_id: output_id.map(ToOwned::to_owned),
+            path,
+            position_ms,
+            response,
+        })?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("playback worker stopped before play completed"))?
+    }
+
+    async fn resume(&self, zone_id: &str) -> Option<OutputSnapshot> {
+        let (response, rx) = oneshot::channel();
+        if self
+            .send(PlaybackCommand::Resume {
+                zone_id: zone_id.to_string(),
+                response,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    async fn pause(&self, zone_id: &str) -> Option<OutputSnapshot> {
+        let (response, rx) = oneshot::channel();
+        if self
+            .send(PlaybackCommand::Pause {
+                zone_id: zone_id.to_string(),
+                response,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
+    async fn stop(&self, zone_id: &str) {
+        let (response, rx) = oneshot::channel();
+        if self
+            .send(PlaybackCommand::Stop {
+                zone_id: zone_id.to_string(),
+                response,
+            })
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+    }
+
+    async fn seek(&self, zone_id: &str, position_ms: u64) -> Result<Option<OutputSnapshot>> {
+        let (response, rx) = oneshot::channel();
+        self.send(PlaybackCommand::Seek {
+            zone_id: zone_id.to_string(),
+            position_ms,
+            response,
+        })?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("playback worker stopped before seek completed"))?
+    }
+
+    fn send(&self, command: PlaybackCommand) -> Result<()> {
+        let tx = self
+            .tx
+            .lock()
+            .map_err(|_| anyhow::anyhow!("playback worker channel lock is poisoned"))?;
+        tx.send(command)
+            .map_err(|_| anyhow::anyhow!("playback worker is not running"))
+    }
+}
+
+fn playback_worker_loop(rx: mpsc::Receiver<PlaybackCommand>) {
+    let mut outputs = HashMap::new();
+    while let Ok(command) = rx.recv() {
+        match command {
+            PlaybackCommand::Snapshot { zone_id, response } => {
+                let _ = response.send(outputs.get(&zone_id).map(output_snapshot));
+            }
+            PlaybackCommand::Play {
+                zone_id,
+                output_id,
+                path,
+                position_ms,
+                response,
+            } => {
+                let result = play_output(&mut outputs, zone_id, output_id, path, position_ms);
+                let _ = response.send(result);
+            }
+            PlaybackCommand::Resume { zone_id, response } => {
+                let snapshot = outputs.get(&zone_id).map(|output| {
+                    output.sink.play();
+                    output_snapshot(output)
+                });
+                let _ = response.send(snapshot);
+            }
+            PlaybackCommand::Pause { zone_id, response } => {
+                let snapshot = outputs.get(&zone_id).map(|output| {
+                    output.sink.pause();
+                    output_snapshot(output)
+                });
+                let _ = response.send(snapshot);
+            }
+            PlaybackCommand::Stop { zone_id, response } => {
+                if let Some(output) = outputs.remove(&zone_id) {
+                    output.sink.stop();
+                }
+                let _ = response.send(());
+            }
+            PlaybackCommand::Seek {
+                zone_id,
+                position_ms,
+                response,
+            } => {
+                let result = seek_output(&mut outputs, &zone_id, position_ms);
+                let _ = response.send(result);
+            }
+        }
+    }
+}
+
+fn play_output(
+    outputs: &mut HashMap<String, PlaybackOutput>,
+    zone_id: String,
+    output_id: Option<String>,
+    path: PathBuf,
+    position_ms: u64,
+) -> Result<OutputSnapshot> {
+    let file = File::open(&path)
+        .with_context(|| format!("failed to open audio file {}", path.display()))?;
+    let source = Decoder::try_from(file)
+        .with_context(|| format!("failed to decode audio file {}", path.display()))?;
+
+    let stream = open_stream(output_id.as_deref())?;
+    let sink = Sink::connect_new(stream.mixer());
+    sink.append(source);
+    if position_ms > 0 {
+        sink.try_seek(Duration::from_millis(position_ms))
+            .map_err(|error| anyhow::anyhow!("failed to seek current track: {error:?}"))?;
+    }
+    sink.play();
+
+    if let Some(previous) = outputs.remove(&zone_id) {
+        previous.sink.stop();
+    }
+    outputs.insert(
+        zone_id.clone(),
+        PlaybackOutput {
+            _stream: stream,
+            sink,
+        },
+    );
+    Ok(outputs
+        .get(&zone_id)
+        .map(output_snapshot)
+        .unwrap_or(OutputSnapshot {
+            position_ms,
+            is_empty: false,
+            is_paused: false,
+        }))
+}
+
+fn seek_output(
+    outputs: &mut HashMap<String, PlaybackOutput>,
+    zone_id: &str,
+    position_ms: u64,
+) -> Result<Option<OutputSnapshot>> {
+    let Some(output) = outputs.get(zone_id) else {
+        return Ok(None);
+    };
+    output
+        .sink
+        .try_seek(Duration::from_millis(position_ms))
+        .map_err(|error| anyhow::anyhow!("failed to seek current track: {error:?}"))?;
+    Ok(Some(output_snapshot(output)))
+}
+
+fn output_snapshot(output: &PlaybackOutput) -> OutputSnapshot {
+    OutputSnapshot {
+        position_ms: duration_millis(output.sink.get_pos()),
+        is_empty: output.sink.empty(),
+        is_paused: output.sink.is_paused(),
     }
 }
 
