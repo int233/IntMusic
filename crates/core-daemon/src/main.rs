@@ -1,14 +1,13 @@
-use std::{
-    ffi::OsString,
-    path::PathBuf,
-    sync::{Arc, Mutex, OnceLock},
-};
+use std::{ffi::OsString, path::PathBuf, sync::OnceLock};
 
 use anyhow::{Context, Result};
 use core_config::{CoreConfig, CorePaths};
-use tokio::sync::oneshot;
 use tracing_subscriber::{fmt, EnvFilter};
 
+#[cfg(windows)]
+use std::sync::{Arc, Mutex};
+#[cfg(windows)]
+use tokio::sync::oneshot;
 #[cfg(windows)]
 use windows_service::{
     define_windows_service,

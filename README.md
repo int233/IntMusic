@@ -146,6 +146,28 @@ packaging\dist\installer\IntMusic-Windows-Setup.exe
 Core + 客户端   同时安装 Core 服务和桌面客户端
 ```
 
+## 发布构建和产物归档
+
+发布构建统一归档到：
+
+```text
+packaging/dist/releases/<release-id>/
+```
+
+macOS 主机：
+
+```bash
+./scripts/build-release-artifacts.sh
+```
+
+Windows 主机：
+
+```powershell
+.\scripts\build-release-artifacts.ps1
+```
+
+更多关于 macOS 签名/公证、Android/Windows/macOS 产物结构和校验文件的信息见 [packaging/README.md](packaging/README.md)。
+
 ## 多端播放模型
 
 当前播放模型已经把 Core 和客户端都视为可播放节点：
