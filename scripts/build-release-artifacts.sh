@@ -133,6 +133,8 @@ fi
 
 if [[ -z "$OUTPUT_ROOT" ]]; then
   OUTPUT_ROOT="$REPO_ROOT/packaging/dist/releases/$RELEASE_ID"
+elif [[ "$OUTPUT_ROOT" != /* ]]; then
+  OUTPUT_ROOT="$REPO_ROOT/$OUTPUT_ROOT"
 fi
 
 mkdir -p "$OUTPUT_ROOT/android" "$OUTPUT_ROOT/linux" "$OUTPUT_ROOT/macos"

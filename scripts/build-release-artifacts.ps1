@@ -31,8 +31,11 @@ if (-not $ReleaseId) {
 if (-not $Output) {
     $Output = Join-Path $repoRoot "packaging\dist\releases\$ReleaseId"
 }
+elseif (-not [System.IO.Path]::IsPathRooted($Output)) {
+    $Output = Join-Path $repoRoot $Output
+}
 
-$releaseRoot = $Output
+$releaseRoot = [System.IO.Path]::GetFullPath($Output)
 $androidOut = Join-Path $releaseRoot "android"
 $windowsOut = Join-Path $releaseRoot "windows"
 New-Item -ItemType Directory -Force -Path $androidOut, $windowsOut | Out-Null
