@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 core-api = { path = "../core-api" }
 core-config = { path = "../core-config" }
 core-db = { path = "../core-db" }

@@ -5,11 +5,14 @@ use core_config::{CoreConfig, CorePaths};
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[cfg(windows)]
+use chrono::Utc;
+#[cfg(windows)]
 use std::{
+    backtrace::Backtrace,
     fs::{self, OpenOptions},
     io::Write,
+    panic,
     sync::{Arc, Mutex},
-    time::SystemTime,
 };
 #[cfg(windows)]
 use tokio::sync::oneshot;
@@ -56,13 +59,30 @@ fn main() -> Result<()> {
 #[cfg(windows)]
 fn service_main(_arguments: Vec<OsString>) {
     let options = RUN_OPTIONS.get().cloned().unwrap_or_default();
+    install_service_panic_hook(options.clone());
     append_service_log(&options, "service process starting");
     if let Err(error) = run_windows_service() {
-        append_service_log(&options, &format!("service failed: {error:#?}"));
+        append_service_log(
+            &options,
+            &format!("service control integration failed: {error:#?}"),
+        );
         eprintln!("IntMusicCore service failed: {error:?}");
-    } else {
-        append_service_log(&options, "service stopped");
     }
+}
+
+#[cfg(windows)]
+fn install_service_panic_hook(options: RunOptions) {
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |panic_info| {
+        append_service_log(
+            &options,
+            &format!(
+                "service panicked: {panic_info}\n{}",
+                Backtrace::force_capture()
+            ),
+        );
+        previous_hook(panic_info);
+    }));
 }
 
 #[cfg(windows)]
@@ -80,7 +100,7 @@ fn append_service_log(options: &RunOptions, message: &str) {
     }
     let log_file = data_root.join("service.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
-        let _ = writeln!(file, "[{:?}] {message}", SystemTime::now());
+        let _ = writeln!(file, "[{}] {message}", Utc::now().to_rfc3339());
     }
 }
 
@@ -115,9 +135,17 @@ fn run_windows_service() -> Result<()> {
         .context("failed to create Tokio runtime")?;
 
     status_handle.set_service_status(service_status(ServiceState::Running, 0))?;
+    let log_options = options.clone();
     let result = runtime.block_on(run_core(options, async {
         let _ = shutdown_rx.await;
     }));
+    match &result {
+        Ok(()) => append_service_log(&log_options, "Core shut down cleanly"),
+        Err(error) => append_service_log(
+            &log_options,
+            &format!("Core initialization or runtime failed: {error:#?}"),
+        ),
+    }
     status_handle.set_service_status(service_status(ServiceState::StopPending, 0))?;
 
     let exit_code = if result.is_ok() { 0 } else { 1 };

@@ -14,12 +14,17 @@ use protocol::{
     TrackPlaybackStat, TrackSummary, UpdatePlaylist, ZoneVolume,
 };
 use serde_json::Value;
+use sha2::{Digest, Sha384};
 use sqlx::{
+    migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
     QueryBuilder, Row, Sqlite, SqlitePool,
 };
+use tracing::warn;
 
 pub type DbPool = SqlitePool;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./src/migrations");
 
 pub async fn connect(database_file: &Path) -> Result<DbPool> {
     if let Some(parent) = database_file.parent() {
@@ -44,11 +49,83 @@ pub async fn connect(database_file: &Path) -> Result<DbPool> {
 }
 
 pub async fn migrate(pool: &DbPool) -> Result<()> {
-    sqlx::migrate!("./src/migrations")
+    repair_line_ending_migration_checksums(pool).await?;
+    MIGRATOR
         .run(pool)
         .await
         .context("failed to run database migrations")?;
     Ok(())
+}
+
+async fn repair_line_ending_migration_checksums(pool: &DbPool) -> Result<()> {
+    let migrations_table_exists: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = '_sqlx_migrations'
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if migrations_table_exists.is_none() {
+        return Ok(());
+    }
+
+    for migration in MIGRATOR.iter() {
+        let stored_checksum: Option<Vec<u8>> = sqlx::query_scalar(
+            r#"
+            SELECT checksum
+            FROM _sqlx_migrations
+            WHERE version = ?1 AND success = 1
+            "#,
+        )
+        .bind(migration.version)
+        .fetch_optional(pool)
+        .await?;
+        let Some(stored_checksum) = stored_checksum else {
+            continue;
+        };
+        if stored_checksum.as_slice() == migration.checksum.as_ref() {
+            continue;
+        }
+
+        let line_ending_checksums = migration_line_ending_checksums(&migration.sql);
+        if !line_ending_checksums
+            .iter()
+            .any(|checksum| checksum.as_slice() == stored_checksum)
+        {
+            continue;
+        }
+
+        let result = sqlx::query(
+            r#"
+            UPDATE _sqlx_migrations
+            SET checksum = ?1
+            WHERE version = ?2 AND success = 1 AND checksum = ?3
+            "#,
+        )
+        .bind(migration.checksum.as_ref())
+        .bind(migration.version)
+        .bind(&stored_checksum)
+        .execute(pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            warn!(
+                version = migration.version,
+                "repaired a migration checksum changed only by line endings"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn migration_line_ending_checksums(sql: &str) -> [Vec<u8>; 2] {
+    let lf = sql.replace("\r\n", "\n").replace('\r', "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    [
+        Sha384::digest(lf.as_bytes()).to_vec(),
+        Sha384::digest(crlf.as_bytes()).to_vec(),
+    ]
 }
 
 pub async fn sync_configured_roots(pool: &DbPool, roots: &[PathBuf]) -> Result<()> {
@@ -2820,6 +2897,63 @@ mod tests {
         let persisted = zone_volume(&pool, "zone-b").await.expect("get volume");
         assert_eq!(persisted.volume, 1.0);
         assert!(!persisted.muted);
+
+        close_test_pool(pool, path).await;
+    }
+
+    #[tokio::test]
+    async fn repairs_migration_checksums_changed_only_by_line_endings() {
+        let path =
+            std::env::temp_dir().join(format!("intmusic-core-db-{}.sqlite", uuid::Uuid::new_v4()));
+        let pool = connect(&path).await.expect("create test database");
+        migrate(&pool).await.expect("migrate test database");
+
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 1)
+            .expect("initial migration");
+        let alternate_checksum = migration_line_ending_checksums(&migration.sql)
+            .into_iter()
+            .find(|checksum| checksum.as_slice() != migration.checksum.as_ref())
+            .expect("alternate line-ending checksum");
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ?1 WHERE version = 1")
+            .bind(&alternate_checksum)
+            .execute(&pool)
+            .await
+            .expect("replace migration checksum");
+
+        migrate(&pool)
+            .await
+            .expect("repair line-ending migration checksum");
+
+        let repaired_checksum: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+                .fetch_one(&pool)
+                .await
+                .expect("load repaired checksum");
+        assert_eq!(repaired_checksum.as_slice(), migration.checksum.as_ref());
+
+        close_test_pool(pool, path).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_genuinely_modified_migration_checksums() {
+        let path =
+            std::env::temp_dir().join(format!("intmusic-core-db-{}.sqlite", uuid::Uuid::new_v4()));
+        let pool = connect(&path).await.expect("create test database");
+        migrate(&pool).await.expect("migrate test database");
+
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = zeroblob(48) WHERE version = 1")
+            .execute(&pool)
+            .await
+            .expect("replace migration checksum");
+
+        let error = migrate(&pool)
+            .await
+            .expect_err("a genuinely different checksum must still fail");
+        assert!(error
+            .to_string()
+            .contains("failed to run database migrations"));
 
         close_test_pool(pool, path).await;
     }

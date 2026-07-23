@@ -460,6 +460,7 @@ name = "core-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "core-api",
  "core-config",
  "core-db",
@@ -478,6 +479,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tracing",
