@@ -18,12 +18,14 @@ class _PlatformCapabilities {
     this.mediaSession = false,
     this.nativeBackdrop = false,
     this.backgroundPlayback = false,
+    this.titlebarSafeInset = 0,
   });
 
   final bool systemTray;
   final bool mediaSession;
   final bool nativeBackdrop;
   final bool backgroundPlayback;
+  final double titlebarSafeInset;
 
   factory _PlatformCapabilities.fromMap(Map<dynamic, dynamic>? value) {
     final map = value ?? const <dynamic, dynamic>{};
@@ -32,6 +34,8 @@ class _PlatformCapabilities {
       mediaSession: map['mediaSession'] == true,
       nativeBackdrop: map['nativeBackdrop'] == true,
       backgroundPlayback: map['backgroundPlayback'] == true,
+      titlebarSafeInset:
+          (map['titlebarSafeInset'] as num?)?.toDouble().clamp(0, 200) ?? 0,
     );
   }
 }
@@ -45,6 +49,7 @@ class _IntMusicPlatform {
   Future<void> Function(_PlatformCommand command)? _onCommand;
   Future<void> Function(int positionMs)? _onSeek;
   _PlatformCapabilities capabilities = const _PlatformCapabilities();
+  final ValueNotifier<double> titlebarSafeInset = ValueNotifier(0);
   bool _initialized = false;
 
   Future<_PlatformCapabilities> initialize({
@@ -68,6 +73,7 @@ class _IntMusicPlatform {
         },
       );
       capabilities = _PlatformCapabilities.fromMap(result);
+      titlebarSafeInset.value = capabilities.titlebarSafeInset;
     } on MissingPluginException {
       capabilities = const _PlatformCapabilities();
     } on PlatformException {
@@ -77,6 +83,14 @@ class _IntMusicPlatform {
   }
 
   Future<void> _handleNativeMethod(MethodCall call) async {
+    if (call.method == 'windowMetricsChanged') {
+      final raw = call.arguments;
+      final value = raw is Map ? raw['titlebarSafeInset'] : null;
+      if (value is num) {
+        titlebarSafeInset.value = value.toDouble().clamp(0, 200);
+      }
+      return;
+    }
     if (call.method == 'seek') {
       final raw = call.arguments;
       final positionMs = raw is num

@@ -28,6 +28,7 @@ class _SearchPage extends StatelessWidget {
     required this.onOpenAlbum,
     required this.onOpenArtist,
     required this.onOpenTrack,
+    required this.onOpenPlaylist,
     required this.onPlayTrack,
     required this.onToggleFavorite,
     required this.onAddToPlaylist,
@@ -43,6 +44,7 @@ class _SearchPage extends StatelessWidget {
   final Future<void> Function(int) onOpenAlbum;
   final Future<void> Function(int) onOpenArtist;
   final Future<void> Function(int) onOpenTrack;
+  final Future<void> Function(int) onOpenPlaylist;
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onAddToPlaylist;
@@ -52,6 +54,7 @@ class _SearchPage extends StatelessWidget {
     final tracks = (search?['tracks'] as List?) ?? const [];
     final albums = (search?['albums'] as List?) ?? const [];
     final artists = (search?['artists'] as List?) ?? const [];
+    final playlists = (search?['playlists'] as List?) ?? const [];
 
     return _PageFrame(
       title: 'Search results',
@@ -120,6 +123,7 @@ class _SearchPage extends StatelessWidget {
               onOpenAlbum: onOpenAlbum,
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
+              onOpenPlaylist: onOpenPlaylist,
               onPlayTrack: onPlayTrack,
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
@@ -134,6 +138,7 @@ class _SearchPage extends StatelessWidget {
               onOpenAlbum: onOpenAlbum,
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
+              onOpenPlaylist: onOpenPlaylist,
               onPlayTrack: onPlayTrack,
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
@@ -148,6 +153,22 @@ class _SearchPage extends StatelessWidget {
               onOpenAlbum: onOpenAlbum,
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
+              onOpenPlaylist: onOpenPlaylist,
+              onPlayTrack: onPlayTrack,
+              onToggleFavorite: onToggleFavorite,
+              onAddToPlaylist: onAddToPlaylist,
+            ),
+          if (scope == _SearchScope.all || scope == _SearchScope.playlists)
+            _ResultGroup(
+              coreBaseUrl: coreBaseUrl,
+              title: 'Playlists',
+              icon: Icons.queue_music_outlined,
+              items: _sortedPlaylists(playlists, sort),
+              itemKind: _ResultKind.playlist,
+              onOpenAlbum: onOpenAlbum,
+              onOpenArtist: onOpenArtist,
+              onOpenTrack: onOpenTrack,
+              onOpenPlaylist: onOpenPlaylist,
               onPlayTrack: onPlayTrack,
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
@@ -158,7 +179,7 @@ class _SearchPage extends StatelessWidget {
   }
 }
 
-enum _ResultKind { track, album, artist }
+enum _ResultKind { track, album, artist, playlist }
 
 class _ResultGroup extends StatelessWidget {
   const _ResultGroup({
@@ -170,6 +191,7 @@ class _ResultGroup extends StatelessWidget {
     required this.onOpenAlbum,
     required this.onOpenArtist,
     required this.onOpenTrack,
+    required this.onOpenPlaylist,
     required this.onPlayTrack,
     required this.onToggleFavorite,
     required this.onAddToPlaylist,
@@ -183,6 +205,7 @@ class _ResultGroup extends StatelessWidget {
   final Future<void> Function(int) onOpenAlbum;
   final Future<void> Function(int) onOpenArtist;
   final Future<void> Function(int) onOpenTrack;
+  final Future<void> Function(int) onOpenPlaylist;
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onAddToPlaylist;
@@ -216,6 +239,7 @@ class _ResultGroup extends StatelessWidget {
                       onOpenAlbum: onOpenAlbum,
                       onOpenArtist: onOpenArtist,
                       onOpenTrack: onOpenTrack,
+                      onOpenPlaylist: onOpenPlaylist,
                       onPlayTrack: onPlayTrack,
                       onToggleFavorite: onToggleFavorite,
                       onAddToPlaylist: onAddToPlaylist,
@@ -238,6 +262,7 @@ class _SearchResultRow extends StatelessWidget {
     required this.onOpenAlbum,
     required this.onOpenArtist,
     required this.onOpenTrack,
+    required this.onOpenPlaylist,
     required this.onPlayTrack,
     required this.onToggleFavorite,
     required this.onAddToPlaylist,
@@ -249,6 +274,7 @@ class _SearchResultRow extends StatelessWidget {
   final Future<void> Function(int) onOpenAlbum;
   final Future<void> Function(int) onOpenArtist;
   final Future<void> Function(int) onOpenTrack;
+  final Future<void> Function(int) onOpenPlaylist;
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onAddToPlaylist;
@@ -261,6 +287,7 @@ class _SearchResultRow extends StatelessWidget {
       _ResultKind.track => Icons.music_note_outlined,
       _ResultKind.album => Icons.album_outlined,
       _ResultKind.artist => Icons.person_outline,
+      _ResultKind.playlist => Icons.queue_music_outlined,
     };
     final trailing = switch (kind) {
       _ResultKind.track => _TrackActions(
@@ -274,11 +301,13 @@ class _SearchResultRow extends StatelessWidget {
       ),
       _ResultKind.album => const Icon(Icons.chevron_right),
       _ResultKind.artist => const Icon(Icons.chevron_right),
+      _ResultKind.playlist => const Icon(Icons.chevron_right),
     };
     final imageUrl = switch (kind) {
       _ResultKind.track => null,
       _ResultKind.album => _albumArtworkUrl(coreBaseUrl, item['id']),
       _ResultKind.artist => null,
+      _ResultKind.playlist => null,
     };
 
     return _SimpleListRow(
@@ -302,6 +331,8 @@ class _SearchResultRow extends StatelessWidget {
                   unawaited(onOpenAlbum(id));
                 case _ResultKind.artist:
                   unawaited(onOpenArtist(id));
+                case _ResultKind.playlist:
+                  unawaited(onOpenPlaylist(id));
               }
             },
     );
@@ -380,6 +411,18 @@ List<dynamic> _sortedArtists(List<dynamic> items, _SearchSort sort) {
   return sorted;
 }
 
+List<dynamic> _sortedPlaylists(List<dynamic> items, _SearchSort sort) {
+  final sorted = [...items];
+  if (sort == _SearchSort.titleAz) {
+    sorted.sort(
+      (a, b) => (_asMap(a)['name']?.toString() ?? '').compareTo(
+        _asMap(b)['name']?.toString() ?? '',
+      ),
+    );
+  }
+  return sorted;
+}
+
 class _SheetTrackRow extends StatelessWidget {
   const _SheetTrackRow({
     required this.track,
@@ -413,9 +456,9 @@ class _SheetTrackRow extends StatelessWidget {
             child: Text(
               indexLabel,
               textAlign: TextAlign.center,
-              style: Theme.of(
-                context,
-              ).textTheme.labelLarge?.copyWith(color: const Color(0xff9aa1ab)),
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
+              ),
             ),
           )
         : SizedBox(
@@ -428,7 +471,7 @@ class _SheetTrackRow extends StatelessWidget {
                     indexLabel,
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: const Color(0xff9aa1ab),
+                      color: IntMusicTheme.of(context).textSecondary,
                     ),
                   ),
                 ),

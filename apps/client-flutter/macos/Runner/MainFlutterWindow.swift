@@ -7,8 +7,21 @@ class MainFlutterWindow: NSWindow {
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
+    flutterViewController.backgroundColor = .clear
+    let materialView = NSVisualEffectView()
+    materialView.material = .sidebar
+    materialView.blendingMode = .behindWindow
+    materialView.state = .followsWindowActiveState
+    materialView.addSubview(flutterViewController.view)
+    flutterViewController.view.frame = materialView.bounds
+    flutterViewController.view.autoresizingMask = [.width, .height]
+
+    let hostViewController = NSViewController()
+    hostViewController.view = materialView
+    hostViewController.addChild(flutterViewController)
+
     let windowFrame = self.frame
-    self.contentViewController = flutterViewController
+    self.contentViewController = hostViewController
     self.setFrame(windowFrame, display: true)
 
     RegisterGeneratedPlugins(registry: flutterViewController)
@@ -24,8 +37,15 @@ class MainFlutterWindow: NSWindow {
   private func configureModernWindow() {
     titlebarAppearsTransparent = true
     titleVisibility = .hidden
+    if #available(macOS 11.0, *) {
+      titlebarSeparatorStyle = .none
+    }
     styleMask.insert(.fullSizeContentView)
-    isMovableByWindowBackground = true
+    // Treating the full-size Flutter surface as a draggable window background
+    // causes AppKit to consume mouse-down events before Flutter can complete
+    // taps. Keep dragging confined to the native title bar so Flutter controls
+    // continue to receive clicks.
+    isMovableByWindowBackground = false
     backgroundColor = .clear
     minSize = NSSize(width: 920, height: 620)
     if frame.width < 1180 || frame.height < 780 {
@@ -33,21 +53,9 @@ class MainFlutterWindow: NSWindow {
       center()
     }
 
-    let backdrop: NSView
-    if #available(macOS 26.0, *),
-       let glassType = NSClassFromString("NSGlassEffectView") as? NSView.Type {
-      // Dynamic lookup keeps the project buildable with an older Xcode while
-      // adopting the system Liquid Glass implementation on macOS 26+.
-      backdrop = glassType.init(frame: contentView?.bounds ?? .zero)
-    } else {
-      let materialView = NSVisualEffectView(frame: contentView?.bounds ?? .zero)
-      materialView.material = .underWindowBackground
-      materialView.blendingMode = .behindWindow
-      materialView.state = .active
-      backdrop = materialView
-    }
-    backdrop.autoresizingMask = [.width, .height]
-    contentView?.superview?.addSubview(backdrop, positioned: .below, relativeTo: contentView)
+    // FlutterView is hosted inside the material view rather than placed beside
+    // one. AppKit can render the semantic sidebar material without intercepting
+    // Flutter's mouse-button events.
   }
 
   override func close() {
@@ -63,6 +71,8 @@ private final class IntMusicPlatformController: NSObject {
   private var playbackState = "stopped"
   private var artworkTask: URLSessionDataTask?
   private var metadataGeneration = 0
+  private var windowMetricObservers: [NSObjectProtocol] = []
+  private var lastTitlebarSafeInset: CGFloat?
 
   init(messenger: FlutterBinaryMessenger, window: NSWindow) {
     channel = FlutterMethodChannel(
@@ -75,10 +85,14 @@ private final class IntMusicPlatformController: NSObject {
       self?.handle(call, result: result)
     }
     configureRemoteCommands()
+    observeWindowMetrics()
   }
 
   deinit {
     artworkTask?.cancel()
+    for observer in windowMetricObservers {
+      NotificationCenter.default.removeObserver(observer)
+    }
     MPRemoteCommandCenter.shared().playCommand.removeTarget(self)
     MPRemoteCommandCenter.shared().pauseCommand.removeTarget(self)
     MPRemoteCommandCenter.shared().togglePlayPauseCommand.removeTarget(self)
@@ -92,11 +106,14 @@ private final class IntMusicPlatformController: NSObject {
     switch call.method {
     case "initialize":
       configureStatusItem()
+      let titlebarSafeInset = currentTitlebarSafeInset()
+      lastTitlebarSafeInset = titlebarSafeInset
       result([
         "systemTray": true,
         "mediaSession": true,
         "nativeBackdrop": true,
         "backgroundPlayback": true,
+        "titlebarSafeInset": titlebarSafeInset,
       ])
     case "updatePlayback":
       updatePlayback(call.arguments as? [String: Any] ?? [:])
@@ -112,6 +129,46 @@ private final class IntMusicPlatformController: NSObject {
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  private func observeWindowMetrics() {
+    guard let window else { return }
+    let names: [Notification.Name] = [
+      NSWindow.didResizeNotification,
+      NSWindow.didEnterFullScreenNotification,
+      NSWindow.didExitFullScreenNotification,
+    ]
+    for name in names {
+      let observer = NotificationCenter.default.addObserver(
+        forName: name,
+        object: window,
+        queue: .main
+      ) { [weak self] _ in
+        DispatchQueue.main.async {
+          self?.publishWindowMetricsIfNeeded()
+        }
+      }
+      windowMetricObservers.append(observer)
+    }
+  }
+
+  private func currentTitlebarSafeInset() -> CGFloat {
+    guard let window, let contentView = window.contentView else { return 0 }
+    let contentRect = contentView.convert(contentView.bounds, to: nil)
+    return max(0, contentRect.maxY - window.contentLayoutRect.maxY)
+  }
+
+  private func publishWindowMetricsIfNeeded() {
+    let titlebarSafeInset = currentTitlebarSafeInset()
+    if let previous = lastTitlebarSafeInset,
+       abs(previous - titlebarSafeInset) < 0.5 {
+      return
+    }
+    lastTitlebarSafeInset = titlebarSafeInset
+    channel.invokeMethod(
+      "windowMetricsChanged",
+      arguments: ["titlebarSafeInset": titlebarSafeInset]
+    )
   }
 
   private func configureStatusItem() {

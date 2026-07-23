@@ -347,41 +347,45 @@ class IntMusicBackdrop extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
+    final usesNativeWindowMaterial =
+        Theme.of(context).platform == TargetPlatform.macOS;
     return ColoredBox(
-      color: tokens.canvas,
+      color: usesNativeWindowMaterial ? Colors.transparent : tokens.canvas,
       child: Stack(
         fit: StackFit.expand,
         children: [
-          IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(-0.78, -0.92),
-                  radius: 1.22,
-                  colors: [
-                    tokens.accent.withValues(alpha: 0.16),
-                    tokens.accentWarm.withValues(alpha: 0.04),
-                    Colors.transparent,
-                  ],
-                  stops: const [0, 0.42, 1],
+          if (!usesNativeWindowMaterial) ...[
+            IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: RadialGradient(
+                    center: const Alignment(-0.78, -0.92),
+                    radius: 1.22,
+                    colors: [
+                      tokens.accent.withValues(alpha: 0.16),
+                      tokens.accentWarm.withValues(alpha: 0.04),
+                      Colors.transparent,
+                    ],
+                    stops: const [0, 0.42, 1],
+                  ),
                 ),
               ),
             ),
-          ),
-          IgnorePointer(
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: RadialGradient(
-                  center: const Alignment(0.92, 0.8),
-                  radius: 1.05,
-                  colors: [
-                    const Color(0xff635bff).withValues(alpha: 0.1),
-                    Colors.transparent,
-                  ],
+            IgnorePointer(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: RadialGradient(
+                    center: const Alignment(0.92, 0.8),
+                    radius: 1.05,
+                    colors: [
+                      const Color(0xff635bff).withValues(alpha: 0.1),
+                      Colors.transparent,
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
+          ],
           child,
         ],
       ),

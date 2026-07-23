@@ -1,5 +1,104 @@
 part of '../main.dart';
 
+class _AnimatedSidebarShell extends StatefulWidget {
+  const _AnimatedSidebarShell({
+    required this.expanded,
+    required this.sidebar,
+    required this.content,
+  });
+
+  final bool expanded;
+  final Widget sidebar;
+  final Widget content;
+
+  @override
+  State<_AnimatedSidebarShell> createState() => _AnimatedSidebarShellState();
+}
+
+class _AnimatedSidebarShellState extends State<_AnimatedSidebarShell>
+    with SingleTickerProviderStateMixin {
+  static const _duration = Duration(milliseconds: 240);
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: _duration,
+    reverseDuration: _duration,
+    value: widget.expanded ? 1 : 0,
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
+      _controller.value = widget.expanded ? 1 : 0;
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedSidebarShell oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.expanded == widget.expanded) {
+      return;
+    }
+    if (MediaQuery.maybeOf(context)?.disableAnimations ?? false) {
+      _controller.value = widget.expanded ? 1 : 0;
+    } else if (widget.expanded) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final progress = Curves.easeInOutCubic.transform(_controller.value);
+        return Row(
+          children: [
+            ClipRect(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                widthFactor: progress,
+                child: Transform.translate(
+                  offset: Offset(-20 * (1 - progress), 0),
+                  child: Opacity(
+                    opacity: progress,
+                    child: ExcludeSemantics(
+                      excluding: !widget.expanded,
+                      child: IgnorePointer(
+                        ignoring: !widget.expanded,
+                        child: widget.sidebar,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            ClipRect(
+              child: Align(
+                alignment: Alignment.centerLeft,
+                widthFactor: progress,
+                child: Opacity(
+                  opacity: progress,
+                  child: const VerticalDivider(width: 1),
+                ),
+              ),
+            ),
+            Expanded(child: widget.content),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _PlaybackBar extends StatelessWidget {
   const _PlaybackBar({
     required this.coreBaseUrl,
@@ -139,7 +238,11 @@ class _PlaybackBar extends StatelessWidget {
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: const Color(0xffa9b0ba)),
+                                  ?.copyWith(
+                                    color: IntMusicTheme.of(
+                                      context,
+                                    ).textSecondary,
+                                  ),
                             ),
                           ],
                         ),
@@ -380,45 +483,82 @@ class _AppTopBar extends StatelessWidget {
   const _AppTopBar({
     required this.title,
     required this.desktop,
+    required this.canGoBack,
+    required this.canGoForward,
+    required this.onBack,
+    required this.onForward,
     required this.searchController,
     required this.searchSuggestions,
     required this.onOpenMenu,
     required this.onSearchChanged,
     required this.onSubmitSearch,
     required this.onSelectSuggestion,
+    required this.recentSearches,
+    required this.onSelectRecentSearch,
     required this.onClearSearch,
   });
 
   final String title;
   final bool desktop;
+  final bool canGoBack;
+  final bool canGoForward;
+  final VoidCallback onBack;
+  final VoidCallback onForward;
   final TextEditingController searchController;
   final List<_SearchSuggestion> searchSuggestions;
   final void Function(BuildContext) onOpenMenu;
   final ValueChanged<String> onSearchChanged;
   final ValueChanged<String> onSubmitSearch;
   final ValueChanged<_SearchSuggestion> onSelectSuggestion;
+  final List<String> recentSearches;
+  final ValueChanged<String> onSelectRecentSearch;
   final VoidCallback onClearSearch;
 
   @override
   Widget build(BuildContext context) {
+    final motionDuration =
+        MediaQuery.maybeOf(context)?.disableAnimations ?? false
+        ? Duration.zero
+        : const Duration(milliseconds: 240);
     return Container(
       height: 66,
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
       decoration: BoxDecoration(
         color: IntMusicTheme.of(context).canvas.withValues(alpha: 0.42),
-        border: Border(
-          bottom: BorderSide(color: IntMusicTheme.of(context).stroke),
-        ),
+        border: Platform.isMacOS
+            ? null
+            : Border(
+                bottom: BorderSide(color: IntMusicTheme.of(context).stroke),
+              ),
       ),
       child: Row(
         children: [
-          ConstrainedBox(
+          _AppTooltip(
+            message: _tr(context, 'Back'),
+            child: IconButton(
+              key: const Key('navigation-back'),
+              onPressed: canGoBack ? onBack : null,
+              icon: const Icon(Icons.chevron_left),
+            ),
+          ),
+          _AppTooltip(
+            message: _tr(context, 'Forward'),
+            child: IconButton(
+              key: const Key('navigation-forward'),
+              onPressed: canGoForward ? onForward : null,
+              icon: const Icon(Icons.chevron_right),
+            ),
+          ),
+          const SizedBox(width: 6),
+          AnimatedContainer(
+            duration: motionDuration,
+            curve: Curves.easeInOutCubic,
             constraints: BoxConstraints(
-              minWidth: desktop ? 180 : 92,
-              maxWidth: desktop ? 280 : 136,
+              minWidth: desktop ? 140 : 72,
+              maxWidth: desktop ? 240 : 116,
             ),
             child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 180),
+              duration: motionDuration,
               switchInCurve: Curves.easeOutCubic,
               switchOutCurve: Curves.easeInCubic,
               transitionBuilder: (child, animation) =>
@@ -434,18 +574,30 @@ class _AppTopBar extends StatelessWidget {
               ),
             ),
           ),
-          if (!desktop) ...[
-            const SizedBox(width: 8),
-            Builder(
-              builder: (buttonContext) => _AppTooltip(
-                message: _tr(context, 'Menu'),
-                child: IconButton(
-                  onPressed: () => onOpenMenu(buttonContext),
-                  icon: const Icon(Icons.menu),
+          AnimatedCrossFade(
+            duration: motionDuration,
+            sizeCurve: Curves.easeInOutCubic,
+            alignment: Alignment.centerLeft,
+            crossFadeState: desktop
+                ? CrossFadeState.showFirst
+                : CrossFadeState.showSecond,
+            firstChild: const SizedBox.shrink(),
+            secondChild: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(width: 8),
+                Builder(
+                  builder: (buttonContext) => _AppTooltip(
+                    message: _tr(context, 'Menu'),
+                    child: IconButton(
+                      onPressed: () => onOpenMenu(buttonContext),
+                      icon: const Icon(Icons.menu),
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: ConstrainedBox(
@@ -453,9 +605,11 @@ class _AppTopBar extends StatelessWidget {
               child: _SearchBox(
                 controller: searchController,
                 suggestions: searchSuggestions,
+                recentSearches: recentSearches,
                 onChanged: onSearchChanged,
                 onSubmitted: onSubmitSearch,
                 onSelected: onSelectSuggestion,
+                onRecentSelected: onSelectRecentSearch,
                 onClear: onClearSearch,
               ),
             ),
@@ -470,17 +624,21 @@ class _SearchBox extends StatefulWidget {
   const _SearchBox({
     required this.controller,
     required this.suggestions,
+    required this.recentSearches,
     required this.onChanged,
     required this.onSubmitted,
     required this.onSelected,
+    required this.onRecentSelected,
     required this.onClear,
   });
 
   final TextEditingController controller;
   final List<_SearchSuggestion> suggestions;
+  final List<String> recentSearches;
   final ValueChanged<String> onChanged;
   final ValueChanged<String> onSubmitted;
   final ValueChanged<_SearchSuggestion> onSelected;
+  final ValueChanged<String> onRecentSelected;
   final VoidCallback onClear;
 
   @override
@@ -502,9 +660,8 @@ class _SearchBoxState extends State<_SearchBox> {
   @override
   void didUpdateWidget(covariant _SearchBox oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.suggestions != widget.suggestions) {
-      _scheduleOverlaySync();
-    } else {
+    if (oldWidget.suggestions != widget.suggestions ||
+        oldWidget.recentSearches != widget.recentSearches) {
       _scheduleOverlaySync();
     }
   }
@@ -531,10 +688,12 @@ class _SearchBoxState extends State<_SearchBox> {
   }
 
   void _syncOverlay() {
+    final hasQuery = widget.controller.text.trim().isNotEmpty;
     final shouldShow =
         _focusNode.hasFocus &&
-        widget.controller.text.trim().isNotEmpty &&
-        widget.suggestions.isNotEmpty;
+        (hasQuery
+            ? widget.suggestions.isNotEmpty
+            : widget.recentSearches.isNotEmpty);
     if (!shouldShow) {
       _hideOverlay();
       return;
@@ -556,6 +715,7 @@ class _SearchBoxState extends State<_SearchBox> {
     final box = this.context.findRenderObject() as RenderBox?;
     final width = box?.size.width ?? 360;
     final language = _LocaleScope.languageOf(this.context);
+    final hasQuery = widget.controller.text.trim().isNotEmpty;
     return Positioned.fill(
       child: IgnorePointer(
         ignoring: false,
@@ -571,7 +731,7 @@ class _SearchBoxState extends State<_SearchBox> {
               language: language,
               child: Builder(
                 builder: (context) => Material(
-                  color: appSurface,
+                  color: IntMusicTheme.of(context).surface,
                   elevation: 18,
                   shadowColor: Colors.black.withValues(alpha: 0.28),
                   borderRadius: BorderRadius.circular(10),
@@ -587,21 +747,37 @@ class _SearchBoxState extends State<_SearchBox> {
                           Padding(
                             padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
                             child: Text(
-                              _tr(context, 'Suggestions'),
+                              _tr(
+                                context,
+                                hasQuery ? 'Suggestions' : 'Recent searches',
+                              ),
                               style: Theme.of(context).textTheme.labelLarge,
                             ),
                           ),
-                          for (final suggestion in widget.suggestions.take(8))
-                            _SimpleListRow(
-                              leading: Icon(suggestion.icon),
-                              title: suggestion.title,
-                              subtitle: suggestion.subtitle,
-                              height: 54,
-                              onTap: () {
-                                _hideOverlay();
-                                widget.onSelected(suggestion);
-                              },
-                            ),
+                          if (hasQuery)
+                            for (final suggestion in widget.suggestions.take(8))
+                              _SimpleListRow(
+                                leading: Icon(suggestion.icon),
+                                title: suggestion.title,
+                                subtitle: suggestion.subtitle,
+                                height: 54,
+                                onTap: () {
+                                  _hideOverlay();
+                                  widget.onSelected(suggestion);
+                                },
+                              )
+                          else
+                            for (final query in widget.recentSearches)
+                              _SimpleListRow(
+                                leading: const Icon(Icons.history),
+                                title: query,
+                                subtitle: '',
+                                height: 48,
+                                onTap: () {
+                                  _hideOverlay();
+                                  widget.onRecentSelected(query);
+                                },
+                              ),
                         ],
                       ),
                     ),
@@ -713,6 +889,7 @@ class _AppSidebar extends StatelessWidget {
     required this.loading,
     required this.error,
     required this.playback,
+    required this.titlebarSafeInset,
     required this.onSelected,
   });
 
@@ -722,6 +899,7 @@ class _AppSidebar extends StatelessWidget {
   final bool loading;
   final String? error;
   final Map<String, dynamic>? playback;
+  final double titlebarSafeInset;
   final ValueChanged<int> onSelected;
 
   @override
@@ -738,11 +916,14 @@ class _AppSidebar extends StatelessWidget {
       error: error,
       playback: playback,
     );
-
     return Padding(
-      padding: const EdgeInsets.fromLTRB(10, 10, 4, 10),
+      padding: EdgeInsets.fromLTRB(10, 10 + titlebarSafeInset, 4, 10),
       child: IntMusicGlass(
+        key: const Key('app-sidebar-glass'),
         blur: 32,
+        tint: Platform.isMacOS
+            ? IntMusicTheme.of(context).surfaceGlass.withValues(alpha: 0.58)
+            : null,
         borderRadius: BorderRadius.circular(22),
         child: SizedBox(
           width: _sidebarWidth - 14,
@@ -798,7 +979,11 @@ class _AppSidebar extends StatelessWidget {
                           Text(
                             '${counts['tracks'] ?? 0} ${_tr(context, 'Tracks').toLowerCase()}',
                             style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: const Color(0xff9aa1ab)),
+                                ?.copyWith(
+                                  color: IntMusicTheme.of(
+                                    context,
+                                  ).textSecondary,
+                                ),
                           ),
                         ],
                       ),
@@ -832,9 +1017,9 @@ class _AppSidebar extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
                 child: DecoratedBox(
                   decoration: BoxDecoration(
-                    color: appSurfaceHigh,
+                    color: IntMusicTheme.of(context).surfaceRaised,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: appBorder),
+                    border: Border.all(color: IntMusicTheme.of(context).stroke),
                   ),
                   child: Padding(
                     padding: const EdgeInsets.all(12),
@@ -886,8 +1071,11 @@ class _SidebarItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
     return Material(
-      color: selected ? appPrimary.withValues(alpha: 0.14) : Colors.transparent,
+      color: selected
+          ? tokens.accent.withValues(alpha: 0.14)
+          : Colors.transparent,
       borderRadius: BorderRadius.circular(12),
       child: InkWell(
         onTap: onTap,
@@ -901,7 +1089,7 @@ class _SidebarItem extends StatelessWidget {
                 Icon(
                   icon,
                   size: 21,
-                  color: selected ? appPrimary : const Color(0xffb8bec7),
+                  color: selected ? tokens.accent : tokens.textSecondary,
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -910,7 +1098,7 @@ class _SidebarItem extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      color: selected ? Colors.white : const Color(0xffc5cad1),
+                      color: selected ? tokens.accent : tokens.textSecondary,
                       fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
                     ),
                   ),
@@ -939,9 +1127,9 @@ class _MiniStat extends StatelessWidget {
           Expanded(
             child: Text(
               label,
-              style: Theme.of(
-                context,
-              ).textTheme.bodySmall?.copyWith(color: const Color(0xff9aa1ab)),
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
+              ),
             ),
           ),
           Text(value, style: Theme.of(context).textTheme.bodySmall),

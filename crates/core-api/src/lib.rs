@@ -843,11 +843,25 @@ async fn search(
 ) -> ApiResult<SearchResponse> {
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let config = state.config();
+    let normalized_query = query.q.to_lowercase();
+    let playlists =
+        core_db::list_playlists(state.pool(), config.favorites.treat_max_rating_as_favorite)
+            .await?
+            .into_iter()
+            .filter(|playlist| {
+                playlist.name.to_lowercase().contains(&normalized_query)
+                    || playlist.description.as_deref().is_some_and(|description| {
+                        description.to_lowercase().contains(&normalized_query)
+                    })
+            })
+            .take(limit as usize)
+            .collect();
     let mut response = SearchResponse {
         query: query.q.clone(),
         tracks: core_db::search_tracks(state.pool(), &query.q, limit).await?,
         albums: core_db::search_albums(state.pool(), &query.q, limit).await?,
         artists: core_db::search_artists(state.pool(), &query.q, limit).await?,
+        playlists,
     };
     apply_favorite_settings_to_tracks(&config.favorites, &mut response.tracks);
     Ok(Json(response))

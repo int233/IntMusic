@@ -618,9 +618,9 @@ class _PlaybackTrackHeader extends StatelessWidget {
               _joinParts([artist, album]),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyLarge?.copyWith(color: const Color(0xffb9c0cb)),
+              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
+              ),
             ),
           ],
         ),
@@ -1084,9 +1084,9 @@ class _LyricsPanelState extends State<_LyricsPanel> {
 
     return DecoratedBox(
       decoration: BoxDecoration(
-        border: Border.all(color: const Color(0xff2a3238)),
+        border: Border.all(color: IntMusicTheme.of(context).stroke),
         borderRadius: BorderRadius.circular(8),
-        color: const Color(0xff12171b),
+        color: IntMusicTheme.of(context).surface,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1302,11 +1302,11 @@ class _ZonesPanel extends StatelessWidget {
       });
 
     return Material(
-      color: appSurface,
+      color: IntMusicTheme.of(context).surface,
       clipBehavior: Clip.antiAlias,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(8),
-        side: const BorderSide(color: appBorder),
+        side: BorderSide(color: IntMusicTheme.of(context).stroke),
       ),
       child: Column(
         children: [
@@ -1338,7 +1338,7 @@ class _ZonesPanel extends StatelessWidget {
                   child: Text(
                     group.key,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: const Color(0xff9aa1ab),
+                      color: IntMusicTheme.of(context).textSecondary,
                     ),
                   ),
                 ),
@@ -1401,7 +1401,9 @@ class _ZoneTile extends StatelessWidget {
     final canMoveHere = isOnline && hasActiveTrack && activeZoneId != zoneId;
 
     return Material(
-      color: isActive ? appPlaying.withValues(alpha: 0.08) : Colors.transparent,
+      color: isActive
+          ? IntMusicTheme.of(context).playing.withValues(alpha: 0.08)
+          : Colors.transparent,
       child: InkWell(
         onTap: () => unawaited(onSelect(zone)),
         child: Padding(
@@ -1427,7 +1429,9 @@ class _ZoneTile extends StatelessWidget {
               );
               final leading = Icon(
                 _zoneStateIcon(state),
-                color: isActive ? appPlaying : const Color(0xffc4cbd3),
+                color: isActive
+                    ? IntMusicTheme.of(context).playing
+                    : IntMusicTheme.of(context).textSecondary,
               );
               if (compact) {
                 return Column(
@@ -1479,9 +1483,9 @@ class _ZoneTileText extends StatelessWidget {
           _zoneSubtitle(zone),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: Theme.of(
-            context,
-          ).textTheme.bodySmall?.copyWith(color: const Color(0xff9ea5ae)),
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: IntMusicTheme.of(context).textSecondary,
+          ),
         ),
       ],
     );
@@ -1845,6 +1849,8 @@ class _QueueSheet extends StatefulWidget {
     required this.onPlayTrack,
     required this.onMove,
     required this.onRemove,
+    required this.onClearUpcoming,
+    required this.onClearAll,
   });
 
   final String coreBaseUrl;
@@ -1853,6 +1859,8 @@ class _QueueSheet extends StatefulWidget {
   final Future<void> Function(int) onPlayTrack;
   final Future<Map<String, dynamic>?> Function(int, int) onMove;
   final Future<Map<String, dynamic>?> Function(int) onRemove;
+  final Future<Map<String, dynamic>?> Function() onClearUpcoming;
+  final Future<Map<String, dynamic>?> Function() onClearAll;
 
   @override
   State<_QueueSheet> createState() => _QueueSheetState();
@@ -1904,6 +1912,23 @@ class _QueueSheetState extends State<_QueueSheet> {
     });
   }
 
+  Future<void> _clear({required bool all}) async {
+    if (_mutating) {
+      return;
+    }
+    setState(() => _mutating = true);
+    final queue = await (all ? widget.onClearAll() : widget.onClearUpcoming());
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      if (queue != null) {
+        _applyQueue(queue);
+      }
+      _mutating = false;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return SizedBox(
@@ -1913,9 +1938,36 @@ class _QueueSheetState extends State<_QueueSheet> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              _tr(context, 'Queue'),
-              style: Theme.of(context).textTheme.titleLarge,
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _tr(context, 'Queue'),
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                ),
+                TextButton(
+                  onPressed: _mutating || _items.isEmpty
+                      ? null
+                      : () => unawaited(_clear(all: false)),
+                  child: Text(_tr(context, 'Clear upcoming')),
+                ),
+                PopupMenuButton<bool>(
+                  enabled: !_mutating && _items.isNotEmpty,
+                  tooltip: _tr(context, 'More'),
+                  icon: const Icon(Icons.more_horiz),
+                  onSelected: (all) => unawaited(_clear(all: all)),
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: true,
+                      child: ListTile(
+                        leading: const Icon(Icons.delete_sweep_outlined),
+                        title: Text(_tr(context, 'Clear all')),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
             const SizedBox(height: 4),
             Text(
@@ -1945,15 +1997,17 @@ class _QueueSheetState extends State<_QueueSheet> {
                           key: ValueKey(itemId ?? 'queue-$index-$id'),
                           decoration: BoxDecoration(
                             color: isCurrent
-                                ? appPrimary.withValues(alpha: 0.1)
+                                ? IntMusicTheme.of(
+                                    context,
+                                  ).accent.withValues(alpha: 0.1)
                                 : Colors.transparent,
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: _SimpleListRow(
                             leading: isCurrent
-                                ? const Icon(
+                                ? Icon(
                                     Icons.graphic_eq_rounded,
-                                    color: appPlaying,
+                                    color: IntMusicTheme.of(context).playing,
                                   )
                                 : _ArtworkTile(
                                     title: title,

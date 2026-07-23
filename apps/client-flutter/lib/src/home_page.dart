@@ -10,6 +10,8 @@ class _HomePage extends StatelessWidget {
     required this.stats,
     required this.history,
     required this.onNavigate,
+    required this.onOpenTrack,
+    required this.onPlayTrack,
   });
 
   final String coreBaseUrl;
@@ -20,6 +22,8 @@ class _HomePage extends StatelessWidget {
   final Map<String, dynamic>? stats;
   final List<dynamic> history;
   final ValueChanged<int> onNavigate;
+  final Future<void> Function(int) onOpenTrack;
+  final Future<void> Function(int) onPlayTrack;
 
   @override
   Widget build(BuildContext context) {
@@ -58,6 +62,8 @@ class _HomePage extends StatelessWidget {
               _HomeRecentPanel(
                 history: history,
                 onOpenHistory: () => onNavigate(6),
+                onOpenTrack: onOpenTrack,
+                onPlayTrack: onPlayTrack,
               ),
             ],
           );
@@ -217,7 +223,7 @@ class _HomeNowPlayingCard extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: const Color(0xffa8afb8),
+                    color: IntMusicTheme.of(context).textSecondary,
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -393,10 +399,17 @@ class _HomeStatsPanel extends StatelessWidget {
 }
 
 class _HomeRecentPanel extends StatelessWidget {
-  const _HomeRecentPanel({required this.history, required this.onOpenHistory});
+  const _HomeRecentPanel({
+    required this.history,
+    required this.onOpenHistory,
+    required this.onOpenTrack,
+    required this.onPlayTrack,
+  });
 
   final List<dynamic> history;
   final VoidCallback onOpenHistory;
+  final Future<void> Function(int) onOpenTrack;
+  final Future<void> Function(int) onPlayTrack;
 
   @override
   Widget build(BuildContext context) {
@@ -417,7 +430,11 @@ class _HomeRecentPanel extends StatelessWidget {
           : Column(
               children: [
                 for (var index = 0; index < events.length; index++) ...[
-                  _RecentEventRow(event: events[index]),
+                  _RecentEventRow(
+                    event: events[index],
+                    onOpenTrack: onOpenTrack,
+                    onPlayTrack: onPlayTrack,
+                  ),
                   if (index != events.length - 1) const Divider(height: 1),
                 ],
               ],
@@ -470,9 +487,9 @@ class _CompactStat extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: appSurfaceHigh,
+        color: IntMusicTheme.of(context).surfaceRaised,
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: appBorder),
+        border: Border.all(color: IntMusicTheme.of(context).stroke),
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -481,9 +498,9 @@ class _CompactStat extends StatelessWidget {
           children: [
             Text(
               label,
-              style: Theme.of(
-                context,
-              ).textTheme.labelMedium?.copyWith(color: const Color(0xff9aa1ab)),
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
+              ),
             ),
             const SizedBox(height: 5),
             Text(value, style: Theme.of(context).textTheme.titleMedium),
@@ -510,7 +527,9 @@ class _DeviceSummaryRow extends StatelessWidget {
           Icon(
             _zoneStateIcon(state),
             size: 20,
-            color: state == 'playing' ? appPlaying : const Color(0xffb8bec7),
+            color: state == 'playing'
+                ? IntMusicTheme.of(context).playing
+                : IntMusicTheme.of(context).textSecondary,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -529,7 +548,7 @@ class _DeviceSummaryRow extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: const Color(0xff9aa1ab),
+                    color: IntMusicTheme.of(context).textSecondary,
                   ),
                 ),
               ],
@@ -542,47 +561,40 @@ class _DeviceSummaryRow extends StatelessWidget {
 }
 
 class _RecentEventRow extends StatelessWidget {
-  const _RecentEventRow({required this.event});
+  const _RecentEventRow({
+    required this.event,
+    this.onOpenTrack,
+    this.onPlayTrack,
+  });
 
   final Map<String, dynamic> event;
+  final Future<void> Function(int)? onOpenTrack;
+  final Future<void> Function(int)? onPlayTrack;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-      child: Row(
-        children: [
-          Icon(_historyEventIcon(event['event_type']), size: 20),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  _joinParts([
-                    event['track_title'] ?? 'Track ${event['track_id']}',
-                    event['event_type'],
-                  ]),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  _joinParts([
-                    event['zone_id'],
-                    _formatDuration(event['position_ms']),
-                    event['created_at'],
-                  ]),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: const Color(0xff9aa1ab),
-                  ),
-                ),
-              ],
+    final trackId = _intValue(event['track_id']);
+    return _SimpleListRow(
+      leading: Icon(_historyEventIcon(event['event_type']), size: 20),
+      title: _joinParts([
+        event['track_title'] ?? 'Track ${event['track_id']}',
+        event['event_type'],
+      ]),
+      subtitle: _joinParts([
+        event['zone_id'],
+        _formatDuration(event['position_ms']),
+        event['created_at'],
+      ]),
+      trailing: trackId == null || onPlayTrack == null
+          ? null
+          : IconButton(
+              tooltip: _tr(context, 'Play'),
+              onPressed: () => unawaited(onPlayTrack!(trackId)),
+              icon: const Icon(Icons.play_arrow),
             ),
-          ),
-        ],
-      ),
+      onTap: trackId == null || onOpenTrack == null
+          ? null
+          : () => unawaited(onOpenTrack!(trackId)),
     );
   }
 }
@@ -592,16 +604,21 @@ class _TopTrackRow extends StatelessWidget {
     required this.coreBaseUrl,
     required this.track,
     required this.rank,
+    this.onOpenTrack,
+    this.onPlayTrack,
   });
 
   final String coreBaseUrl;
   final Map<String, dynamic> track;
   final int rank;
+  final Future<void> Function(int)? onOpenTrack;
+  final Future<void> Function(int)? onPlayTrack;
 
   @override
   Widget build(BuildContext context) {
     final title = track['title']?.toString() ?? 'Untitled';
     final artist = track['artist_display']?.toString() ?? 'Unknown Artist';
+    final trackId = _intValue(track['id']);
     return _SimpleListRow(
       leading: SizedBox(
         width: 32,
@@ -609,7 +626,7 @@ class _TopTrackRow extends StatelessWidget {
           '$rank',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.titleSmall?.copyWith(
-            color: const Color(0xff9aa1ab),
+            color: IntMusicTheme.of(context).textSecondary,
             fontWeight: FontWeight.w700,
           ),
         ),
@@ -621,13 +638,27 @@ class _TopTrackRow extends StatelessWidget {
         '${track['play_count'] ?? 0} plays',
         _formatDuration(track['total_played_ms']),
       ]),
-      trailing: _ArtworkTile(
-        title: title,
-        subtitle: artist,
-        size: 38,
-        icon: Icons.music_note_outlined,
-        imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _ArtworkTile(
+            title: title,
+            subtitle: artist,
+            size: 38,
+            icon: Icons.music_note_outlined,
+            imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
+          ),
+          if (trackId != null && onPlayTrack != null)
+            IconButton(
+              tooltip: _tr(context, 'Play'),
+              onPressed: () => unawaited(onPlayTrack!(trackId)),
+              icon: const Icon(Icons.play_arrow),
+            ),
+        ],
       ),
+      onTap: trackId == null || onOpenTrack == null
+          ? null
+          : () => unawaited(onOpenTrack!(trackId)),
     );
   }
 }

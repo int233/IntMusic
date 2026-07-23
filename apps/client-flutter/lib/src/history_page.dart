@@ -5,11 +5,15 @@ class _HistoryPage extends StatelessWidget {
     required this.coreBaseUrl,
     required this.stats,
     required this.events,
+    required this.onOpenTrack,
+    required this.onPlayTrack,
   });
 
   final String coreBaseUrl;
   final Map<String, dynamic>? stats;
   final List<dynamic> events;
+  final Future<void> Function(int) onOpenTrack;
+  final Future<void> Function(int) onPlayTrack;
 
   @override
   Widget build(BuildContext context) {
@@ -72,6 +76,8 @@ class _HistoryPage extends StatelessWidget {
                           track: (topTracks[index] as Map)
                               .cast<String, dynamic>(),
                           rank: index + 1,
+                          onOpenTrack: onOpenTrack,
+                          onPlayTrack: onPlayTrack,
                         ),
                         if (index != topTracks.take(20).length - 1)
                           const Divider(height: 1),
@@ -95,7 +101,11 @@ class _HistoryPage extends StatelessWidget {
                         index < eventMaps.length;
                         index++
                       ) ...[
-                        _RecentEventRow(event: eventMaps[index]),
+                        _RecentEventRow(
+                          event: eventMaps[index],
+                          onOpenTrack: onOpenTrack,
+                          onPlayTrack: onPlayTrack,
+                        ),
                         if (index != eventMaps.length - 1)
                           const Divider(height: 1),
                       ],

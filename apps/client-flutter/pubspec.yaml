@@ -33,10 +33,17 @@ dependencies:
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
+  # Keep the mobile renderer compatible with the VS2019 Windows build host;
+  # newer audioplayers_windows releases require newer C++ coroutine support.
+  audioplayers: 6.6.0
+  audioplayers_windows: 4.3.0
   cached_network_image: ^3.4.1
   cupertino_icons: ^1.0.8
-  audioplayers: ^6.6.0
   flutter_cache_manager: ^3.4.1
+  # libmpv is used only on macOS/Windows for real output enumeration/routing.
+  media_kit: ^1.2.6
+  media_kit_libs_macos_audio: ^1.1.4
+  media_kit_libs_windows_audio: ^1.0.9
   multicast_dns: ^0.3.3
   shared_preferences: ^2.5.3
 dev_dependencies:
@@ -55,6 +62,8 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  config:
+    enable-swift-package-manager: false
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

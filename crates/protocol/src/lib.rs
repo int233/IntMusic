@@ -145,6 +145,8 @@ pub struct SearchResponse {
     pub tracks: Vec<TrackSummary>,
     pub albums: Vec<AlbumSummary>,
     pub artists: Vec<ArtistSummary>,
+    #[serde(default)]
+    pub playlists: Vec<PlaylistSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

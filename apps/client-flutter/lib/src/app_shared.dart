@@ -185,7 +185,7 @@ class _SimpleListRow extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: const Color(0xff9aa1ab),
+                        color: IntMusicTheme.of(context).textSecondary,
                       ),
                     ),
                   ],
@@ -284,6 +284,112 @@ class _DetailHeader extends StatelessWidget {
   }
 }
 
+class _CollectionActions extends StatelessWidget {
+  const _CollectionActions({required this.tracks, this.onClose});
+
+  final List<dynamic> tracks;
+  final VoidCallback? onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    final actions = _TrackActionScope.maybeOf(context);
+    final trackIds = tracks
+        .map((track) => _intValue((track as Map)['id']))
+        .whereType<int>()
+        .toList(growable: false);
+    final enabled = actions != null && trackIds.isNotEmpty;
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        FilledButton.icon(
+          onPressed: enabled
+              ? () => unawaited(actions.onPlayCollection(trackIds, false))
+              : null,
+          icon: const Icon(Icons.play_arrow),
+          label: Text(_tr(context, 'Play')),
+        ),
+        FilledButton.tonalIcon(
+          onPressed: enabled
+              ? () => unawaited(actions.onPlayCollection(trackIds, true))
+              : null,
+          icon: const Icon(Icons.shuffle),
+          label: Text(_tr(context, 'Shuffle')),
+        ),
+        PopupMenuButton<_CollectionMoreAction>(
+          enabled: enabled,
+          tooltip: _tr(context, 'More'),
+          icon: const Icon(Icons.more_horiz),
+          onSelected: (action) {
+            switch (action) {
+              case _CollectionMoreAction.playNext:
+                unawaited(actions!.onQueueCollection(trackIds, true));
+              case _CollectionMoreAction.addToQueue:
+                unawaited(actions!.onQueueCollection(trackIds, false));
+            }
+          },
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              value: _CollectionMoreAction.playNext,
+              child: ListTile(
+                leading: const Icon(Icons.playlist_play),
+                title: Text(_tr(context, 'Play next')),
+              ),
+            ),
+            PopupMenuItem(
+              value: _CollectionMoreAction.addToQueue,
+              child: ListTile(
+                leading: const Icon(Icons.queue_music),
+                title: Text(_tr(context, 'Add to queue')),
+              ),
+            ),
+          ],
+        ),
+        if (onClose != null)
+          _AppTooltip(
+            message: _tr(context, 'Close'),
+            child: IconButton.filledTonal(
+              onPressed: onClose,
+              icon: const Icon(Icons.close),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+enum _CollectionMoreAction { playNext, addToQueue }
+
+class _ResponsiveDetailHeading extends StatelessWidget {
+  const _ResponsiveDetailHeading({required this.header, required this.actions});
+
+  final Widget header;
+  final Widget actions;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 760) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [header, const SizedBox(height: 12), actions],
+          );
+        }
+        return Row(
+          children: [
+            Expanded(child: header),
+            const SizedBox(width: 12),
+            actions,
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _InfoRow extends StatelessWidget {
   const _InfoRow({required this.label, required this.value});
 
@@ -316,6 +422,193 @@ class _PageFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => child;
+}
+
+class _LibraryToolbar extends StatefulWidget {
+  const _LibraryToolbar({
+    required this.countLabel,
+    required this.searchHint,
+    required this.onQueryChanged,
+    required this.sortValue,
+    required this.sortOptions,
+    required this.onSortChanged,
+    required this.viewMode,
+    required this.onViewModeChanged,
+  });
+
+  final String countLabel;
+  final String searchHint;
+  final ValueChanged<String> onQueryChanged;
+  final String sortValue;
+  final Map<String, String> sortOptions;
+  final ValueChanged<String> onSortChanged;
+  final _LibraryViewMode viewMode;
+  final ValueChanged<_LibraryViewMode> onViewModeChanged;
+
+  @override
+  State<_LibraryToolbar> createState() => _LibraryToolbarState();
+}
+
+class _LibraryToolbarState extends State<_LibraryToolbar> {
+  final _queryController = TextEditingController();
+
+  @override
+  void dispose() {
+    _queryController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
+    final search = TextField(
+      controller: _queryController,
+      onChanged: widget.onQueryChanged,
+      decoration: InputDecoration(
+        hintText: widget.searchHint,
+        prefixIcon: const Icon(Icons.search, size: 19),
+        suffixIcon: _queryController.text.isEmpty
+            ? null
+            : IconButton(
+                tooltip: _tr(context, 'Clear'),
+                onPressed: () {
+                  _queryController.clear();
+                  widget.onQueryChanged('');
+                  setState(() {});
+                },
+                icon: const Icon(Icons.close, size: 18),
+              ),
+        isDense: true,
+      ),
+    );
+    final controls = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        PopupMenuButton<String>(
+          initialValue: widget.sortValue,
+          tooltip: _tr(context, 'Sort'),
+          onSelected: widget.onSortChanged,
+          itemBuilder: (context) => widget.sortOptions.entries
+              .map(
+                (entry) => PopupMenuItem<String>(
+                  value: entry.key,
+                  child: Row(
+                    children: [
+                      if (entry.key == widget.sortValue) ...[
+                        const Icon(Icons.check, size: 18),
+                        const SizedBox(width: 8),
+                      ] else
+                        const SizedBox(width: 26),
+                      Text(entry.value),
+                    ],
+                  ),
+                ),
+              )
+              .toList(growable: false),
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: tokens.surface,
+              border: Border.all(color: tokens.stroke),
+              borderRadius: BorderRadius.circular(tokens.radiusSmall),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.swap_vert, size: 18),
+                  const SizedBox(width: 6),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 118),
+                    child: Text(
+                      widget.sortOptions[widget.sortValue] ??
+                          _tr(context, 'Sort'),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        _ViewModeToggle(
+          value: widget.viewMode,
+          onChanged: widget.onViewModeChanged,
+        ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 720;
+        if (compact) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.countLabel,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: tokens.textSecondary,
+                      ),
+                    ),
+                  ),
+                  controls,
+                ],
+              ),
+              const SizedBox(height: 8),
+              search,
+            ],
+          );
+        }
+        return Row(
+          children: [
+            Text(
+              widget.countLabel,
+              style: Theme.of(
+                context,
+              ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
+            ),
+            const Spacer(),
+            SizedBox(width: 260, child: search),
+            const SizedBox(width: 8),
+            controls,
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ViewModeToggle extends StatelessWidget {
+  const _ViewModeToggle({required this.value, required this.onChanged});
+
+  final _LibraryViewMode value;
+  final ValueChanged<_LibraryViewMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<_LibraryViewMode>(
+      showSelectedIcon: false,
+      segments: [
+        ButtonSegment(
+          value: _LibraryViewMode.grid,
+          icon: const Icon(Icons.grid_view_rounded),
+          tooltip: _tr(context, 'Grid view'),
+        ),
+        ButtonSegment(
+          value: _LibraryViewMode.list,
+          icon: const Icon(Icons.view_list_rounded),
+          tooltip: _tr(context, 'List view'),
+        ),
+      ],
+      selected: <_LibraryViewMode>{value},
+      onSelectionChanged: (selection) => onChanged(selection.first),
+    );
+  }
 }
 
 class _AnimatedPageHost extends StatelessWidget {
@@ -395,6 +688,147 @@ class _Destination {
   final IconData selectedIcon;
 }
 
+class _TrackActionScope extends InheritedWidget {
+  const _TrackActionScope({
+    required this.onPlayNext,
+    required this.onAddToQueue,
+    required this.onPlayCollection,
+    required this.onQueueCollection,
+    required super.child,
+  });
+
+  final Future<void> Function(int trackId) onPlayNext;
+  final Future<void> Function(int trackId) onAddToQueue;
+  final Future<void> Function(List<int> trackIds, bool shuffle)
+  onPlayCollection;
+  final Future<void> Function(List<int> trackIds, bool playNext)
+  onQueueCollection;
+
+  static _TrackActionScope? maybeOf(BuildContext context) {
+    return context.dependOnInheritedWidgetOfExactType<_TrackActionScope>();
+  }
+
+  @override
+  bool updateShouldNotify(_TrackActionScope oldWidget) {
+    return onPlayNext != oldWidget.onPlayNext ||
+        onAddToQueue != oldWidget.onAddToQueue ||
+        onPlayCollection != oldWidget.onPlayCollection ||
+        onQueueCollection != oldWidget.onQueueCollection;
+  }
+}
+
+enum _AppRouteKind {
+  home,
+  albums,
+  artists,
+  tracks,
+  playlists,
+  playback,
+  history,
+  settings,
+  search,
+  track,
+  album,
+  artist,
+  playlist,
+}
+
+@immutable
+class _AppRoute {
+  const _AppRoute._(this.kind, {this.entityId, this.query});
+
+  const _AppRoute.home() : this._(_AppRouteKind.home);
+  const _AppRoute.search(String query)
+    : this._(_AppRouteKind.search, query: query);
+  const _AppRoute.track(int id) : this._(_AppRouteKind.track, entityId: id);
+  const _AppRoute.album(int id) : this._(_AppRouteKind.album, entityId: id);
+  const _AppRoute.artist(int id) : this._(_AppRouteKind.artist, entityId: id);
+  const _AppRoute.playlist(int id)
+    : this._(_AppRouteKind.playlist, entityId: id);
+
+  final _AppRouteKind kind;
+  final int? entityId;
+  final String? query;
+
+  static _AppRoute destination(int index) {
+    return _AppRoute._(switch (index) {
+      0 => _AppRouteKind.home,
+      1 => _AppRouteKind.albums,
+      2 => _AppRouteKind.artists,
+      3 => _AppRouteKind.tracks,
+      4 => _AppRouteKind.playlists,
+      5 => _AppRouteKind.playback,
+      6 => _AppRouteKind.history,
+      7 => _AppRouteKind.settings,
+      _ => _AppRouteKind.home,
+    });
+  }
+
+  int? get destinationIndex => switch (kind) {
+    _AppRouteKind.home => 0,
+    _AppRouteKind.albums => 1,
+    _AppRouteKind.artists => 2,
+    _AppRouteKind.tracks => 3,
+    _AppRouteKind.playlists => 4,
+    _AppRouteKind.playback => 5,
+    _AppRouteKind.history => 6,
+    _AppRouteKind.settings => 7,
+    _ => null,
+  };
+
+  int get animationOrder => switch (kind) {
+    _AppRouteKind.home => 0,
+    _AppRouteKind.albums => 1,
+    _AppRouteKind.artists => 2,
+    _AppRouteKind.tracks => 3,
+    _AppRouteKind.playlists => 4,
+    _AppRouteKind.playback => 5,
+    _AppRouteKind.history => 6,
+    _AppRouteKind.settings => 7,
+    _AppRouteKind.search => 8,
+    _AppRouteKind.track => 9,
+    _AppRouteKind.album => 10,
+    _AppRouteKind.artist => 11,
+    _AppRouteKind.playlist => 12,
+  };
+
+  String get animationKey => switch (kind) {
+    _AppRouteKind.search => 'search:${query ?? ''}',
+    _AppRouteKind.track => 'track-detail:${entityId ?? 0}',
+    _AppRouteKind.album => 'album-detail:${entityId ?? 0}',
+    _AppRouteKind.artist => 'artist-detail:${entityId ?? 0}',
+    _AppRouteKind.playlist => 'playlist-detail:${entityId ?? 0}',
+    _ => 'page:${destinationIndex ?? kind.name}',
+  };
+
+  String get title => switch (kind) {
+    _AppRouteKind.home => 'Home',
+    _AppRouteKind.albums => 'Albums',
+    _AppRouteKind.artists => 'Artists',
+    _AppRouteKind.tracks => 'Tracks',
+    _AppRouteKind.playlists => 'Playlists',
+    _AppRouteKind.playback => 'Playback',
+    _AppRouteKind.history => 'History',
+    _AppRouteKind.settings => 'Settings',
+    _AppRouteKind.search => 'Search results',
+    _AppRouteKind.track => 'Track detail',
+    _AppRouteKind.album => 'Album detail',
+    _AppRouteKind.artist => 'Artist detail',
+    _AppRouteKind.playlist => 'Playlist detail',
+  };
+
+  @override
+  bool operator ==(Object other) {
+    return other is _AppRoute &&
+        other.kind == kind &&
+        other.entityId == entityId &&
+        other.query == query;
+  }
+
+  @override
+  int get hashCode => Object.hash(kind, entityId, query);
+}
+
 enum _PlaybackMode {
   single,
   repeatOne,
@@ -419,7 +853,9 @@ enum _PlaybackMode {
   };
 }
 
-enum _SearchScope { all, tracks, albums, artists }
+enum _SearchScope { all, tracks, albums, artists, playlists }
+
+enum _LibraryViewMode { grid, list }
 
 enum _SearchSort {
   relevance,
@@ -432,10 +868,6 @@ enum _SearchSort {
   favorite,
 }
 
-const _searchPageIndex = -1;
-const _trackInfoPageIndex = -2;
-const _albumInfoPageIndex = -3;
-const _artistInfoPageIndex = -4;
 const _appMinWidth = 520.0;
 const _appMinHeight = 720.0;
 const _appMinAspectRatio = 0.62;
@@ -443,7 +875,13 @@ const _appMaxAspectRatio = 2.2;
 const _compactWidth = 900.0;
 const _compactHeight = 760.0;
 const _sidebarWidth = 236.0;
-const _desktopShellWidth = _compactWidth + _sidebarWidth + 1.0;
+// Keep shell expansion independent from pages' ideal-width breakpoint. At
+// narrower widths the track table already hides its album column, so 600
+// logical pixels remains a usable content pane beside the desktop sidebar.
+// This lets common 13-inch Mac windows enter the two-column layout without
+// having to grow almost to full screen.
+const _minimumExpandedContentWidth = 600.0;
+const _desktopShellWidth = _minimumExpandedContentWidth + _sidebarWidth + 1.0;
 
 String _playbackModeLabel(BuildContext context, _PlaybackMode mode) {
   return switch (mode) {
@@ -461,6 +899,7 @@ String _searchScopeLabel(BuildContext context, _SearchScope scope) {
     _SearchScope.tracks => _tr(context, 'Tracks'),
     _SearchScope.albums => _tr(context, 'Albums'),
     _SearchScope.artists => _tr(context, 'Artists'),
+    _SearchScope.playlists => _tr(context, 'Playlists'),
   };
 }
 
@@ -574,7 +1013,7 @@ Future<T?> _showAnchoredPopup<T>({
                 left: left,
                 top: top,
                 child: Material(
-                  color: appSurface,
+                  color: IntMusicTheme.of(dialogContext).surface,
                   elevation: 18,
                   shadowColor: Colors.black.withValues(alpha: 0.32),
                   borderRadius: BorderRadius.circular(10),
@@ -753,6 +1192,11 @@ String _searchSubtitle(Map<String, dynamic> item, _ResultKind kind) {
     ]),
     _ResultKind.artist =>
       '${item['album_count'] ?? 0} albums - ${item['track_count'] ?? 0} tracks',
+    _ResultKind.playlist => _joinParts([
+      item['kind'],
+      '${item['track_count'] ?? 0} tracks',
+      item['description'],
+    ]),
   };
 }
 

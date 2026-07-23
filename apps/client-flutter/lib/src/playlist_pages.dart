@@ -1,12 +1,14 @@
 part of '../main.dart';
 
-class _PlaylistsPage extends StatelessWidget {
+class _PlaylistsPage extends StatefulWidget {
   const _PlaylistsPage({
     required this.playlists,
     required this.onOpenPlaylist,
     required this.onCreateManual,
     required this.onCreateSmart,
     required this.onDeletePlaylist,
+    required this.viewMode,
+    required this.onViewModeChanged,
   });
 
   final List<dynamic> playlists;
@@ -14,9 +16,52 @@ class _PlaylistsPage extends StatelessWidget {
   final Future<void> Function() onCreateManual;
   final Future<void> Function() onCreateSmart;
   final Future<void> Function(int) onDeletePlaylist;
+  final _LibraryViewMode viewMode;
+  final ValueChanged<_LibraryViewMode> onViewModeChanged;
+
+  @override
+  State<_PlaylistsPage> createState() => _PlaylistsPageState();
+}
+
+class _PlaylistsPageState extends State<_PlaylistsPage> {
+  String _query = '';
+  String _sort = 'name';
 
   @override
   Widget build(BuildContext context) {
+    final query = _query.trim().toLowerCase();
+    final playlists = widget.playlists
+        .where((item) {
+          if (query.isEmpty) {
+            return true;
+          }
+          final playlist = (item as Map).cast<String, dynamic>();
+          return '${playlist['name'] ?? ''}\u0000'
+                  '${playlist['description'] ?? ''}\u0000'
+                  '${playlist['kind'] ?? ''}'
+              .toLowerCase()
+              .contains(query);
+        })
+        .toList(growable: false);
+    playlists.sort((left, right) {
+      final a = (left as Map).cast<String, dynamic>();
+      final b = (right as Map).cast<String, dynamic>();
+      return switch (_sort) {
+        'tracks' => _compareLibraryNumber(
+          b['track_count'],
+          a['track_count'],
+          secondaryA: a['name'],
+          secondaryB: b['name'],
+        ),
+        'kind' => _compareLibraryText(
+          a['kind'],
+          b['kind'],
+          secondaryA: a['name'],
+          secondaryB: b['name'],
+        ),
+        _ => _compareLibraryText(a['name'], b['name']),
+      };
+    });
     return _PageFrame(
       title: 'Playlists',
       child: Column(
@@ -26,30 +71,44 @@ class _PlaylistsPage extends StatelessWidget {
             child: Row(
               children: [
                 FilledButton.icon(
-                  onPressed: onCreateManual,
+                  onPressed: widget.onCreateManual,
                   icon: const Icon(Icons.playlist_add),
                   label: const Text('Manual'),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
-                  onPressed: onCreateSmart,
+                  onPressed: widget.onCreateSmart,
                   icon: const Icon(Icons.auto_awesome_motion_outlined),
                   label: const Text('Smart'),
                 ),
-                const Spacer(),
-                Text(
-                  '${playlists.length} playlists',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: const Color(0xff9aa1ab),
-                  ),
-                ),
               ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 0, 22, 12),
+            child: _LibraryToolbar(
+              countLabel: query.isEmpty
+                  ? '${playlists.length} playlists'
+                  : '${playlists.length} of ${widget.playlists.length} playlists',
+              searchHint: _tr(context, 'Filter playlists'),
+              onQueryChanged: (value) => setState(() => _query = value),
+              sortValue: _sort,
+              sortOptions: {
+                'name': _tr(context, 'Name'),
+                'tracks': _tr(context, 'Most tracks'),
+                'kind': _tr(context, 'Type'),
+              },
+              onSortChanged: (value) => setState(() => _sort = value),
+              viewMode: widget.viewMode,
+              onViewModeChanged: widget.onViewModeChanged,
             ),
           ),
           Expanded(
             child: playlists.isEmpty
                 ? const Center(child: Text('No playlists'))
-                : GridView.builder(
+                : widget.viewMode == _LibraryViewMode.grid
+                ? GridView.builder(
+                    key: const PageStorageKey('playlists-grid'),
                     padding: const EdgeInsets.fromLTRB(22, 0, 22, 28),
                     gridDelegate:
                         const SliverGridDelegateWithMaxCrossAxisExtent(
@@ -67,10 +126,57 @@ class _PlaylistsPage extends StatelessWidget {
                         playlist: playlist,
                         onOpen: id == null
                             ? null
-                            : () => unawaited(onOpenPlaylist(id)),
+                            : () => unawaited(widget.onOpenPlaylist(id)),
                         onDelete: id == null
                             ? null
-                            : () => unawaited(onDeletePlaylist(id)),
+                            : () => unawaited(widget.onDeletePlaylist(id)),
+                      );
+                    },
+                  )
+                : ListView.separated(
+                    key: const PageStorageKey('playlists-list'),
+                    padding: const EdgeInsets.fromLTRB(22, 0, 22, 28),
+                    itemCount: playlists.length,
+                    separatorBuilder: (context, index) =>
+                        const Divider(height: 1),
+                    itemBuilder: (context, index) {
+                      final playlist = (playlists[index] as Map)
+                          .cast<String, dynamic>();
+                      final id = _intValue(playlist['id']);
+                      final kind = playlist['kind']?.toString() ?? 'manual';
+                      final name = playlist['name']?.toString() ?? 'Untitled';
+                      return _SimpleListRow(
+                        leading: _ArtworkTile(
+                          title: name,
+                          subtitle: kind,
+                          size: 48,
+                          icon: kind == 'smart'
+                              ? Icons.auto_awesome_motion_outlined
+                              : Icons.queue_music_outlined,
+                        ),
+                        title: name,
+                        subtitle: _joinParts([
+                          kind,
+                          '${playlist['track_count'] ?? 0} tracks',
+                          playlist['description'],
+                        ]),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              tooltip: _tr(context, 'Delete'),
+                              onPressed: id == null
+                                  ? null
+                                  : () =>
+                                        unawaited(widget.onDeletePlaylist(id)),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                            const Icon(Icons.chevron_right),
+                          ],
+                        ),
+                        onTap: id == null
+                            ? null
+                            : () => unawaited(widget.onOpenPlaylist(id)),
                       );
                     },
                   ),
@@ -104,14 +210,14 @@ class _PlaylistCard extends StatelessWidget {
     ]);
 
     return Material(
-      color: appSurface,
+      color: IntMusicTheme.of(context).surface,
       borderRadius: BorderRadius.circular(8),
       clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: onOpen,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            border: Border.all(color: appBorder),
+            border: Border.all(color: IntMusicTheme.of(context).stroke),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Padding(
@@ -146,7 +252,7 @@ class _PlaylistCard extends StatelessWidget {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: const Color(0xff9aa1ab),
+                          color: IntMusicTheme.of(context).textSecondary,
                         ),
                       ),
                     ],
@@ -168,8 +274,8 @@ class _PlaylistCard extends StatelessWidget {
   }
 }
 
-class _PlaylistDetailSheet extends StatelessWidget {
-  const _PlaylistDetailSheet({
+class _PlaylistDetailPage extends StatelessWidget {
+  const _PlaylistDetailPage({
     required this.coreBaseUrl,
     required this.detail,
     required this.onPlayTrack,
@@ -194,23 +300,26 @@ class _PlaylistDetailSheet extends StatelessWidget {
     final kind = playlist['kind']?.toString() ?? 'manual';
     final rules = detail['rules'];
 
-    return SizedBox(
-      height: MediaQuery.sizeOf(context).height * 0.88,
+    return _PageFrame(
+      title: 'Playlist detail',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 4, 24, 12),
-            child: _DetailHeader(
-              icon: kind == 'smart'
-                  ? Icons.auto_awesome_motion_outlined
-                  : Icons.queue_music_outlined,
-              title: playlist['name']?.toString() ?? 'Untitled',
-              subtitle: _joinParts([
-                kind,
-                '${playlist['track_count'] ?? tracks.length} tracks',
-                playlist['description'],
-              ]),
+            child: _ResponsiveDetailHeading(
+              header: _DetailHeader(
+                icon: kind == 'smart'
+                    ? Icons.auto_awesome_motion_outlined
+                    : Icons.queue_music_outlined,
+                title: playlist['name']?.toString() ?? 'Untitled',
+                subtitle: _joinParts([
+                  kind,
+                  '${playlist['track_count'] ?? tracks.length} tracks',
+                  playlist['description'],
+                ]),
+              ),
+              actions: _CollectionActions(tracks: tracks),
             ),
           ),
           if (kind == 'smart')
@@ -228,10 +337,7 @@ class _PlaylistDetailSheet extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   OutlinedButton.icon(
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      unawaited(onEditSmart());
-                    },
+                    onPressed: () => unawaited(onEditSmart()),
                     icon: const Icon(Icons.tune_outlined),
                     label: Text(_tr(context, 'Edit rules')),
                   ),

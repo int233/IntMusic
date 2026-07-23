@@ -33,28 +33,18 @@ class _AlbumInfoPage extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 10, 24, 16),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _DetailHeader(
-                    icon: Icons.album_outlined,
-                    title: album['title']?.toString() ?? 'Untitled',
-                    subtitle: _joinParts([
-                      album['album_artist_display'],
-                      album['year'],
-                      '${album['track_count'] ?? tracks.length} tracks',
-                    ]),
-                    imageUrl: _albumArtworkUrl(coreBaseUrl, album['id']),
-                  ),
-                ),
-                _AppTooltip(
-                  message: _tr(context, 'Close'),
-                  child: IconButton.filledTonal(
-                    onPressed: onClose,
-                    icon: const Icon(Icons.close),
-                  ),
-                ),
-              ],
+            child: _ResponsiveDetailHeading(
+              header: _DetailHeader(
+                icon: Icons.album_outlined,
+                title: album['title']?.toString() ?? 'Untitled',
+                subtitle: _joinParts([
+                  album['album_artist_display'],
+                  album['year'],
+                  '${album['track_count'] ?? tracks.length} tracks',
+                ]),
+                imageUrl: _albumArtworkUrl(coreBaseUrl, album['id']),
+              ),
+              actions: _CollectionActions(tracks: tracks, onClose: onClose),
             ),
           ),
           const Divider(height: 1),
@@ -135,23 +125,13 @@ class _ArtistInfoPage extends StatelessWidget {
       child: ListView(
         padding: const EdgeInsets.fromLTRB(24, 10, 24, 28),
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: _DetailHeader(
-                  icon: Icons.person_outline,
-                  title: artist['name']?.toString() ?? 'Unknown Artist',
-                  subtitle: '${albums.length} albums - ${tracks.length} tracks',
-                ),
-              ),
-              _AppTooltip(
-                message: _tr(context, 'Close'),
-                child: IconButton.filledTonal(
-                  onPressed: onClose,
-                  icon: const Icon(Icons.close),
-                ),
-              ),
-            ],
+          _ResponsiveDetailHeading(
+            header: _DetailHeader(
+              icon: Icons.person_outline,
+              title: artist['name']?.toString() ?? 'Unknown Artist',
+              subtitle: '${albums.length} albums - ${tracks.length} tracks',
+            ),
+            actions: _CollectionActions(tracks: tracks, onClose: onClose),
           ),
           const SizedBox(height: 18),
           Text(
@@ -482,9 +462,9 @@ class _TrackInfoPage extends StatelessWidget {
                 const SizedBox(height: 8),
                 DecoratedBox(
                   decoration: BoxDecoration(
-                    border: Border.all(color: const Color(0xff2a3238)),
+                    border: Border.all(color: IntMusicTheme.of(context).stroke),
                     borderRadius: BorderRadius.circular(8),
-                    color: const Color(0xff12171b),
+                    color: IntMusicTheme.of(context).surface,
                   ),
                   child: Padding(
                     padding: const EdgeInsets.all(14),

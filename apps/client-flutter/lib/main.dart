@@ -3,12 +3,13 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:audioplayers/audioplayers.dart';
+import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -28,10 +29,16 @@ part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
 part 'src/i18n.dart';
 part 'src/platform_integration.dart';
+part 'src/renderer_audio.dart';
 
 const _prefsCoreUrlKey = 'intmusic.core_url';
 const _prefsLanguageKey = 'intmusic.language';
 const _prefsClientAliasKey = 'intmusic.client_alias';
+const _prefsAlbumViewModeKey = 'intmusic.view.albums';
+const _prefsArtistViewModeKey = 'intmusic.view.artists';
+const _prefsTrackViewModeKey = 'intmusic.view.tracks';
+const _prefsPlaylistViewModeKey = 'intmusic.view.playlists';
+const _prefsRecentSearchesKey = 'intmusic.search.recent';
 final CacheManager _artworkCacheManager = CacheManager(
   Config(
     'intmusicArtworkCache',
@@ -42,13 +49,18 @@ final CacheManager _artworkCacheManager = CacheManager(
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  if (_usesDesktopRendererBackend) {
+    MediaKit.ensureInitialized();
+  }
   PaintingBinding.instance.imageCache.maximumSizeBytes = 128 * 1024 * 1024;
   PaintingBinding.instance.imageCache.maximumSize = 700;
   runApp(const IntMusicClientApp());
 }
 
 class IntMusicClientApp extends StatelessWidget {
-  const IntMusicClientApp({super.key});
+  const IntMusicClientApp({super.key, this.enableAudioRenderer = true});
+
+  final bool enableAudioRenderer;
 
   @override
   Widget build(BuildContext context) {
@@ -57,8 +69,8 @@ class IntMusicClientApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: buildIntMusicTheme(brightness: Brightness.light),
       darkTheme: buildIntMusicTheme(),
-      themeMode: ThemeMode.dark,
-      home: const CoreDashboard(),
+      themeMode: Platform.isMacOS ? ThemeMode.system : ThemeMode.dark,
+      home: CoreDashboard(enableAudioRenderer: enableAudioRenderer),
       builder: (context, child) {
         if (child == null) {
           return const SizedBox.shrink();
@@ -70,7 +82,9 @@ class IntMusicClientApp extends StatelessWidget {
 }
 
 class CoreDashboard extends StatefulWidget {
-  const CoreDashboard({super.key});
+  const CoreDashboard({super.key, this.enableAudioRenderer = true});
+
+  final bool enableAudioRenderer;
 
   @override
   State<CoreDashboard> createState() => _CoreDashboardState();
@@ -85,10 +99,14 @@ class _CoreDashboardState extends State<CoreDashboard>
   final _serverAliasController = TextEditingController();
   final _clientAliasController = TextEditingController();
   final _libraryRootController = TextEditingController();
-  final Map<String, AudioPlayer> _audioPlayers = {};
-  final Map<String, StreamSubscription<void>> _audioCompleteSubscriptions = {};
+  final Map<String, Future<_RendererAudioPlayer>> _audioPlayers = {};
+  final Map<String, StreamSubscription<bool>> _audioCompleteSubscriptions = {};
+  final Map<String, AudioDevice> _rendererAudioDevicesByOutput = {};
   final Map<String, Map<String, dynamic>> _rendererPlaybackByOutput = {};
   final Map<String, int> _rendererLoadedTrackByOutput = {};
+  Player? _rendererDeviceProbe;
+  StreamSubscription<List<AudioDevice>>? _rendererDeviceSubscription;
+  Future<void>? _rendererAudioInitialization;
   Timer? _rendererHeartbeat;
   Timer? _rendererPositionReporter;
   Timer? _zoneRefreshTimer;
@@ -97,7 +115,9 @@ class _CoreDashboardState extends State<CoreDashboard>
   String? _eventSocketBaseUrl;
   String? _rendererRegisteredCoreUrl;
   SharedPreferences? _preferences;
-  int _selectedIndex = 0;
+  _AppRoute _currentRoute = const _AppRoute.home();
+  final List<_AppRoute> _backStack = [];
+  final List<_AppRoute> _forwardStack = [];
   bool _loading = false;
   String? _error;
   String? _rendererStatus;
@@ -111,17 +131,13 @@ class _CoreDashboardState extends State<CoreDashboard>
   Map<String, dynamic>? _playback;
   Map<String, dynamic>? _playbackQueue;
   Map<String, dynamic>? _activeTrackDetail;
-  Map<String, dynamic>? _trackInfoDetail;
-  Map<String, dynamic>? _albumInfoDetail;
-  Map<String, dynamic>? _artistInfoDetail;
+  final Map<int, Map<String, dynamic>> _trackDetailCache = {};
+  final Map<int, Map<String, dynamic>> _albumDetailCache = {};
+  final Map<int, Map<String, dynamic>> _artistDetailCache = {};
+  final Map<int, Map<String, dynamic>> _playlistDetailCache = {};
+  final Map<String, Map<String, dynamic>> _searchResultCache = {};
   Map<String, dynamic>? _playbackStats;
   int? _activeTrackDetailId;
-  int? _trackInfoTrackId;
-  int? _albumInfoAlbumId;
-  int? _artistInfoArtistId;
-  int _trackInfoReturnIndex = 0;
-  int _albumInfoReturnIndex = 0;
-  int _artistInfoReturnIndex = 0;
   List<dynamic> _albums = const [];
   List<dynamic> _artists = const [];
   List<dynamic> _tracks = const [];
@@ -132,11 +148,15 @@ class _CoreDashboardState extends State<CoreDashboard>
   List<dynamic> _playbackHistory = const [];
   Map<String, dynamic>? _favoriteSettings;
   Map<String, dynamic>? _metadataSettings;
-  Map<String, dynamic>? _search;
   String _searchQuery = '';
-  _SearchScope _searchScope = _SearchScope.all;
-  _SearchSort _searchSort = _SearchSort.relevance;
+  final Map<String, _SearchScope> _searchScopeByQuery = {};
+  final Map<String, _SearchSort> _searchSortByQuery = {};
+  _LibraryViewMode _albumViewMode = _LibraryViewMode.grid;
+  _LibraryViewMode _artistViewMode = _LibraryViewMode.grid;
+  _LibraryViewMode _trackViewMode = _LibraryViewMode.list;
+  _LibraryViewMode _playlistViewMode = _LibraryViewMode.grid;
   List<_SearchSuggestion> _searchSuggestions = const [];
+  List<String> _recentSearches = const [];
   late final AnimationController _playbackRevealController;
   int _pageTransitionDirection = 1;
 
@@ -155,7 +175,11 @@ class _CoreDashboardState extends State<CoreDashboard>
       duration: const Duration(milliseconds: 260),
       reverseDuration: const Duration(milliseconds: 190),
     );
-    _playerForOutput(_clientOutputId);
+    _rendererAudioInitialization = widget.enableAudioRenderer
+        ? _initializeRendererAudio()
+        : Future<void>.sync(() {
+            _rendererAudioDevicesByOutput[_clientOutputId] = AudioDevice.auto();
+          });
     _selectedZoneId = _clientOutputId;
     _selectedZoneLabel = 'This device';
     _clientAliasController.text = _defaultClientAlias();
@@ -174,8 +198,17 @@ class _CoreDashboardState extends State<CoreDashboard>
     for (final subscription in _audioCompleteSubscriptions.values) {
       unawaited(subscription.cancel());
     }
-    for (final player in _audioPlayers.values) {
-      unawaited(player.dispose().catchError((_) {}));
+    unawaited(_rendererDeviceSubscription?.cancel() ?? Future<void>.value());
+    final rendererDeviceProbe = _rendererDeviceProbe;
+    if (rendererDeviceProbe != null) {
+      unawaited(rendererDeviceProbe.dispose().catchError((_) {}));
+    }
+    for (final playerFuture in _audioPlayers.values) {
+      unawaited(
+        playerFuture
+            .then((player) => player.dispose())
+            .catchError((Object _) {}),
+      );
     }
     _coreUrlController.dispose();
     _searchController.dispose();
@@ -198,6 +231,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _initializeAndRefresh() async {
+    await _rendererAudioInitialization;
     await _IntMusicPlatform.instance.initialize(
       onCommand: _handlePlatformCommand,
       onSeek: _seekPlayback,
@@ -241,6 +275,21 @@ class _CoreDashboardState extends State<CoreDashboard>
           .getString(_prefsClientAliasKey)
           ?.trim();
       final language = _languageFromPreference(savedLanguage);
+      final albumViewMode = _viewModeFromPreference(
+        preferences.getString(_prefsAlbumViewModeKey),
+      );
+      final artistViewMode = _viewModeFromPreference(
+        preferences.getString(_prefsArtistViewModeKey),
+      );
+      final trackViewMode = _viewModeFromPreference(
+        preferences.getString(_prefsTrackViewModeKey),
+        fallback: _LibraryViewMode.list,
+      );
+      final playlistViewMode = _viewModeFromPreference(
+        preferences.getString(_prefsPlaylistViewModeKey),
+      );
+      final recentSearches =
+          preferences.getStringList(_prefsRecentSearchesKey) ?? const [];
       if (!mounted) {
         return;
       }
@@ -251,6 +300,11 @@ class _CoreDashboardState extends State<CoreDashboard>
         if (language != null) {
           _language = language;
         }
+        _albumViewMode = albumViewMode;
+        _artistViewMode = artistViewMode;
+        _trackViewMode = trackViewMode;
+        _playlistViewMode = playlistViewMode;
+        _recentSearches = recentSearches.take(10).toList(growable: false);
         _clientAliasController.text = savedClientAlias?.isNotEmpty == true
             ? savedClientAlias!
             : _defaultClientAlias();
@@ -279,6 +333,39 @@ class _CoreDashboardState extends State<CoreDashboard>
       'en' => _AppLanguage.en,
       _ => null,
     };
+  }
+
+  _LibraryViewMode _viewModeFromPreference(
+    String? value, {
+    _LibraryViewMode fallback = _LibraryViewMode.grid,
+  }) {
+    return switch (value) {
+      'list' => _LibraryViewMode.list,
+      'grid' => _LibraryViewMode.grid,
+      _ => fallback,
+    };
+  }
+
+  void _setLibraryViewMode(
+    String preferenceKey,
+    _LibraryViewMode mode,
+    void Function(_LibraryViewMode mode) apply,
+  ) {
+    setState(() => apply(mode));
+    unawaited(_persistLibraryViewMode(preferenceKey, mode));
+  }
+
+  Future<void> _persistLibraryViewMode(
+    String preferenceKey,
+    _LibraryViewMode mode,
+  ) async {
+    try {
+      final preferences = _preferences ?? await SharedPreferences.getInstance();
+      _preferences = preferences;
+      await preferences.setString(preferenceKey, mode.name);
+    } catch (_) {
+      // View preferences are non-critical and remain valid for this session.
+    }
   }
 
   Future<void> _setLanguage(_AppLanguage language) async {
@@ -353,7 +440,7 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   Future<void> _reportRendererShutdown() async {
     final outputIds = <String>{
-      _clientOutputId,
+      ..._rendererAudioDevicesByOutput.keys,
       ..._rendererPlaybackByOutput.keys,
     };
     final api = CoreApiClient(_coreUrlController.text);
@@ -375,41 +462,67 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
-  void _selectIndexInState(int index) {
-    if (_selectedIndex == index) {
+  int get _selectedDestinationIndex => _currentRoute.destinationIndex ?? -1;
+  bool get _canNavigateBack => _backStack.isNotEmpty;
+  bool get _canNavigateForward => _forwardStack.isNotEmpty;
+
+  void _navigateToInState(
+    _AppRoute route, {
+    bool addToHistory = true,
+    int? transitionDirection,
+  }) {
+    if (_currentRoute == route) {
       return;
     }
-    final previousOrder = _pageOrder(_selectedIndex);
-    final nextOrder = _pageOrder(index);
-    _pageTransitionDirection = nextOrder >= previousOrder ? 1 : -1;
-    _selectedIndex = index;
+    _pageTransitionDirection =
+        transitionDirection ??
+        (route.animationOrder >= _currentRoute.animationOrder ? 1 : -1);
+    if (addToHistory) {
+      _backStack.add(_currentRoute);
+      if (_backStack.length > 100) {
+        _backStack.removeAt(0);
+      }
+      _forwardStack.clear();
+    }
+    _currentRoute = route;
   }
 
   void _setSelectedIndex(int index) {
-    setState(() => _selectIndexInState(index));
+    _navigateTo(_AppRoute.destination(index));
   }
 
-  int _pageOrder(int index) {
-    if (index >= 0) {
-      return index;
+  void _navigateTo(_AppRoute route) {
+    setState(() => _navigateToInState(route));
+  }
+
+  void _navigateBack() {
+    if (_backStack.isEmpty) {
+      return;
     }
-    return switch (index) {
-      _searchPageIndex => 8,
-      _trackInfoPageIndex => 9,
-      _albumInfoPageIndex => 10,
-      _artistInfoPageIndex => 11,
-      _ => 12,
-    };
+    setState(() {
+      final route = _backStack.removeLast();
+      _forwardStack.add(_currentRoute);
+      _navigateToInState(route, addToHistory: false, transitionDirection: -1);
+    });
   }
 
-  String _pageAnimationKey() {
-    return switch (_selectedIndex) {
-      _searchPageIndex => 'search:$_searchQuery',
-      _trackInfoPageIndex => 'track-detail:${_trackInfoTrackId ?? 0}',
-      _albumInfoPageIndex => 'album-detail:${_albumInfoAlbumId ?? 0}',
-      _artistInfoPageIndex => 'artist-detail:${_artistInfoArtistId ?? 0}',
-      _ => 'page:$_selectedIndex',
-    };
+  void _navigateForward() {
+    if (_forwardStack.isEmpty) {
+      return;
+    }
+    setState(() {
+      final route = _forwardStack.removeLast();
+      _backStack.add(_currentRoute);
+      _navigateToInState(route, addToHistory: false, transitionDirection: 1);
+    });
+  }
+
+  void _closeDetailPage() {
+    if (_canNavigateBack) {
+      _navigateBack();
+    } else {
+      _navigateTo(const _AppRoute.home());
+    }
   }
 
   Future<void> _discoverAndRefresh() async {
@@ -528,23 +641,152 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _sendRendererRegistration({bool resetPlayback = false}) async {
+    await _rendererAudioInitialization;
+    final outputPrefix = 'renderer:$_clientId:';
+    final rendererOutputs = _rendererAudioDevicesByOutput.entries
+        .map((entry) {
+          final device = entry.value;
+          final localOutputId = entry.key.startsWith(outputPrefix)
+              ? entry.key.substring(outputPrefix.length)
+              : entry.key;
+          return <String, dynamic>{
+            'id': localOutputId,
+            'name': _rendererAudioDeviceLabel(device),
+            'backend': _usesDesktopRendererBackend
+                ? 'media-kit-libmpv'
+                : 'flutter-audioplayers',
+            'is_default': localOutputId == 'default',
+            'sample_rates': <int>[],
+            'channels': <int>[],
+          };
+        })
+        .toList(growable: false);
     await _api.postJson('/renderers/register', <String, dynamic>{
       'client_id': _clientId,
       'name': _clientAlias(),
       'platform': Platform.operatingSystem,
       'reset_playback': resetPlayback,
-      'outputs': [
-        <String, dynamic>{
-          'id': 'default',
-          'name': 'Default Output',
-          'backend': 'flutter-audioplayers',
-          'is_default': true,
-          'sample_rates': <int>[],
-          'channels': <int>[],
-        },
-      ],
+      'outputs': rendererOutputs,
     });
     _rendererStatus = 'Renderer online';
+  }
+
+  bool get _supportsIndependentAudioOutputs => _usesDesktopRendererBackend;
+
+  Future<void> _initializeRendererAudio() async {
+    _rendererAudioDevicesByOutput[_clientOutputId] = AudioDevice.auto();
+    if (!_supportsIndependentAudioOutputs) {
+      return;
+    }
+
+    final ready = Completer<void>();
+    final probe = Player(
+      configuration: PlayerConfiguration(
+        title: 'IntMusic audio device discovery',
+        ready: () {
+          if (!ready.isCompleted) {
+            ready.complete();
+          }
+        },
+      ),
+    );
+    _rendererDeviceProbe = probe;
+    _rendererDeviceSubscription = probe.stream.audioDevices.listen(
+      _updateRendererAudioDevices,
+      onError: (_) {
+        // The default output remains available if native discovery fails.
+      },
+    );
+
+    try {
+      await ready.future.timeout(const Duration(seconds: 4));
+    } on TimeoutException {
+      // Some libmpv builds publish the device list without invoking ready.
+    }
+    _updateRendererAudioDevices(probe.state.audioDevices);
+  }
+
+  void _updateRendererAudioDevices(List<AudioDevice> devices) {
+    final next = <String, AudioDevice>{_clientOutputId: AudioDevice.auto()};
+    final seenNativeNames = <String>{};
+    for (final device in devices) {
+      final nativeName = device.name.trim();
+      final normalizedName = nativeName.toLowerCase();
+      if (nativeName.isEmpty ||
+          normalizedName == 'auto' ||
+          normalizedName == 'no' ||
+          !_isNativeRendererAudioDevice(normalizedName) ||
+          !seenNativeNames.add(nativeName)) {
+        continue;
+      }
+      next[_rendererOutputIdForDevice(device)] = device;
+    }
+
+    final previousSignature = _rendererDeviceSignature(
+      _rendererAudioDevicesByOutput,
+    );
+    final nextSignature = _rendererDeviceSignature(next);
+    if (previousSignature == nextSignature) {
+      return;
+    }
+
+    final removedOutputIds = _rendererAudioDevicesByOutput.keys
+        .where((outputId) => !next.containsKey(outputId))
+        .toList(growable: false);
+    _rendererAudioDevicesByOutput
+      ..clear()
+      ..addAll(next);
+    for (final outputId in removedOutputIds) {
+      unawaited(_disposeRendererPlayer(outputId));
+      _rendererPlaybackByOutput.remove(outputId);
+      _rendererLoadedTrackByOutput.remove(outputId);
+    }
+
+    if (_rendererRegisteredCoreUrl != null) {
+      unawaited(
+        _sendRendererRegistration()
+            .then((_) => _refreshZonesSilently())
+            .catchError((Object _) {}),
+      );
+    }
+  }
+
+  bool _isNativeRendererAudioDevice(String normalizedName) {
+    if (Platform.isWindows) {
+      return normalizedName.startsWith('wasapi/');
+    }
+    if (Platform.isMacOS) {
+      return normalizedName.startsWith('coreaudio/');
+    }
+    return true;
+  }
+
+  String _rendererDeviceSignature(Map<String, AudioDevice> devices) {
+    final entries =
+        devices.entries
+            .map(
+              (entry) =>
+                  '${entry.key}\u0000${entry.value.name}\u0000'
+                  '${entry.value.description}',
+            )
+            .toList()
+          ..sort();
+    return entries.join('\u0001');
+  }
+
+  String _rendererOutputIdForDevice(AudioDevice device) {
+    final encodedName = base64Url
+        .encode(utf8.encode(device.name))
+        .replaceAll('=', '');
+    return 'renderer:$_clientId:device-$encodedName';
+  }
+
+  String _rendererAudioDeviceLabel(AudioDevice device) {
+    if (device.name == 'auto') {
+      return 'System Default';
+    }
+    final description = device.description.trim();
+    return description.isEmpty ? device.name : description;
   }
 
   void _startRendererHeartbeat() {
@@ -624,24 +866,76 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
-  AudioPlayer _playerForOutput(String outputId) {
-    return _audioPlayers.putIfAbsent(outputId, () {
-      final player = AudioPlayer();
-      unawaited(player.setReleaseMode(ReleaseMode.stop).catchError((_) {}));
-      _audioCompleteSubscriptions[outputId] = player.onPlayerComplete.listen((
-        _,
-      ) {
-        unawaited(_handleOutputComplete(outputId).catchError((_) {}));
-      });
+  Future<_RendererAudioPlayer> _playerForOutput(String outputId) async {
+    final existing = _audioPlayers[outputId];
+    if (existing != null) {
+      return existing;
+    }
+    final future = _createRendererPlayer(outputId);
+    _audioPlayers[outputId] = future;
+    try {
+      return await future;
+    } catch (_) {
+      if (identical(_audioPlayers[outputId], future)) {
+        _audioPlayers.remove(outputId);
+      }
+      rethrow;
+    }
+  }
+
+  Future<_RendererAudioPlayer> _createRendererPlayer(String outputId) async {
+    final device = _rendererAudioDevicesByOutput[outputId];
+    if (device == null) {
+      throw StateError('audio output is no longer available: $outputId');
+    }
+    _RendererAudioPlayer? player;
+    try {
+      if (_usesDesktopRendererBackend) {
+        final mediaKitPlayer = Player(
+          configuration: const PlayerConfiguration(title: 'IntMusic'),
+        );
+        player = _MediaKitRendererAudioPlayer(mediaKitPlayer);
+        await mediaKitPlayer.setAudioDevice(device);
+      } else {
+        final mobilePlayer = ap.AudioPlayer();
+        await mobilePlayer.setReleaseMode(ap.ReleaseMode.stop);
+        player = _MobileRendererAudioPlayer(mobilePlayer);
+      }
+      _audioCompleteSubscriptions[outputId] = player.completed
+          .where((completed) => completed)
+          .listen((_) {
+            unawaited(_handleOutputComplete(outputId).catchError((_) {}));
+          });
       return player;
-    });
+    } catch (_) {
+      await _audioCompleteSubscriptions.remove(outputId)?.cancel();
+      await player?.dispose();
+      rethrow;
+    }
+  }
+
+  Future<void> _disposeRendererPlayer(String outputId) async {
+    final subscription = _audioCompleteSubscriptions.remove(outputId);
+    await subscription?.cancel();
+    final playerFuture = _audioPlayers.remove(outputId);
+    if (playerFuture == null) {
+      return;
+    }
+    try {
+      final player = await playerFuture;
+      await player.stop();
+      await player.dispose();
+    } catch (_) {
+      // The renderer may already have failed because the device disappeared.
+    }
   }
 
   Future<void> _handleOutputComplete(String outputId) async {
     await _reportRendererState('stopped', outputId: outputId);
   }
 
-  bool _isClientOutputId(String? outputId) => outputId == _clientOutputId;
+  bool _isClientOutputId(String? outputId) =>
+      outputId != null && _rendererAudioDevicesByOutput.containsKey(outputId);
 
   Future<void> _startScan() async {
     await _run<void>(() async {
@@ -751,6 +1045,7 @@ class _CoreDashboardState extends State<CoreDashboard>
               _ResultKind.track => Icons.music_note_outlined,
               _ResultKind.album => Icons.album_outlined,
               _ResultKind.artist => Icons.person_outline,
+              _ResultKind.playlist => Icons.queue_music_outlined,
             },
           ),
         );
@@ -760,6 +1055,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     addItems((result['tracks'] as List?) ?? const [], _ResultKind.track);
     addItems((result['albums'] as List?) ?? const [], _ResultKind.album);
     addItems((result['artists'] as List?) ?? const [], _ResultKind.artist);
+    addItems((result['playlists'] as List?) ?? const [], _ResultKind.playlist);
     return suggestions.take(10).toList(growable: false);
   }
 
@@ -768,12 +1064,42 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (query.isEmpty) {
       return;
     }
+    _rememberSearch(query);
     await _run<void>(() async {
-      _search = await _loadSearch(query, limit: 120);
+      _searchResultCache[query] = await _loadSearch(query, limit: 120);
       _searchQuery = query;
-      _selectIndexInState(_searchPageIndex);
+      _searchScopeByQuery.putIfAbsent(query, () => _SearchScope.all);
+      _searchSortByQuery.putIfAbsent(query, () => _SearchSort.relevance);
+      _navigateToInState(_AppRoute.search(query));
       _searchSuggestions = const [];
     });
+  }
+
+  void _rememberSearch(String query) {
+    final updated = <String>[
+      query,
+      ..._recentSearches.where(
+        (item) => item.toLowerCase() != query.toLowerCase(),
+      ),
+    ].take(10).toList(growable: false);
+    setState(() => _recentSearches = updated);
+    unawaited(_persistRecentSearches(updated));
+  }
+
+  Future<void> _persistRecentSearches(List<String> searches) async {
+    try {
+      final preferences = _preferences ?? await SharedPreferences.getInstance();
+      _preferences = preferences;
+      await preferences.setStringList(_prefsRecentSearchesKey, searches);
+    } catch (_) {
+      // Search history remains available for the current session.
+    }
+  }
+
+  void _selectRecentSearch(String query) {
+    _searchController.text = query;
+    _searchController.selection = TextSelection.collapsed(offset: query.length);
+    unawaited(_submitSearch(query));
   }
 
   void _selectSearchSuggestion(_SearchSuggestion suggestion) {
@@ -788,17 +1114,18 @@ class _CoreDashboardState extends State<CoreDashboard>
         unawaited(_openAlbumDetail(suggestion.id));
       case _ResultKind.artist:
         unawaited(_openArtistDetail(suggestion.id));
+      case _ResultKind.playlist:
+        unawaited(_openPlaylistDetail(suggestion.id));
     }
   }
 
   void _clearSearch() {
     _searchController.clear();
     setState(() {
-      _search = null;
       _searchQuery = '';
       _searchSuggestions = const [];
-      if (_selectedIndex == _searchPageIndex) {
-        _selectIndexInState(0);
+      if (_currentRoute.kind == _AppRouteKind.search) {
+        _navigateToInState(const _AppRoute.home());
       }
     });
   }
@@ -877,8 +1204,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Future<void> _handleRendererCommand(Map<String, dynamic> command) async {
     final action = command['action']?.toString();
     final outputId = command['target_output_id']?.toString() ?? _clientOutputId;
-    final player = _playerForOutput(outputId);
     try {
+      final player = await _playerForOutput(outputId);
       switch (action) {
         case 'play':
           final streamPath = command['stream_path']?.toString();
@@ -888,7 +1215,7 @@ class _CoreDashboardState extends State<CoreDashboard>
           final positionMs = _intValue(command['position_ms']) ?? 0;
           final trackId = _intValue(command['track_id']);
           await player.stop();
-          await player.play(UrlSource(_api.apiUrl(streamPath)));
+          await player.open(_api.apiUrl(streamPath));
           if (trackId != null) {
             _rendererLoadedTrackByOutput[outputId] = trackId;
           }
@@ -911,7 +1238,7 @@ class _CoreDashboardState extends State<CoreDashboard>
             positionMs,
           );
           if (!loaded) {
-            await player.resume();
+            await player.play();
           }
           await _reportRendererState(
             'playing',
@@ -967,7 +1294,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<bool> _ensureRendererSource(
-    AudioPlayer player,
+    _RendererAudioPlayer player,
     String outputId,
     Map<String, dynamic> command,
     int positionMs,
@@ -983,7 +1310,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       );
     }
     await player.stop();
-    await player.play(UrlSource(_api.apiUrl(streamPath)));
+    await player.open(_api.apiUrl(streamPath));
     _rendererLoadedTrackByOutput[outputId] = trackId;
     if (positionMs > 0) {
       await player.seek(Duration(milliseconds: positionMs));
@@ -999,9 +1326,10 @@ class _CoreDashboardState extends State<CoreDashboard>
   }) async {
     final targetOutputId = outputId ?? _clientOutputId;
     final previous = _rendererPlaybackByOutput[targetOutputId];
-    final reportedPosition =
-        (await _audioPlayers[targetOutputId]?.getCurrentPosition())
-            ?.inMilliseconds;
+    final playerFuture = _audioPlayers[targetOutputId];
+    final reportedPosition = playerFuture == null
+        ? null
+        : await (await playerFuture).currentPositionMs();
     final playerPosition = _stableRendererPositionMs(
       state: state,
       explicitPositionMs: positionMs,
@@ -1094,11 +1422,11 @@ class _CoreDashboardState extends State<CoreDashboard>
         language: language,
         child: Dialog(
           insetPadding: const EdgeInsets.all(22),
-          backgroundColor: appSurface,
+          backgroundColor: IntMusicTheme.of(context).surface,
           clipBehavior: Clip.antiAlias,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(10),
-            side: const BorderSide(color: appBorder),
+            side: BorderSide(color: IntMusicTheme.of(context).stroke),
           ),
           child: ConstrainedBox(
             constraints: BoxConstraints(
@@ -1121,22 +1449,12 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
 
     setState(() {
-      if (_selectedIndex != _albumInfoPageIndex) {
-        _albumInfoReturnIndex = _selectedIndex;
-      }
-      _albumInfoDetail = detail;
-      _albumInfoAlbumId = albumId;
-      _selectIndexInState(_albumInfoPageIndex);
+      _albumDetailCache[albumId] = detail;
+      _navigateToInState(_AppRoute.album(albumId));
     });
   }
 
-  void _closeAlbumDetail() {
-    setState(() {
-      _selectIndexInState(_albumInfoReturnIndex);
-      _albumInfoDetail = null;
-      _albumInfoAlbumId = null;
-    });
-  }
+  void _closeAlbumDetail() => _closeDetailPage();
 
   Future<void> _openArtistDetail(int artistId) async {
     final detail = await _run<Map<String, dynamic>>(
@@ -1147,22 +1465,12 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
 
     setState(() {
-      if (_selectedIndex != _artistInfoPageIndex) {
-        _artistInfoReturnIndex = _selectedIndex;
-      }
-      _artistInfoDetail = detail;
-      _artistInfoArtistId = artistId;
-      _selectIndexInState(_artistInfoPageIndex);
+      _artistDetailCache[artistId] = detail;
+      _navigateToInState(_AppRoute.artist(artistId));
     });
   }
 
-  void _closeArtistDetail() {
-    setState(() {
-      _selectIndexInState(_artistInfoReturnIndex);
-      _artistInfoDetail = null;
-      _artistInfoArtistId = null;
-    });
-  }
+  void _closeArtistDetail() => _closeDetailPage();
 
   Future<void> _openTrackDetail(int trackId) async {
     final detail = await _run<Map<String, dynamic>>(
@@ -1173,22 +1481,12 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
 
     setState(() {
-      if (_selectedIndex != _trackInfoPageIndex) {
-        _trackInfoReturnIndex = _selectedIndex;
-      }
-      _trackInfoDetail = detail;
-      _trackInfoTrackId = trackId;
-      _selectIndexInState(_trackInfoPageIndex);
+      _trackDetailCache[trackId] = detail;
+      _navigateToInState(_AppRoute.track(trackId));
     });
   }
 
-  void _closeTrackDetail() {
-    setState(() {
-      _selectIndexInState(_trackInfoReturnIndex);
-      _trackInfoDetail = null;
-      _trackInfoTrackId = null;
-    });
-  }
+  void _closeTrackDetail() => _closeDetailPage();
 
   Future<void> _openPlaylistDetail(int playlistId) async {
     final detail = await _run<Map<String, dynamic>>(
@@ -1198,19 +1496,10 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
 
-    await _showPanelDialog<void>(
-      maxWidth: 900,
-      child: _PlaylistDetailSheet(
-        coreBaseUrl: _coreUrlController.text,
-        detail: detail,
-        onPlayTrack: _playTrack,
-        onOpenTrack: _openTrackDetail,
-        onToggleFavorite: _toggleFavorite,
-        onEditSmart: () => _editSmartPlaylist(playlistId, detail),
-        onRemoveTrack: (trackId) =>
-            _removeTrackFromPlaylist(playlistId: playlistId, trackId: trackId),
-      ),
-    );
+    setState(() {
+      _playlistDetailCache[playlistId] = detail;
+      _navigateToInState(_AppRoute.playlist(playlistId));
+    });
   }
 
   Future<void> _createManualPlaylist() async {
@@ -1265,7 +1554,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
     await _reloadPlaylists();
     if (mounted) {
-      await _openPlaylistDetail(playlistId);
+      setState(() => _playlistDetailCache[playlistId] = updated);
     }
   }
 
@@ -1330,8 +1619,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       if (!mounted) {
         return;
       }
-      Navigator.of(context).pop();
-      await _openPlaylistDetail(playlistId);
+      setState(() => _playlistDetailCache[playlistId] = detail);
     }
   }
 
@@ -1356,34 +1644,33 @@ class _CoreDashboardState extends State<CoreDashboard>
       if (_activeTrackDetailId == trackId) {
         _activeTrackDetail = detail;
       }
-      if (_trackInfoTrackId == trackId) {
-        _trackInfoDetail = detail;
-      }
-      if (_albumInfoAlbumId != null) {
-        final tracks = (_albumInfoDetail?['tracks'] as List?) ?? const [];
-        _albumInfoDetail = <String, dynamic>{
-          ...?_albumInfoDetail,
-          'tracks': tracks
-              .map((item) {
-                final track = (item as Map).cast<String, dynamic>();
-                return _intValue(track['id']) == trackId ? updatedTrack : track;
-              })
-              .toList(growable: false),
-        };
-      }
-      if (_artistInfoArtistId != null) {
-        final tracks = (_artistInfoDetail?['tracks'] as List?) ?? const [];
-        _artistInfoDetail = <String, dynamic>{
-          ...?_artistInfoDetail,
-          'tracks': tracks
-              .map((item) {
-                final track = (item as Map).cast<String, dynamic>();
-                return _intValue(track['id']) == trackId ? updatedTrack : track;
-              })
-              .toList(growable: false),
-        };
-      }
+      _trackDetailCache[trackId] = detail;
+      _replaceTrackInDetailCache(_albumDetailCache, updatedTrack);
+      _replaceTrackInDetailCache(_artistDetailCache, updatedTrack);
+      _replaceTrackInDetailCache(_playlistDetailCache, updatedTrack);
     });
+  }
+
+  void _replaceTrackInDetailCache(
+    Map<int, Map<String, dynamic>> cache,
+    Map<String, dynamic> updatedTrack,
+  ) {
+    final trackId = _intValue(updatedTrack['id']);
+    if (trackId == null) {
+      return;
+    }
+    for (final entry in cache.entries.toList(growable: false)) {
+      final tracks = (entry.value['tracks'] as List?) ?? const [];
+      cache[entry.key] = <String, dynamic>{
+        ...entry.value,
+        'tracks': tracks
+            .map((item) {
+              final track = (item as Map).cast<String, dynamic>();
+              return _intValue(track['id']) == trackId ? updatedTrack : track;
+            })
+            .toList(growable: false),
+      };
+    }
   }
 
   Future<void> _updateFavoriteSettings(Map<String, dynamic> payload) async {
@@ -1418,9 +1705,12 @@ class _CoreDashboardState extends State<CoreDashboard>
         .toList(growable: false);
 
     _tracks = replaceInList(_tracks);
-    if (_search != null) {
-      final tracks = (_search!['tracks'] as List?) ?? const [];
-      _search = <String, dynamic>{..._search!, 'tracks': replaceInList(tracks)};
+    for (final entry in _searchResultCache.entries.toList(growable: false)) {
+      final tracks = (entry.value['tracks'] as List?) ?? const [];
+      _searchResultCache[entry.key] = <String, dynamic>{
+        ...entry.value,
+        'tracks': replaceInList(tracks),
+      };
     }
   }
 
@@ -1527,6 +1817,109 @@ class _CoreDashboardState extends State<CoreDashboard>
           .map((item) => (item as Map).cast<String, dynamic>())
           .toList(growable: false);
 
+  Future<void> _addTrackToQueue(int trackId, {bool playNext = false}) {
+    return _addTracksToQueue(<int>[trackId], playNext: playNext);
+  }
+
+  Future<void> _addTracksToQueue(
+    List<int> trackIds, {
+    bool playNext = false,
+  }) async {
+    if (trackIds.isEmpty) {
+      return;
+    }
+    final currentIndex = _intValue(_playbackQueue?['current_index']);
+    final position = playNext ? (currentIndex ?? -1) + 1 : null;
+    final queue = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue/items',
+          <String, dynamic>{'track_ids': trackIds, 'position': ?position},
+        ),
+      ),
+    );
+    if (!mounted || queue == null) {
+      return;
+    }
+    setState(() => _applyPlaybackQueue(queue));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 2),
+        content: Text(
+          playNext
+              ? '${trackIds.length} track(s) will play next'
+              : '${trackIds.length} track(s) added to queue',
+        ),
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>?> _replaceQueue(
+    List<int> trackIds, {
+    int? startIndex,
+    _PlaybackMode? mode,
+  }) async {
+    final queue = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue',
+          <String, dynamic>{
+            'track_ids': trackIds,
+            'start_index': startIndex,
+            'mode': (mode ?? _playbackMode).nameForApi,
+          },
+        ),
+      ),
+    );
+    if (mounted && queue != null) {
+      setState(() => _applyPlaybackQueue(queue));
+    }
+    return queue;
+  }
+
+  Future<void> _playCollection(List<int> trackIds, bool shuffle) async {
+    if (trackIds.isEmpty) {
+      return;
+    }
+    final queue = await _replaceQueue(
+      trackIds,
+      startIndex: 0,
+      mode: shuffle ? _PlaybackMode.shuffle : _PlaybackMode.sequential,
+    );
+    if (queue == null) {
+      return;
+    }
+    final playback = await _playTrackOnZone(trackIds.first, _activeZoneId());
+    if (mounted && playback != null) {
+      setState(() => _applyPlayback(playback));
+    }
+  }
+
+  Future<Map<String, dynamic>?> _clearUpcomingQueue() {
+    final items = _queueItems();
+    final currentIndex = _intValue(_playbackQueue?['current_index']);
+    if (currentIndex == null || currentIndex < 0) {
+      return _replaceQueue(const []);
+    }
+    final retainedIds = items
+        .take(min(currentIndex + 1, items.length))
+        .map((item) => _intValue(_asMap(item['track'])['id']))
+        .whereType<int>()
+        .toList(growable: false);
+    return _replaceQueue(
+      retainedIds,
+      startIndex: retainedIds.isEmpty ? null : retainedIds.length - 1,
+    );
+  }
+
+  Future<Map<String, dynamic>?> _clearEntireQueue() async {
+    final queue = await _replaceQueue(const []);
+    if (queue != null) {
+      await _stopZone(_activeZoneId());
+    }
+    return queue;
+  }
+
   Future<Map<String, dynamic>?> _moveQueueItem(int from, int to) async {
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
@@ -1603,7 +1996,7 @@ class _CoreDashboardState extends State<CoreDashboard>
         width: 320,
         maxHeight: 560,
         child: _NavigationSheet(
-          selectedIndex: _selectedIndex,
+          selectedIndex: _selectedDestinationIndex,
           onSelected: (index) {
             Navigator.of(anchorContext).pop();
             _setSelectedIndex(index);
@@ -1632,6 +2025,8 @@ class _CoreDashboardState extends State<CoreDashboard>
           },
           onMove: _moveQueueItem,
           onRemove: _removeQueueItem,
+          onClearUpcoming: _clearUpcomingQueue,
+          onClearAll: _clearEntireQueue,
         ),
       ),
     );
@@ -2151,19 +2546,46 @@ class _CoreDashboardState extends State<CoreDashboard>
   Widget build(BuildContext context) {
     return _LocaleScope(
       language: _language,
-      child: PopScope(
-        canPop: false,
-        onPopInvokedWithResult: (didPop, result) {
-          if (!didPop) {
-            unawaited(_handleBackNavigation());
-          }
-        },
-        child: IntMusicBackdrop(
-          child: Scaffold(
-            body: _WindowsA11yQuiet(
-              child: SafeArea(
-                child: LayoutBuilder(
-                  builder: (context, constraints) => _buildShell(constraints),
+      child: _TrackActionScope(
+        onPlayNext: (trackId) => _addTrackToQueue(trackId, playNext: true),
+        onAddToQueue: (trackId) => _addTrackToQueue(trackId),
+        onPlayCollection: _playCollection,
+        onQueueCollection: (trackIds, playNext) =>
+            _addTracksToQueue(trackIds, playNext: playNext),
+        child: CallbackShortcuts(
+          bindings: <ShortcutActivator, VoidCallback>{
+            const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true):
+                _navigateBack,
+            const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
+                _navigateForward,
+            const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true):
+                _navigateBack,
+            const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
+                _navigateForward,
+            const SingleActivator(LogicalKeyboardKey.browserBack):
+                _navigateBack,
+            const SingleActivator(LogicalKeyboardKey.browserForward):
+                _navigateForward,
+          },
+          child: Focus(
+            autofocus: true,
+            child: PopScope(
+              canPop: false,
+              onPopInvokedWithResult: (didPop, result) {
+                if (!didPop) {
+                  unawaited(_handleBackNavigation());
+                }
+              },
+              child: IntMusicBackdrop(
+                child: Scaffold(
+                  body: _WindowsA11yQuiet(
+                    child: SafeArea(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) =>
+                            _buildShell(constraints),
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -2174,24 +2596,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _handleBackNavigation() async {
-    if (_selectedIndex == _trackInfoPageIndex) {
-      _setSelectedIndex(_trackInfoReturnIndex);
-      return;
-    }
-    if (_selectedIndex == _albumInfoPageIndex) {
-      _setSelectedIndex(_albumInfoReturnIndex);
-      return;
-    }
-    if (_selectedIndex == _artistInfoPageIndex) {
-      _setSelectedIndex(_artistInfoReturnIndex);
-      return;
-    }
-    if (_selectedIndex == _searchPageIndex) {
-      _setSelectedIndex(0);
-      return;
-    }
-    if (_selectedIndex != 0) {
-      _setSelectedIndex(0);
+    if (_canNavigateBack) {
+      _navigateBack();
       return;
     }
     await _moveAppToBackground();
@@ -2205,14 +2611,14 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   void _startPlaybackReveal() {
-    if (!Platform.isAndroid || _selectedIndex == 5) {
+    if (!Platform.isAndroid || _currentRoute.kind == _AppRouteKind.playback) {
       return;
     }
     _playbackRevealController.stop();
   }
 
   void _updatePlaybackReveal(double delta) {
-    if (!Platform.isAndroid || _selectedIndex == 5) {
+    if (!Platform.isAndroid || _currentRoute.kind == _AppRouteKind.playback) {
       return;
     }
     _playbackRevealController.value = (_playbackRevealController.value + delta)
@@ -2220,7 +2626,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   void _endPlaybackReveal(double upwardVelocity) {
-    if (!Platform.isAndroid || _selectedIndex == 5) {
+    if (!Platform.isAndroid || _currentRoute.kind == _AppRouteKind.playback) {
       return;
     }
     final shouldOpen =
@@ -2231,7 +2637,7 @@ class _CoreDashboardState extends State<CoreDashboard>
           if (!mounted) {
             return;
           }
-          setState(() => _selectIndexInState(5));
+          setState(() => _navigateToInState(_AppRoute.destination(5)));
           _playbackRevealController.value = 0;
         }),
       );
@@ -2244,21 +2650,10 @@ class _CoreDashboardState extends State<CoreDashboard>
     final viewport = _effectiveViewportSize(constraints);
     final effectiveWidth = viewport.width;
     final desktop = effectiveWidth >= _desktopShellWidth;
-    final showPlaybackBar = _selectedIndex != 5;
-    final pageTitle = _selectedIndex == _searchPageIndex
-        ? 'Search results'
-        : _selectedIndex == _trackInfoPageIndex
-        ? 'Track detail'
-        : _selectedIndex == _albumInfoPageIndex
-        ? 'Album detail'
-        : _selectedIndex == _artistInfoPageIndex
-        ? 'Artist detail'
-        : _destinations[_selectedIndex
-                  .clamp(0, _destinations.length - 1)
-                  .toInt()]
-              .label;
+    final showPlaybackBar = _currentRoute.kind != _AppRouteKind.playback;
+    final pageTitle = _currentRoute.title;
     final page = _AnimatedPageHost(
-      pageKey: _pageAnimationKey(),
+      pageKey: _currentRoute.animationKey,
       direction: _pageTransitionDirection,
       child: _page(),
     );
@@ -2283,7 +2678,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       onShowModeMenu: _showPlaybackModeMenu,
       onShowQueue: _showQueueSheet,
       onShowDevices: _showDeviceSheet,
-      onOpenPlayback: () => _setSelectedIndex(5),
+      onOpenPlayback: () => _navigateTo(_AppRoute.destination(5)),
       enableRevealGesture: Platform.isAndroid,
       onRevealStart: _startPlaybackReveal,
       onRevealUpdate: _updatePlaybackReveal,
@@ -2323,7 +2718,9 @@ class _CoreDashboardState extends State<CoreDashboard>
                               top: Radius.circular(radius),
                             ),
                             child: DecoratedBox(
-                              decoration: const BoxDecoration(color: appBg),
+                              decoration: BoxDecoration(
+                                color: IntMusicTheme.of(context).canvas,
+                              ),
                               child: _buildPlaybackPage(),
                             ),
                           ),
@@ -2342,39 +2739,59 @@ class _CoreDashboardState extends State<CoreDashboard>
         _AppTopBar(
           title: pageTitle,
           desktop: desktop,
+          canGoBack: _canNavigateBack,
+          canGoForward: _canNavigateForward,
+          onBack: _navigateBack,
+          onForward: _navigateForward,
           searchController: _searchController,
           searchSuggestions: _searchSuggestions,
           onOpenMenu: _showNavigationSheet,
           onSearchChanged: _onSearchChanged,
           onSubmitSearch: (query) => unawaited(_submitSearch(query)),
           onSelectSuggestion: _selectSearchSuggestion,
+          recentSearches: _recentSearches,
+          onSelectRecentSearch: _selectRecentSearch,
           onClearSearch: _clearSearch,
         ),
         if (_error != null) _ErrorBanner(message: _error!),
         body,
       ],
     );
+    final contentSurface = KeyedSubtree(
+      key: const Key('app-content-surface'),
+      child: Platform.isMacOS
+          ? ColoredBox(
+              color: IntMusicTheme.of(context).canvas.withValues(alpha: 0.96),
+              child: content,
+            )
+          : content,
+    );
 
-    if (desktop) {
-      final shell = Row(
-        children: [
-          _AppSidebar(
-            selectedIndex: _selectedIndex,
-            status: _status,
-            zones: _zones,
-            loading: _loading,
-            error: _error,
-            playback: _playback,
-            onSelected: _setSelectedIndex,
-          ),
-          const VerticalDivider(width: 1),
-          Expanded(child: content),
-        ],
+    if (_enforceViewportLimits) {
+      final sidebar = ValueListenableBuilder<double>(
+        valueListenable: _IntMusicPlatform.instance.titlebarSafeInset,
+        builder: (context, titlebarSafeInset, child) => _AppSidebar(
+          selectedIndex: _selectedDestinationIndex,
+          status: _status,
+          zones: _zones,
+          loading: _loading,
+          error: _error,
+          playback: _playback,
+          titlebarSafeInset: Platform.isMacOS ? titlebarSafeInset : 0,
+          onSelected: _setSelectedIndex,
+        ),
       );
-      return _withMinimumViewport(constraints, shell);
+      return _withMinimumViewport(
+        constraints,
+        _AnimatedSidebarShell(
+          expanded: desktop,
+          sidebar: sidebar,
+          content: contentSurface,
+        ),
+      );
     }
 
-    return _withMinimumViewport(constraints, content);
+    return _withMinimumViewport(constraints, contentSurface);
   }
 
   bool get _enforceViewportLimits =>
@@ -2436,59 +2853,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Widget _page() {
-    if (_selectedIndex == _trackInfoPageIndex) {
-      return _TrackInfoPage(
-        coreBaseUrl: _coreUrlController.text,
-        detail: _trackInfoDetail,
-        onClose: _closeTrackDetail,
-        onPlayTrack: _playTrack,
-        onOpenAlbum: _openAlbumDetail,
-        onToggleFavorite: _toggleFavorite,
-        onAddToPlaylist: _addTrackToPlaylist,
-      );
-    }
-    if (_selectedIndex == _albumInfoPageIndex) {
-      return _AlbumInfoPage(
-        coreBaseUrl: _coreUrlController.text,
-        detail: _albumInfoDetail,
-        onClose: _closeAlbumDetail,
-        onPlayTrack: _playTrack,
-        onOpenTrack: _openTrackDetail,
-        onToggleFavorite: _toggleFavorite,
-        onAddToPlaylist: _addTrackToPlaylist,
-      );
-    }
-    if (_selectedIndex == _artistInfoPageIndex) {
-      return _ArtistInfoPage(
-        coreBaseUrl: _coreUrlController.text,
-        detail: _artistInfoDetail,
-        onClose: _closeArtistDetail,
-        onOpenAlbum: _openAlbumDetail,
-        onPlayTrack: _playTrack,
-        onOpenTrack: _openTrackDetail,
-        onToggleFavorite: _toggleFavorite,
-        onAddToPlaylist: _addTrackToPlaylist,
-      );
-    }
-    if (_selectedIndex == _searchPageIndex) {
-      return _SearchPage(
-        coreBaseUrl: _coreUrlController.text,
-        query: _searchQuery,
-        search: _search,
-        scope: _searchScope,
-        sort: _searchSort,
-        onScopeChanged: (scope) => setState(() => _searchScope = scope),
-        onSortChanged: (sort) => setState(() => _searchSort = sort),
-        onOpenAlbum: _openAlbumDetail,
-        onOpenArtist: _openArtistDetail,
-        onOpenTrack: _openTrackDetail,
-        onPlayTrack: _playTrack,
-        onToggleFavorite: _toggleFavorite,
-        onAddToPlaylist: _addTrackToPlaylist,
-      );
-    }
-    switch (_selectedIndex) {
-      case 0:
+    switch (_currentRoute.kind) {
+      case _AppRouteKind.home:
         return _HomePage(
           coreBaseUrl: _coreUrlController.text,
           status: _status,
@@ -2498,30 +2864,33 @@ class _CoreDashboardState extends State<CoreDashboard>
           stats: _playbackStats,
           history: _playbackHistory,
           onNavigate: _setSelectedIndex,
+          onOpenTrack: _openTrackDetail,
+          onPlayTrack: _playTrack,
         );
-      case 1:
+      case _AppRouteKind.albums:
         return _AlbumsPage(
           coreBaseUrl: _coreUrlController.text,
           albums: _albums,
           onOpenAlbum: _openAlbumDetail,
+          viewMode: _albumViewMode,
+          onViewModeChanged: (mode) => _setLibraryViewMode(
+            _prefsAlbumViewModeKey,
+            mode,
+            (mode) => _albumViewMode = mode,
+          ),
         );
-      case 2:
-        return _EntityListPage(
-          title: 'Artists',
-          emptyLabel: 'No artists',
-          items: _artists,
-          leadingIcon: Icons.person_outline,
-          titleBuilder: (item) => item['name']?.toString() ?? 'Unknown Artist',
-          subtitleBuilder: (item) =>
-              '${item['album_count'] ?? 0} albums - ${item['track_count'] ?? 0} tracks',
-          onOpen: (item) {
-            final id = _intValue(item['id']);
-            if (id != null) {
-              unawaited(_openArtistDetail(id));
-            }
-          },
+      case _AppRouteKind.artists:
+        return _ArtistsPage(
+          artists: _artists,
+          onOpenArtist: _openArtistDetail,
+          viewMode: _artistViewMode,
+          onViewModeChanged: (mode) => _setLibraryViewMode(
+            _prefsArtistViewModeKey,
+            mode,
+            (mode) => _artistViewMode = mode,
+          ),
         );
-      case 3:
+      case _AppRouteKind.tracks:
         return _TracksPage(
           coreBaseUrl: _coreUrlController.text,
           tracks: _tracks,
@@ -2529,24 +2898,38 @@ class _CoreDashboardState extends State<CoreDashboard>
           onPlayTrack: _playTrack,
           onToggleFavorite: _toggleFavorite,
           onAddToPlaylist: _addTrackToPlaylist,
+          viewMode: _trackViewMode,
+          onViewModeChanged: (mode) => _setLibraryViewMode(
+            _prefsTrackViewModeKey,
+            mode,
+            (mode) => _trackViewMode = mode,
+          ),
         );
-      case 4:
+      case _AppRouteKind.playlists:
         return _PlaylistsPage(
           playlists: _playlists,
           onOpenPlaylist: _openPlaylistDetail,
           onCreateManual: _createManualPlaylist,
           onCreateSmart: _createSmartPlaylist,
           onDeletePlaylist: _deletePlaylist,
+          viewMode: _playlistViewMode,
+          onViewModeChanged: (mode) => _setLibraryViewMode(
+            _prefsPlaylistViewModeKey,
+            mode,
+            (mode) => _playlistViewMode = mode,
+          ),
         );
-      case 5:
+      case _AppRouteKind.playback:
         return _buildPlaybackPage();
-      case 6:
+      case _AppRouteKind.history:
         return _HistoryPage(
           coreBaseUrl: _coreUrlController.text,
           stats: _playbackStats,
           events: _playbackHistory,
+          onOpenTrack: _openTrackDetail,
+          onPlayTrack: _playTrack,
         );
-      case 7:
+      case _AppRouteKind.settings:
         return _SettingsPage(
           coreUrlController: _coreUrlController,
           serverAliasController: _serverAliasController,
@@ -2571,16 +2954,76 @@ class _CoreDashboardState extends State<CoreDashboard>
           onUpdateFavoriteSettings: _updateFavoriteSettings,
           onUpdateMetadataSettings: _updateMetadataSettings,
         );
-      default:
-        return _HomePage(
+      case _AppRouteKind.search:
+        final query = _currentRoute.query ?? _searchQuery;
+        return _SearchPage(
           coreBaseUrl: _coreUrlController.text,
-          status: _status,
-          playback: _playback,
-          trackDetail: _activeTrackDetail,
-          zones: _zones,
-          stats: _playbackStats,
-          history: _playbackHistory,
-          onNavigate: _setSelectedIndex,
+          query: query,
+          search: _searchResultCache[query],
+          scope: _searchScopeByQuery[query] ?? _SearchScope.all,
+          sort: _searchSortByQuery[query] ?? _SearchSort.relevance,
+          onScopeChanged: (scope) =>
+              setState(() => _searchScopeByQuery[query] = scope),
+          onSortChanged: (sort) =>
+              setState(() => _searchSortByQuery[query] = sort),
+          onOpenAlbum: _openAlbumDetail,
+          onOpenArtist: _openArtistDetail,
+          onOpenTrack: _openTrackDetail,
+          onOpenPlaylist: _openPlaylistDetail,
+          onPlayTrack: _playTrack,
+          onToggleFavorite: _toggleFavorite,
+          onAddToPlaylist: _addTrackToPlaylist,
+        );
+      case _AppRouteKind.track:
+        return _TrackInfoPage(
+          coreBaseUrl: _coreUrlController.text,
+          detail: _trackDetailCache[_currentRoute.entityId],
+          onClose: _closeTrackDetail,
+          onPlayTrack: _playTrack,
+          onOpenAlbum: _openAlbumDetail,
+          onToggleFavorite: _toggleFavorite,
+          onAddToPlaylist: _addTrackToPlaylist,
+        );
+      case _AppRouteKind.album:
+        return _AlbumInfoPage(
+          coreBaseUrl: _coreUrlController.text,
+          detail: _albumDetailCache[_currentRoute.entityId],
+          onClose: _closeAlbumDetail,
+          onPlayTrack: _playTrack,
+          onOpenTrack: _openTrackDetail,
+          onToggleFavorite: _toggleFavorite,
+          onAddToPlaylist: _addTrackToPlaylist,
+        );
+      case _AppRouteKind.artist:
+        return _ArtistInfoPage(
+          coreBaseUrl: _coreUrlController.text,
+          detail: _artistDetailCache[_currentRoute.entityId],
+          onClose: _closeArtistDetail,
+          onOpenAlbum: _openAlbumDetail,
+          onPlayTrack: _playTrack,
+          onOpenTrack: _openTrackDetail,
+          onToggleFavorite: _toggleFavorite,
+          onAddToPlaylist: _addTrackToPlaylist,
+        );
+      case _AppRouteKind.playlist:
+        final playlistId = _currentRoute.entityId;
+        final detail =
+            _playlistDetailCache[playlistId] ?? const <String, dynamic>{};
+        return _PlaylistDetailPage(
+          coreBaseUrl: _coreUrlController.text,
+          detail: detail,
+          onPlayTrack: _playTrack,
+          onOpenTrack: _openTrackDetail,
+          onToggleFavorite: _toggleFavorite,
+          onEditSmart: playlistId == null
+              ? () async {}
+              : () => _editSmartPlaylist(playlistId, detail),
+          onRemoveTrack: playlistId == null
+              ? (_) async {}
+              : (trackId) => _removeTrackFromPlaylist(
+                  playlistId: playlistId,
+                  trackId: trackId,
+                ),
         );
     }
   }

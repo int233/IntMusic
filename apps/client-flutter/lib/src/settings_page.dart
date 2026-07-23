@@ -274,8 +274,8 @@ class _SettingsPage extends StatelessWidget {
                 const SizedBox(height: 8),
                 DecoratedBox(
                   decoration: BoxDecoration(
-                    color: appSurfaceHigh,
-                    border: Border.all(color: appBorder),
+                    color: IntMusicTheme.of(context).surfaceRaised,
+                    border: Border.all(color: IntMusicTheme.of(context).stroke),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: SizedBox(
@@ -380,9 +380,9 @@ class _LibraryRootsPanel extends StatelessWidget {
           if (roots.isEmpty)
             Text(
               _tr(context, 'No music folders configured'),
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: const Color(0xff9aa1ab)),
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
+              ),
             )
           else
             Column(
@@ -420,15 +420,17 @@ class _LibraryRootRow extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
       decoration: BoxDecoration(
-        color: appSurfaceHigh,
-        border: Border.all(color: appBorder),
+        color: IntMusicTheme.of(context).surfaceRaised,
+        border: Border.all(color: IntMusicTheme.of(context).stroke),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         children: [
           Icon(
             enabled ? Icons.folder_outlined : Icons.folder_off_outlined,
-            color: enabled ? appPrimary : const Color(0xff9aa1ab),
+            color: enabled
+                ? IntMusicTheme.of(context).accent
+                : IntMusicTheme.of(context).textSecondary,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -642,7 +644,7 @@ class _SettingsSwitchRow extends StatelessWidget {
                     Text(
                       _tr(context, subtitle),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: const Color(0xff9aa1ab),
+                        color: IntMusicTheme.of(context).textSecondary,
                       ),
                     ),
                   ],
