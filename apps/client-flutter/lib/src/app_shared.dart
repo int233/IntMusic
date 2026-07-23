@@ -84,7 +84,6 @@ class _ArtworkTile extends StatelessWidget {
                   imageUrl: imageUrl!,
                   fit: BoxFit.cover,
                   memCacheWidth: imageCacheExtent,
-                  memCacheHeight: imageCacheExtent,
                   filterQuality: FilterQuality.low,
                   fadeInDuration: const Duration(milliseconds: 80),
                   fadeOutDuration: Duration.zero,

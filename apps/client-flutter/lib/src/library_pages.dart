@@ -358,7 +358,7 @@ class _ArtistsPageState extends State<_ArtistsPage> {
                                             revision:
                                                 artist['artwork_revision'],
                                             width: 640,
-                                            height: 800,
+                                            height: 640,
                                           ),
                                         ),
                                   ),

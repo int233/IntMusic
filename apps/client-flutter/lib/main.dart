@@ -1524,7 +1524,6 @@ class _CoreDashboardState extends State<CoreDashboard>
         language: _language,
         child: _ArtistEditorDialog(
           api: _api,
-          coreBaseUrl: _coreUrlController.text,
           artistId: artistId,
           detail: detail,
         ),

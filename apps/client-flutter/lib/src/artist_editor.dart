@@ -24,13 +24,11 @@ const _artistVisualSlots = <String, (String, IconData)>{
 class _ArtistEditorDialog extends StatefulWidget {
   const _ArtistEditorDialog({
     required this.api,
-    required this.coreBaseUrl,
     required this.artistId,
     required this.detail,
   });
 
   final CoreApiClient api;
-  final String coreBaseUrl;
   final int artistId;
   final Map<String, dynamic> detail;
 
@@ -167,14 +165,21 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
     return null;
   }
 
-  String _assetUrl(Map<String, dynamic> asset, {int maxWidth = 900}) {
+  String _assetUrl(Map<String, dynamic> asset) {
     final width = (_intValue(asset['width']) ?? 1).clamp(1, 1000000);
     final height = (_intValue(asset['height']) ?? 1).clamp(1, 1000000);
-    final targetWidth = min(width, maxWidth);
+    // Use one canonical editor rendition. Multiple widget-specific sizes made
+    // a remote Core render and download the same upload several times before
+    // the editor could show its first frame.
+    final targetWidth = min(width, 1200);
     final targetHeight = max(1, (targetWidth * height / width).round());
-    final revision = _intValue(asset['id']) ?? 0;
-    return '${widget.coreBaseUrl}/api/v1/artwork/artists/'
-        '${widget.artistId}/asset-$revision?w=$targetWidth&h=$targetHeight';
+    final assetId = _intValue(asset['id']) ?? 0;
+    final version = Uri.encodeQueryComponent(
+      '${asset['created_at'] ?? ''}-$assetId',
+    );
+    return '${widget.api.baseUrl}/api/v1/artwork/artists/'
+        '${widget.artistId}/asset-$assetId'
+        '?w=$targetWidth&h=$targetHeight&v=$version';
   }
 
   Future<void> _previewMusicBrainz() async {
@@ -958,9 +963,8 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
                           child: Stack(
                             fit: StackFit.expand,
                             children: [
-                              CachedNetworkImage(
-                                cacheManager: _artworkCacheManager,
-                                imageUrl: _assetUrl(asset, maxWidth: 360),
+                              _ArtistAssetImage(
+                                imageUrl: _assetUrl(asset),
                                 fit: BoxFit.cover,
                               ),
                               Positioned(
@@ -1061,36 +1065,67 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
                     ),
                     Text(
                       _LocaleScope.languageOf(context) == _AppLanguage.zh
-                          ? '${regions.length} / 5 个区域'
-                          : '${regions.length} of 5 regions',
+                          ? '${regions.length} / 5 个裁剪区域。1 个区域作为普通头像，'
+                                '2–5 个区域自动拼合。'
+                          : '${regions.length} of 5 crop regions. One region '
+                                'makes a standard avatar; 2–5 form a collage.',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
+                    if (regions.isNotEmpty)
+                      Text(
+                        _tr(
+                          context,
+                          'Drag the frame to move the crop; drag its bottom-right handle to resize the crop.',
+                        ),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: IntMusicTheme.of(context).textSecondary,
+                        ),
+                      ),
                   ],
                 ),
               ),
-              if (regions.isNotEmpty) ...[
-                _AvatarCompositionPreview(
-                  size: 54,
-                  circular: true,
-                  assets: _assets,
-                  regions: regions,
-                  imageUrl: (asset) => _assetUrl(asset, maxWidth: 280),
+              Flexible(
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    if (regions.isNotEmpty) ...[
+                      Tooltip(
+                        message: _tr(context, 'Circular avatar preview'),
+                        child: _AvatarCompositionPreview(
+                          size: 54,
+                          circular: true,
+                          assets: _assets,
+                          regions: regions,
+                          imageUrl: _assetUrl,
+                        ),
+                      ),
+                      Tooltip(
+                        message: _tr(context, 'Square avatar preview'),
+                        child: _AvatarCompositionPreview(
+                          size: 54,
+                          assets: _assets,
+                          regions: regions,
+                          imageUrl: _assetUrl,
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () => _removeRegion(_selectedRegionIndex),
+                        icon: const Icon(Icons.remove_circle_outline),
+                        label: Text(_tr(context, 'Remove current region')),
+                      ),
+                    ],
+                    FilledButton.tonalIcon(
+                      onPressed: _selectedAssetId == null || regions.length >= 5
+                          ? null
+                          : _addAvatarRegion,
+                      icon: const Icon(Icons.crop_free),
+                      label: Text(_tr(context, 'Add crop region')),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 8),
-                _AvatarCompositionPreview(
-                  size: 54,
-                  assets: _assets,
-                  regions: regions,
-                  imageUrl: (asset) => _assetUrl(asset, maxWidth: 280),
-                ),
-                const SizedBox(width: 12),
-              ],
-              FilledButton.tonalIcon(
-                onPressed: _selectedAssetId == null || regions.length >= 5
-                    ? null
-                    : _addAvatarRegion,
-                icon: const Icon(Icons.crop_free),
-                label: Text(_tr(context, 'Add region')),
               ),
             ],
           ),
@@ -1161,9 +1196,8 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
                       fit: StackFit.expand,
                       children: [
                         if (asset != null)
-                          CachedNetworkImage(
-                            cacheManager: _artworkCacheManager,
-                            imageUrl: _assetUrl(asset, maxWidth: 180),
+                          _ArtistAssetImage(
+                            imageUrl: _assetUrl(asset),
                             fit: BoxFit.cover,
                           ),
                         Positioned(
@@ -1216,9 +1250,8 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
           borderRadius: BorderRadius.circular(14),
           child: AspectRatio(
             aspectRatio: width > 0 && height > 0 ? width / height : 1,
-            child: CachedNetworkImage(
-              cacheManager: _artworkCacheManager,
-              imageUrl: _assetUrl(asset, maxWidth: 600),
+            child: _ArtistAssetImage(
+              imageUrl: _assetUrl(asset),
               fit: BoxFit.cover,
             ),
           ),
@@ -1418,9 +1451,8 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
                   fit: StackFit.expand,
                   children: [
                     if (asset != null)
-                      CachedNetworkImage(
-                        cacheManager: _artworkCacheManager,
-                        imageUrl: _assetUrl(asset, maxWidth: 1100),
+                      _ArtistAssetImage(
+                        imageUrl: _assetUrl(asset),
                         fit: BoxFit.cover,
                         alignment: Alignment(
                           _doubleValue(visual['focal_x'], 0.5) * 2 - 1,
@@ -1505,7 +1537,7 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
                     circular: true,
                     assets: _assets,
                     regions: previewRegions,
-                    imageUrl: (asset) => _assetUrl(asset, maxWidth: 500),
+                    imageUrl: _assetUrl,
                   ),
             const SizedBox(height: 22),
             Text(
@@ -1607,6 +1639,96 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
   }
 }
 
+class _ArtistAssetImage extends StatefulWidget {
+  const _ArtistAssetImage({
+    required this.imageUrl,
+    required this.fit,
+    this.alignment = Alignment.center,
+  });
+
+  final String imageUrl;
+  final BoxFit fit;
+  final AlignmentGeometry alignment;
+
+  @override
+  State<_ArtistAssetImage> createState() => _ArtistAssetImageState();
+}
+
+class _ArtistAssetImageState extends State<_ArtistAssetImage> {
+  int _attempt = 0;
+
+  String get _effectiveUrl {
+    if (_attempt == 0) return widget.imageUrl;
+    final uri = Uri.parse(widget.imageUrl);
+    return uri
+        .replace(
+          queryParameters: {
+            ...uri.queryParameters,
+            'retry': _attempt.toString(),
+          },
+        )
+        .toString();
+  }
+
+  @override
+  void didUpdateWidget(covariant _ArtistAssetImage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.imageUrl != widget.imageUrl) {
+      _attempt = 0;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.network(
+      _effectiveUrl,
+      fit: widget.fit,
+      alignment: widget.alignment,
+      gaplessPlayback: true,
+      filterQuality: FilterQuality.high,
+      loadingBuilder: (context, child, progress) {
+        if (progress == null) return child;
+        final expected = progress.expectedTotalBytes;
+        final value = expected == null || expected <= 0
+            ? null
+            : progress.cumulativeBytesLoaded / expected;
+        return ColoredBox(
+          color: IntMusicTheme.of(context).surfaceRaised,
+          child: Center(
+            child: SizedBox.square(
+              dimension: 22,
+              child: CircularProgressIndicator.adaptive(
+                strokeWidth: 2,
+                value: value,
+              ),
+            ),
+          ),
+        );
+      },
+      errorBuilder: (context, error, stackTrace) {
+        return Material(
+          color: IntMusicTheme.of(context).surfaceRaised,
+          child: InkWell(
+            onTap: () => setState(() => _attempt += 1),
+            child: Tooltip(
+              message: _tr(
+                context,
+                'Image could not be loaded. Click to retry.',
+              ),
+              child: Center(
+                child: Icon(
+                  Icons.refresh_rounded,
+                  color: IntMusicTheme.of(context).textSecondary,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _AvatarCompositionPreview extends StatelessWidget {
   const _AvatarCompositionPreview({
     required this.size,
@@ -1685,8 +1807,7 @@ class _AvatarCompositionPreview extends StatelessWidget {
                       ? ColoredBox(
                           color: IntMusicTheme.of(context).surfaceRaised,
                         )
-                      : CachedNetworkImage(
-                          cacheManager: _artworkCacheManager,
+                      : _ArtistAssetImage(
                           imageUrl: imageUrl(asset),
                           fit: BoxFit.cover,
                           alignment: Alignment(
@@ -1798,8 +1919,7 @@ class _ArtistCropCanvasState extends State<_ArtistCropCanvas> {
                   top: imageTop,
                   width: imageWidth,
                   height: imageHeight,
-                  child: CachedNetworkImage(
-                    cacheManager: _artworkCacheManager,
+                  child: _ArtistAssetImage(
                     imageUrl: widget.imageUrl,
                     fit: BoxFit.fill,
                   ),
@@ -1827,66 +1947,85 @@ class _ArtistCropCanvasState extends State<_ArtistCropCanvas> {
                       _emit();
                     },
                     child: Stack(
+                      clipBehavior: Clip.none,
                       children: [
                         Positioned.fill(
-                          child: DecoratedBox(
-                            decoration: BoxDecoration(
-                              border: Border.all(
-                                color: Theme.of(context).colorScheme.primary,
-                                width: 2,
-                              ),
-                              boxShadow: const [
-                                BoxShadow(
-                                  color: Colors.black54,
-                                  blurRadius: 3,
-                                  spreadRadius: 1,
+                          child: ClipRect(
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Positioned(
+                                  left: -x * imageWidth,
+                                  top: -y * imageHeight,
+                                  width: imageWidth,
+                                  height: imageHeight,
+                                  child: _ArtistAssetImage(
+                                    imageUrl: widget.imageUrl,
+                                    fit: BoxFit.fill,
+                                  ),
                                 ),
                               ],
                             ),
                           ),
                         ),
                         Positioned.fill(
-                          child: CachedNetworkImage(
-                            cacheManager: _artworkCacheManager,
-                            imageUrl: widget.imageUrl,
-                            fit: BoxFit.fill,
-                            alignment: Alignment(
-                              width <= 0 ? 0 : (0.5 - x) / width * 2 - 1,
-                              height <= 0 ? 0 : (0.5 - y) / height * 2 - 1,
+                          child: IgnorePointer(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                border: Border.all(
+                                  color: Theme.of(context).colorScheme.primary,
+                                  width: 2,
+                                ),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Colors.black54,
+                                    blurRadius: 3,
+                                    spreadRadius: 1,
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         ),
                         Positioned(
                           right: -5,
                           bottom: -5,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onPanUpdate: (details) {
-                              setState(() {
-                                _region['crop_width'] =
-                                    (width + details.delta.dx / imageWidth)
-                                        .clamp(0.08, 1.0 - x);
-                                _region['crop_height'] =
-                                    (height + details.delta.dy / imageHeight)
-                                        .clamp(0.08, 1.0 - y);
-                              });
-                              _emit();
-                            },
-                            child: Container(
-                              width: 28,
-                              height: 28,
-                              decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.primary,
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: Colors.white,
-                                  width: 2,
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.resizeDownRight,
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onPanUpdate: (details) {
+                                setState(() {
+                                  _region['crop_width'] =
+                                      (width + details.delta.dx / imageWidth)
+                                          .clamp(0.08, 1.0 - x);
+                                  _region['crop_height'] =
+                                      (height + details.delta.dy / imageHeight)
+                                          .clamp(0.08, 1.0 - y);
+                                });
+                                _emit();
+                              },
+                              child: Tooltip(
+                                message: _tr(context, 'Resize crop region'),
+                                child: Container(
+                                  width: 28,
+                                  height: 28,
+                                  decoration: BoxDecoration(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.primary,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2,
+                                    ),
+                                  ),
+                                  child: const Icon(
+                                    Icons.open_in_full,
+                                    size: 13,
+                                    color: Colors.white,
+                                  ),
                                 ),
-                              ),
-                              child: const Icon(
-                                Icons.open_in_full,
-                                size: 13,
-                                color: Colors.white,
                               ),
                             ),
                           ),
