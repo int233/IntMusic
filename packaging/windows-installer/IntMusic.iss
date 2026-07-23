@@ -58,7 +58,7 @@ Name: "{commondesktop}\IntMusic"; Filename: "{app}\client\{#MyAppExeName}"; Task
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-IntMusicCoreService.ps1"" -InstallDir ""{app}"""; Flags: runhidden waituntilterminated; Components: core
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-IntMusic.ps1"" -InstallDir ""{app}"""; Description: "Launch IntMusic Core + Client"; Flags: nowait postinstall skipifsilent runhidden; Components: client and core
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-IntMusic.ps1"" -InstallDir ""{app}"""; Description: "Launch IntMusic Core + Client"; Flags: nowait postinstall skipifsilent runhidden; Components: client and core; Check: IsCoreReadyForLaunch
 Filename: "{app}\client\{#MyAppExeName}"; Description: "Launch IntMusic"; Flags: nowait postinstall skipifsilent; Components: client; Check: IsClientOnlyInstall
 
 [UninstallRun]
@@ -93,6 +93,12 @@ end;
 function IsClientOnlyInstall: Boolean;
 begin
   Result := WizardIsComponentSelected('client') and not WizardIsComponentSelected('core');
+end;
+
+function IsCoreReadyForLaunch: Boolean;
+begin
+  Result := FileExists(ExpandConstant(
+    '{commonappdata}\IntMusic\Core\data\core-endpoint.json'));
 end;
 
 procedure BroadcastEnvironmentChanged;

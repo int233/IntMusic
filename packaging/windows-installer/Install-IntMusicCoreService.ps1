@@ -38,6 +38,35 @@ function Invoke-ServiceControl {
     }
 }
 
+function Set-IntMusicServiceConfiguration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathName
+    )
+
+    $serviceInstance = Get-CimInstance `
+        -ClassName Win32_Service `
+        -Filter "Name='$serviceName'" `
+        -ErrorAction Stop
+    if ($null -eq $serviceInstance) {
+        throw "The $serviceName service exists but its Win32_Service record could not be read."
+    }
+
+    $result = Invoke-CimMethod `
+        -InputObject $serviceInstance `
+        -MethodName Change `
+        -Arguments @{
+            DisplayName = $displayName
+            PathName = $PathName
+            StartMode = "Automatic"
+        } `
+        -ErrorAction Stop
+    if ($result.ReturnValue -ne 0) {
+        throw "Win32_Service.Change failed for $serviceName with return code $($result.ReturnValue)."
+    }
+    Write-IntMusicInstallLog "Updated the existing service through Win32_Service.Change."
+}
+
 function Set-IntMusicFirewallRule {
     param(
         [Parameter(Mandatory = $true)]
@@ -85,6 +114,7 @@ function Test-IntMusicCoreReady {
 
 try {
     New-Item -ItemType Directory -Force -Path $dataRoot, $dataDir | Out-Null
+    Remove-Item -LiteralPath $endpointFile -Force -ErrorAction SilentlyContinue
     Write-IntMusicInstallLog "Installing Core service from $daemonExe"
 
     if (-not (Test-Path -LiteralPath $daemonExe)) {
@@ -102,16 +132,7 @@ try {
                 [TimeSpan]::FromSeconds(30)
             )
         }
-        Invoke-ServiceControl -Arguments @(
-            "config",
-            $serviceName,
-            "binPath=",
-            $binaryPath,
-            "start=",
-            "auto",
-            "DisplayName=",
-            $displayName
-        )
+        Set-IntMusicServiceConfiguration -PathName $binaryPath
     } else {
         New-Service `
             -Name $serviceName `
@@ -134,7 +155,6 @@ try {
     Set-IntMusicFirewallRule -DisplayName $httpRuleName -Protocol TCP -LocalPort "49330-49360"
     Set-IntMusicFirewallRule -DisplayName $discoveryRuleName -Protocol UDP -LocalPort "5353"
 
-    Remove-Item -LiteralPath $endpointFile -Force -ErrorAction SilentlyContinue
     Start-Service -Name $serviceName
 
     $service = Get-Service -Name $serviceName

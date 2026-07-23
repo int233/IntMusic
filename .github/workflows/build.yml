@@ -99,6 +99,61 @@ jobs:
             -ReleaseId actions-windows `
             -Output packaging\dist\actions\windows
 
+      - name: Smoke test Windows installer and upgrade
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = Get-ChildItem `
+            -Path "packaging\dist\actions\windows\windows" `
+            -Filter "IntMusic-Windows-Setup-*.exe" |
+            Select-Object -First 1
+          if ($null -eq $setup) {
+            throw "Windows installer artifact was not found."
+          }
+
+          try {
+            foreach ($pass in 1..2) {
+              $installer = Start-Process `
+                -FilePath $setup.FullName `
+                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TYPE=coreonly" `
+                -Wait `
+                -PassThru
+              if ($installer.ExitCode -ne 0) {
+                throw "Windows installer pass $pass failed with exit code $($installer.ExitCode)."
+              }
+            }
+
+            $service = Get-Service -Name "IntMusicCore" -ErrorAction Stop
+            if ($service.Status -ne "Running") {
+              throw "IntMusicCore is $($service.Status) after installer upgrade."
+            }
+
+            $endpointFile = Join-Path `
+              $env:ProgramData `
+              "IntMusic\Core\data\core-endpoint.json"
+            $endpoint = Get-Content -LiteralPath $endpointFile -Raw |
+              ConvertFrom-Json
+            $status = Invoke-RestMethod `
+              -Uri "$($endpoint.base_url)/api/v1/status" `
+              -Method Get `
+              -TimeoutSec 5
+            if ($status.name -ne "IntMusic Local Music Core" -or
+                $status.api_version -ne "v1") {
+              throw "Installed Core returned an unexpected health response."
+            }
+          }
+          finally {
+            $uninstaller = Join-Path `
+              $env:ProgramFiles `
+              "IntMusic\unins000.exe"
+            if (Test-Path -LiteralPath $uninstaller) {
+              Start-Process `
+                -FilePath $uninstaller `
+                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
+                -Wait
+            }
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: intmusic-windows
