@@ -5,7 +5,12 @@ use core_config::{CoreConfig, CorePaths};
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[cfg(windows)]
-use std::sync::{Arc, Mutex};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    sync::{Arc, Mutex},
+    time::SystemTime,
+};
 #[cfg(windows)]
 use tokio::sync::oneshot;
 #[cfg(windows)]
@@ -50,8 +55,32 @@ fn main() -> Result<()> {
 
 #[cfg(windows)]
 fn service_main(_arguments: Vec<OsString>) {
+    let options = RUN_OPTIONS.get().cloned().unwrap_or_default();
+    append_service_log(&options, "service process starting");
     if let Err(error) = run_windows_service() {
+        append_service_log(&options, &format!("service failed: {error:#?}"));
         eprintln!("IntMusicCore service failed: {error:?}");
+    } else {
+        append_service_log(&options, "service stopped");
+    }
+}
+
+#[cfg(windows)]
+fn append_service_log(options: &RunOptions, message: &str) {
+    let data_root = options
+        .config
+        .as_deref()
+        .and_then(|path| path.parent())
+        .or_else(|| options.data_dir.as_deref().and_then(|path| path.parent()));
+    let Some(data_root) = data_root else {
+        return;
+    };
+    if fs::create_dir_all(data_root).is_err() {
+        return;
+    }
+    let log_file = data_root.join("service.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_file) {
+        let _ = writeln!(file, "[{:?}] {message}", SystemTime::now());
     }
 }
 

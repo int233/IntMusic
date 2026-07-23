@@ -1,11 +1,16 @@
 allprojects {
     repositories {
-        maven("https://maven.aliyun.com/repository/google")
-        maven("https://maven.aliyun.com/repository/central")
-        maven("https://maven.aliyun.com/repository/gradle-plugin")
-        maven("https://maven.aliyun.com/repository/public")
         google()
         mavenCentral()
+        if (
+            System.getenv("INTMUSIC_USE_ALIYUN_MAVEN")
+                ?.equals("true", ignoreCase = true) == true
+        ) {
+            maven("https://maven.aliyun.com/repository/google")
+            maven("https://maven.aliyun.com/repository/central")
+            maven("https://maven.aliyun.com/repository/gradle-plugin")
+            maven("https://maven.aliyun.com/repository/public")
+        }
     }
 }
 

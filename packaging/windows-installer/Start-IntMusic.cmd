@@ -2,13 +2,4 @@
 setlocal
 
 set "INTMUSIC_HOME=%~dp0"
-set "INTMUSIC_CLIENT=%INTMUSIC_HOME%client\IntMusic.exe"
-
-sc start IntMusicCore >nul 2>nul
-
-if exist "%INTMUSIC_CLIENT%" (
-  start "" "%INTMUSIC_CLIENT%"
-) else (
-  echo IntMusic client was not found at "%INTMUSIC_CLIENT%".
-  pause
-)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%INTMUSIC_HOME%Start-IntMusic.ps1" -InstallDir "%INTMUSIC_HOME%"

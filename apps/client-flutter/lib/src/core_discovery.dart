@@ -21,6 +21,13 @@ class _DiscoveredCore {
 Future<List<_DiscoveredCore>> _discoverIntMusicCores({
   String? hintBaseUrl,
 }) async {
+  final installed = await _verifyCoreCandidates(
+    await _installedCoreCandidates(),
+  );
+  if (installed.isNotEmpty) {
+    return installed;
+  }
+
   final mdns = await _verifyCoreCandidates(await _discoverMdnsCores());
   if (mdns.isNotEmpty) {
     return mdns;
@@ -42,6 +49,43 @@ Future<List<_DiscoveredCore>> _discoverIntMusicCores({
 
   final lanHosts = await _lanSubnetHosts();
   return _verifyCoreCandidates(_portRangeCandidates(lanHosts, 'LAN scan'));
+}
+
+Future<List<_DiscoveredCore>> _installedCoreCandidates() async {
+  if (!Platform.isWindows) {
+    return const [];
+  }
+  final programData =
+      (Platform.environment['ProgramData'] ??
+              Platform.environment['PROGRAMDATA'])
+          ?.trim();
+  if (programData == null || programData.isEmpty) {
+    return const [];
+  }
+  final endpointFile = File(
+    '$programData\\IntMusic\\Core\\data\\core-endpoint.json',
+  );
+  try {
+    final payload = _asMap(jsonDecode(await endpointFile.readAsString()));
+    final baseUrl = payload['base_url']?.toString().trim();
+    final uri = Uri.tryParse(baseUrl ?? '');
+    if (uri == null ||
+        uri.scheme != 'http' ||
+        !uri.hasPort ||
+        !_isLoopbackHost(uri.host)) {
+      return const [];
+    }
+    return [_DiscoveredCore(baseUrl: uri.toString(), source: 'installed Core')];
+  } catch (_) {
+    return const [];
+  }
+}
+
+bool _isLoopbackHost(String host) {
+  final normalized = host.toLowerCase();
+  return normalized == '127.0.0.1' ||
+      normalized == 'localhost' ||
+      normalized == '::1';
 }
 
 List<_DiscoveredCore> _portRangeCandidates(

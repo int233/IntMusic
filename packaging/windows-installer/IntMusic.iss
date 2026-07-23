@@ -45,18 +45,20 @@ Source: "..\dist\windows\client\*"; DestDir: "{app}\client"; Flags: ignoreversio
 Source: "..\dist\windows\core\local-music-core.exe"; DestDir: "{app}\core"; Flags: ignoreversion; Components: core
 Source: "..\dist\windows\core\local-music-core-daemon.exe"; DestDir: "{app}\core"; Flags: ignoreversion; Components: core
 Source: "Start-IntMusic.cmd"; DestDir: "{app}"; Flags: ignoreversion; Components: client and core
+Source: "Start-IntMusic.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: client and core
 Source: "Install-IntMusicCoreService.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "Uninstall-IntMusicCoreService.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 
 [Icons]
-Name: "{group}\IntMusic"; Filename: "{app}\client\{#MyAppExeName}"; Components: client
-Name: "{group}\IntMusic Core + Client"; Filename: "{app}\Start-IntMusic.cmd"; WorkingDir: "{app}"; Components: client and core
+Name: "{group}\IntMusic"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-IntMusic.ps1"" -InstallDir ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\client\{#MyAppExeName}"; Components: client and core
+Name: "{group}\IntMusic"; Filename: "{app}\client\{#MyAppExeName}"; Components: client; Check: IsClientOnlyInstall
 Name: "{group}\IntMusic Core CLI"; Filename: "{app}\core\local-music-core.exe"; WorkingDir: "{app}\core"; Components: core
-Name: "{commondesktop}\IntMusic"; Filename: "{app}\client\{#MyAppExeName}"; Tasks: desktopicon; Components: client
+Name: "{commondesktop}\IntMusic"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-IntMusic.ps1"" -InstallDir ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\client\{#MyAppExeName}"; Tasks: desktopicon; Components: client and core
+Name: "{commondesktop}\IntMusic"; Filename: "{app}\client\{#MyAppExeName}"; Tasks: desktopicon; Components: client; Check: IsClientOnlyInstall
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Install-IntMusicCoreService.ps1"" -InstallDir ""{app}"""; Flags: runhidden waituntilterminated; Components: core
-Filename: "{app}\Start-IntMusic.cmd"; Description: "Launch IntMusic Core + Client"; Flags: nowait postinstall skipifsilent; Components: client and core
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-IntMusic.ps1"" -InstallDir ""{app}"""; Description: "Launch IntMusic Core + Client"; Flags: nowait postinstall skipifsilent runhidden; Components: client and core
 Filename: "{app}\client\{#MyAppExeName}"; Description: "Launch IntMusic"; Flags: nowait postinstall skipifsilent; Components: client; Check: IsClientOnlyInstall
 
 [UninstallRun]
