@@ -13,6 +13,8 @@ class _SettingsPage extends StatelessWidget {
     required this.libraryRoots,
     required this.diagnostics,
     required this.language,
+    required this.pinCurrentClientRegion,
+    required this.zoneRegionSort,
     required this.libraryRootController,
     required this.onConnect,
     required this.onDiscover,
@@ -22,6 +24,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onSaveServerAlias,
     required this.onSaveClientAlias,
     required this.onLanguageChanged,
+    required this.onPinCurrentClientRegionChanged,
+    required this.onZoneRegionSortChanged,
     required this.onUpdateFavoriteSettings,
     required this.onUpdateMetadataSettings,
   });
@@ -37,6 +41,8 @@ class _SettingsPage extends StatelessWidget {
   final List<dynamic> libraryRoots;
   final Map<String, dynamic>? diagnostics;
   final _AppLanguage language;
+  final bool pinCurrentClientRegion;
+  final _ZoneRegionSort zoneRegionSort;
   final TextEditingController libraryRootController;
   final VoidCallback onConnect;
   final VoidCallback onDiscover;
@@ -46,6 +52,8 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback onSaveServerAlias;
   final VoidCallback onSaveClientAlias;
   final ValueChanged<_AppLanguage> onLanguageChanged;
+  final ValueChanged<bool> onPinCurrentClientRegionChanged;
+  final ValueChanged<_ZoneRegionSort> onZoneRegionSortChanged;
   final Future<void> Function(Map<String, dynamic>) onUpdateFavoriteSettings;
   final Future<void> Function(Map<String, dynamic>) onUpdateMetadataSettings;
 
@@ -60,6 +68,7 @@ class _SettingsPage extends StatelessWidget {
     return _PageFrame(
       title: 'Settings',
       child: ListView(
+        key: const Key('settings-scroll-view'),
         padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
         children: [
           _HomePanel(
@@ -156,6 +165,13 @@ class _SettingsPage extends StatelessWidget {
             onAddFolder: onAddLibraryRoot,
             onRemoveFolder: onRemoveLibraryRoot,
             onScan: onScan,
+          ),
+          const SizedBox(height: 14),
+          _DeviceRegionPreferencesPanel(
+            pinCurrentClientRegion: pinCurrentClientRegion,
+            regionSort: zoneRegionSort,
+            onPinChanged: onPinCurrentClientRegionChanged,
+            onSortChanged: onZoneRegionSortChanged,
           ),
           const SizedBox(height: 14),
           _HomePanel(
@@ -453,6 +469,104 @@ class _LibraryRootRow extends StatelessWidget {
   }
 }
 
+class _DeviceRegionPreferencesPanel extends StatelessWidget {
+  const _DeviceRegionPreferencesPanel({
+    required this.pinCurrentClientRegion,
+    required this.regionSort,
+    required this.onPinChanged,
+    required this.onSortChanged,
+  });
+
+  final bool pinCurrentClientRegion;
+  final _ZoneRegionSort regionSort;
+  final ValueChanged<bool> onPinChanged;
+  final ValueChanged<_ZoneRegionSort> onSortChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final orderSelector = DropdownButton<_ZoneRegionSort>(
+      key: const Key('region-sort-dropdown'),
+      value: regionSort,
+      onChanged: (value) {
+        if (value != null) {
+          onSortChanged(value);
+        }
+      },
+      items: [
+        DropdownMenuItem(
+          value: _ZoneRegionSort.playingFirst,
+          child: Text(_tr(context, 'Playing first')),
+        ),
+        DropdownMenuItem(
+          value: _ZoneRegionSort.name,
+          child: Text(_tr(context, 'Name')),
+        ),
+      ],
+    );
+    return _HomePanel(
+      title: _tr(context, 'Playback device regions'),
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          _SettingsSwitchRow(
+            key: const Key('pin-current-client-region'),
+            value: pinCurrentClientRegion,
+            title: "Pin this client's region",
+            subtitle: "Keep this client's outputs at the top",
+            onChanged: onPinChanged,
+          ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final description = Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _tr(context, 'Region order'),
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      regionSort == _ZoneRegionSort.playingFirst
+                          ? _tr(
+                              context,
+                              'Playing regions appear before idle regions',
+                            )
+                          : _tr(context, 'Regions are sorted by name'),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: IntMusicTheme.of(context).textSecondary,
+                      ),
+                    ),
+                  ],
+                );
+                if (constraints.maxWidth < 520) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      description,
+                      const SizedBox(height: 8),
+                      orderSelector,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: description),
+                    const SizedBox(width: 16),
+                    orderSelector,
+                  ],
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _AliasEditor extends StatelessWidget {
   const _AliasEditor({
     required this.controller,
@@ -609,6 +723,7 @@ List<String> _parseSeparators(String text) {
 
 class _SettingsSwitchRow extends StatelessWidget {
   const _SettingsSwitchRow({
+    super.key,
     required this.value,
     required this.title,
     required this.subtitle,

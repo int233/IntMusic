@@ -857,6 +857,8 @@ enum _SearchScope { all, tracks, albums, artists, playlists }
 
 enum _LibraryViewMode { grid, list }
 
+enum _ZoneRegionSort { playingFirst, name }
+
 enum _SearchSort {
   relevance,
   titleAz,
@@ -873,7 +875,7 @@ const _appMinHeight = 720.0;
 const _appMinAspectRatio = 0.62;
 const _appMaxAspectRatio = 2.2;
 const _compactWidth = 900.0;
-const _compactHeight = 760.0;
+const _compactHeight = 680.0;
 const _sidebarWidth = 236.0;
 // Keep shell expansion independent from pages' ideal-width breakpoint. At
 // narrower widths the track table already hides its album column, so 600

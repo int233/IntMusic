@@ -183,7 +183,7 @@ class _PlaybackBar extends StatelessWidget {
                 final showPrevious = width >= 470;
                 final showDeviceInline = width >= 620;
                 final showModeInline = width >= 560;
-                final showVolumeInline = width >= 980;
+                final showVolumeInline = !Platform.isAndroid && width >= 520;
                 Widget cover(double size) {
                   final artwork = _ArtworkTile(
                     title: title,
@@ -417,7 +417,7 @@ class _PlaybackBar extends StatelessWidget {
   }
 }
 
-class _VolumeControl extends StatefulWidget {
+class _VolumeControl extends StatelessWidget {
   const _VolumeControl({
     required this.volume,
     required this.muted,
@@ -431,50 +431,109 @@ class _VolumeControl extends StatefulWidget {
   final VoidCallback onToggleMute;
 
   @override
-  State<_VolumeControl> createState() => _VolumeControlState();
-}
-
-class _VolumeControlState extends State<_VolumeControl> {
-  double? _dragValue;
-
-  @override
-  void didUpdateWidget(covariant _VolumeControl oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (_dragValue == null && oldWidget.volume != widget.volume) {
-      _dragValue = null;
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final value = (_dragValue ?? widget.volume).clamp(0.0, 1.0);
-    final icon = widget.muted || value <= 0.001
+    final value = volume.clamp(0.0, 1.0);
+    final icon = muted || value <= 0.001
         ? Icons.volume_off_rounded
         : value < 0.5
         ? Icons.volume_down_rounded
         : Icons.volume_up_rounded;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _AppTooltip(
-          message: _tr(context, widget.muted ? 'Unmute' : 'Mute'),
-          child: IconButton(
-            onPressed: widget.onToggleMute,
-            icon: Icon(icon, size: 20),
+    return Builder(
+      builder: (buttonContext) => _AppTooltip(
+        message: _tr(context, 'Volume'),
+        child: IconButton(
+          onPressed: () => unawaited(
+            _showAnchoredPopup<void>(
+              context: buttonContext,
+              anchorContext: buttonContext,
+              width: 112,
+              maxHeight: 280,
+              child: _VerticalVolumePanel(
+                volume: value,
+                muted: muted,
+                onChanged: onChanged,
+                onToggleMute: onToggleMute,
+              ),
+            ),
           ),
+          icon: Icon(icon, size: 20),
         ),
-        SizedBox(
-          width: 92,
-          child: Slider(
-            value: value,
-            onChanged: (next) => setState(() => _dragValue = next),
-            onChangeEnd: (next) {
-              setState(() => _dragValue = null);
-              widget.onChanged(next);
-            },
+      ),
+    );
+  }
+}
+
+class _VerticalVolumePanel extends StatefulWidget {
+  const _VerticalVolumePanel({
+    required this.volume,
+    required this.muted,
+    required this.onChanged,
+    required this.onToggleMute,
+  });
+
+  final double volume;
+  final bool muted;
+  final ValueChanged<double> onChanged;
+  final VoidCallback onToggleMute;
+
+  @override
+  State<_VerticalVolumePanel> createState() => _VerticalVolumePanelState();
+}
+
+class _VerticalVolumePanelState extends State<_VerticalVolumePanel> {
+  late double _value = widget.volume.clamp(0.0, 1.0);
+  late bool _muted = widget.muted;
+
+  IconData get _icon => _muted || _value <= 0.001
+      ? Icons.volume_off_rounded
+      : _value < 0.5
+      ? Icons.volume_down_rounded
+      : Icons.volume_up_rounded;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      key: const Key('vertical-volume-panel'),
+      padding: const EdgeInsets.fromLTRB(12, 14, 12, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            '${(_value * 100).round()}%',
+            style: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
           ),
-        ),
-      ],
+          const SizedBox(height: 4),
+          SizedBox(
+            height: 170,
+            child: RotatedBox(
+              quarterTurns: 3,
+              child: Slider(
+                value: _value,
+                onChanged: (next) => setState(() {
+                  _value = next;
+                  if (next > 0.001) {
+                    _muted = false;
+                  }
+                }),
+                onChangeEnd: widget.onChanged,
+              ),
+            ),
+          ),
+          const SizedBox(height: 2),
+          _AppTooltip(
+            message: _tr(context, _muted ? 'Unmute' : 'Mute'),
+            child: IconButton(
+              onPressed: () {
+                setState(() => _muted = !_muted);
+                widget.onToggleMute();
+              },
+              icon: Icon(_icon),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

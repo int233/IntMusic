@@ -7,6 +7,8 @@ class _PlaybackPage extends StatelessWidget {
     required this.trackDetail,
     required this.activeZoneId,
     required this.playbackMode,
+    required this.volume,
+    required this.muted,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
@@ -16,6 +18,8 @@ class _PlaybackPage extends StatelessWidget {
     required this.onShowModeMenu,
     required this.onShowQueue,
     required this.onShowDevices,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -25,6 +29,8 @@ class _PlaybackPage extends StatelessWidget {
   final Map<String, dynamic>? trackDetail;
   final String activeZoneId;
   final _PlaybackMode playbackMode;
+  final double volume;
+  final bool muted;
   final Future<void> Function(String) onResume;
   final Future<void> Function(String) onPause;
   final Future<void> Function() onPrevious;
@@ -34,6 +40,8 @@ class _PlaybackPage extends StatelessWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -61,32 +69,39 @@ class _PlaybackPage extends StatelessWidget {
         builder: (context, constraints) {
           if (constraints.maxWidth < _compactWidth ||
               constraints.maxHeight < _compactHeight) {
-            return _CompactPlaybackPager(
-              coreBaseUrl: coreBaseUrl,
-              playback: playback,
-              track: track,
-              trackDetail: trackDetail,
-              trackId: trackId,
-              title: title,
-              artist: artist,
-              album: album,
-              state: state,
-              isPaused: isPaused,
-              activeZoneId: activeZoneId,
-              durationMs: durationMs,
-              lyricsText: lyrics?['text']?.toString() ?? '',
-              playbackMode: playbackMode,
-              onResume: onResume,
-              onPause: onPause,
-              onPrevious: onPrevious,
-              onNext: onNext,
-              onSeek: onSeek,
-              onCycleMode: onCycleMode,
-              onShowModeMenu: onShowModeMenu,
-              onShowQueue: onShowQueue,
-              onShowDevices: onShowDevices,
-              onToggleFavorite: onToggleFavorite,
-              onOpenTrack: onOpenTrack,
+            return _PlaybackLayoutTransition(
+              layoutKey: 'compact',
+              child: _CompactPlaybackPager(
+                coreBaseUrl: coreBaseUrl,
+                playback: playback,
+                track: track,
+                trackDetail: trackDetail,
+                trackId: trackId,
+                title: title,
+                artist: artist,
+                album: album,
+                state: state,
+                isPaused: isPaused,
+                activeZoneId: activeZoneId,
+                durationMs: durationMs,
+                lyricsText: lyrics?['text']?.toString() ?? '',
+                playbackMode: playbackMode,
+                volume: volume,
+                muted: muted,
+                onResume: onResume,
+                onPause: onPause,
+                onPrevious: onPrevious,
+                onNext: onNext,
+                onSeek: onSeek,
+                onCycleMode: onCycleMode,
+                onShowModeMenu: onShowModeMenu,
+                onShowQueue: onShowQueue,
+                onShowDevices: onShowDevices,
+                onVolumeChanged: onVolumeChanged,
+                onToggleMute: onToggleMute,
+                onToggleFavorite: onToggleFavorite,
+                onOpenTrack: onOpenTrack,
+              ),
             );
           }
 
@@ -99,28 +114,32 @@ class _PlaybackPage extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(28, 16, 24, 28),
             child: Column(
               children: [
-                Align(
-                  alignment: Alignment.topCenter,
-                  child: _ArtworkTile(
-                    title: title,
-                    subtitle: artist,
-                    size: artworkSize,
-                    icon: Icons.album_outlined,
-                    imageUrl: _trackArtworkUrl(coreBaseUrl, trackId),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _ArtworkTile(
+                        title: title,
+                        subtitle: artist,
+                        size: artworkSize,
+                        icon: Icons.album_outlined,
+                        imageUrl: _trackArtworkUrl(coreBaseUrl, trackId),
+                      ),
+                      const SizedBox(height: 20),
+                      _PlaybackTrackHeader(
+                        coreBaseUrl: coreBaseUrl,
+                        track: track,
+                        trackId: trackId,
+                        title: title,
+                        artist: artist,
+                        album: album,
+                        compact: true,
+                        onToggleFavorite: onToggleFavorite,
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 20),
-                _PlaybackTrackHeader(
-                  coreBaseUrl: coreBaseUrl,
-                  track: track,
-                  trackId: trackId,
-                  title: title,
-                  artist: artist,
-                  album: album,
-                  compact: true,
-                  onToggleFavorite: onToggleFavorite,
-                ),
-                const Spacer(),
+                const SizedBox(height: 12),
                 _PlaybackProgressControl(
                   playback: playback,
                   durationMs: durationMs,
@@ -144,8 +163,12 @@ class _PlaybackPage extends StatelessWidget {
                 const SizedBox(height: 8),
                 _PlaybackInlineActions(
                   trackId: trackId,
+                  volume: volume,
+                  muted: muted,
                   onShowDevices: onShowDevices,
                   onOpenTrack: onOpenTrack,
+                  onVolumeChanged: onVolumeChanged,
+                  onToggleMute: onToggleMute,
                 ),
               ],
             ),
@@ -163,14 +186,61 @@ class _PlaybackPage extends StatelessWidget {
             ),
           );
 
-          return Row(
-            children: [
-              SizedBox(width: constraints.maxWidth * 0.46, child: left),
-              const SizedBox(width: 1),
-              Expanded(child: right),
-            ],
+          return _PlaybackLayoutTransition(
+            layoutKey: 'split',
+            child: Row(
+              children: [
+                SizedBox(width: constraints.maxWidth * 0.46, child: left),
+                const SizedBox(width: 1),
+                Expanded(child: right),
+              ],
+            ),
           );
         },
+      ),
+    );
+  }
+}
+
+class _PlaybackLayoutTransition extends StatelessWidget {
+  const _PlaybackLayoutTransition({
+    required this.layoutKey,
+    required this.child,
+  });
+
+  final String layoutKey;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final mediaQuery = MediaQuery.maybeOf(context);
+    final reduceMotion =
+        (mediaQuery?.disableAnimations ?? false) ||
+        (mediaQuery?.accessibleNavigation ?? false);
+    final duration = reduceMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 320);
+    return ClipRect(
+      child: AnimatedSwitcher(
+        duration: duration,
+        reverseDuration: duration,
+        switchInCurve: Curves.easeOutCubic,
+        switchOutCurve: Curves.easeInCubic,
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          fit: StackFit.expand,
+          children: [...previousChildren, ?currentChild],
+        ),
+        transitionBuilder: (child, animation) {
+          final scale = Tween<double>(
+            begin: 0.985,
+            end: 1,
+          ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut));
+          return FadeTransition(
+            opacity: animation,
+            child: ScaleTransition(scale: scale, child: child),
+          );
+        },
+        child: KeyedSubtree(key: ValueKey(layoutKey), child: child),
       ),
     );
   }
@@ -192,6 +262,8 @@ class _CompactPlaybackPager extends StatefulWidget {
     required this.durationMs,
     required this.lyricsText,
     required this.playbackMode,
+    required this.volume,
+    required this.muted,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
@@ -201,6 +273,8 @@ class _CompactPlaybackPager extends StatefulWidget {
     required this.onShowModeMenu,
     required this.onShowQueue,
     required this.onShowDevices,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -219,6 +293,8 @@ class _CompactPlaybackPager extends StatefulWidget {
   final int durationMs;
   final String lyricsText;
   final _PlaybackMode playbackMode;
+  final double volume;
+  final bool muted;
   final Future<void> Function(String) onResume;
   final Future<void> Function(String) onPause;
   final Future<void> Function() onPrevious;
@@ -228,6 +304,8 @@ class _CompactPlaybackPager extends StatefulWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -272,6 +350,8 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           activeZoneId: widget.activeZoneId,
           durationMs: widget.durationMs,
           playbackMode: widget.playbackMode,
+          volume: widget.volume,
+          muted: widget.muted,
           page: _page,
           onGoToPage: _goTo,
           onResume: widget.onResume,
@@ -283,6 +363,8 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           onShowModeMenu: widget.onShowModeMenu,
           onShowQueue: widget.onShowQueue,
           onShowDevices: widget.onShowDevices,
+          onVolumeChanged: widget.onVolumeChanged,
+          onToggleMute: widget.onToggleMute,
           onToggleFavorite: widget.onToggleFavorite,
           onOpenTrack: widget.onOpenTrack,
         ),
@@ -300,6 +382,8 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           durationMs: widget.durationMs,
           lyricsText: widget.lyricsText,
           playbackMode: widget.playbackMode,
+          volume: widget.volume,
+          muted: widget.muted,
           page: _page,
           onGoToPage: _goTo,
           onResume: widget.onResume,
@@ -311,6 +395,8 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           onShowModeMenu: widget.onShowModeMenu,
           onShowQueue: widget.onShowQueue,
           onShowDevices: widget.onShowDevices,
+          onVolumeChanged: widget.onVolumeChanged,
+          onToggleMute: widget.onToggleMute,
           onToggleFavorite: widget.onToggleFavorite,
           onOpenTrack: widget.onOpenTrack,
         ),
@@ -333,6 +419,8 @@ class _CompactPlayerPane extends StatelessWidget {
     required this.activeZoneId,
     required this.durationMs,
     required this.playbackMode,
+    required this.volume,
+    required this.muted,
     required this.page,
     required this.onGoToPage,
     required this.onResume,
@@ -344,6 +432,8 @@ class _CompactPlayerPane extends StatelessWidget {
     required this.onShowModeMenu,
     required this.onShowQueue,
     required this.onShowDevices,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -360,6 +450,8 @@ class _CompactPlayerPane extends StatelessWidget {
   final String activeZoneId;
   final int durationMs;
   final _PlaybackMode playbackMode;
+  final double volume;
+  final bool muted;
   final int page;
   final ValueChanged<int> onGoToPage;
   final Future<void> Function(String) onResume;
@@ -371,6 +463,8 @@ class _CompactPlayerPane extends StatelessWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -431,11 +525,15 @@ class _CompactPlayerPane extends StatelessWidget {
               const SizedBox(height: 8),
               _CompactPlaybackExtensions(
                 page: page,
+                volume: volume,
+                muted: muted,
                 onGoToPage: onGoToPage,
                 onShowDevices: onShowDevices,
                 onOpenTrack: trackId == null
                     ? null
                     : () => unawaited(onOpenTrack(trackId!)),
+                onVolumeChanged: onVolumeChanged,
+                onToggleMute: onToggleMute,
               ),
             ],
           ),
@@ -466,6 +564,8 @@ class _CompactLyricsPane extends StatelessWidget {
     required this.durationMs,
     required this.lyricsText,
     required this.playbackMode,
+    required this.volume,
+    required this.muted,
     required this.page,
     required this.onGoToPage,
     required this.onResume,
@@ -477,6 +577,8 @@ class _CompactLyricsPane extends StatelessWidget {
     required this.onShowModeMenu,
     required this.onShowQueue,
     required this.onShowDevices,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -494,6 +596,8 @@ class _CompactLyricsPane extends StatelessWidget {
   final int durationMs;
   final String lyricsText;
   final _PlaybackMode playbackMode;
+  final double volume;
+  final bool muted;
   final int page;
   final ValueChanged<int> onGoToPage;
   final Future<void> Function(String) onResume;
@@ -505,6 +609,8 @@ class _CompactLyricsPane extends StatelessWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -559,11 +665,15 @@ class _CompactLyricsPane extends StatelessWidget {
           ),
           _CompactPlaybackExtensions(
             page: page,
+            volume: volume,
+            muted: muted,
             onGoToPage: onGoToPage,
             onShowDevices: onShowDevices,
             onOpenTrack: trackId == null
                 ? null
                 : () => unawaited(onOpenTrack(trackId!)),
+            onVolumeChanged: onVolumeChanged,
+            onToggleMute: onToggleMute,
           ),
         ],
       ),
@@ -752,13 +862,21 @@ class _PlaybackButtonRow extends StatelessWidget {
 class _PlaybackInlineActions extends StatelessWidget {
   const _PlaybackInlineActions({
     required this.trackId,
+    required this.volume,
+    required this.muted,
     required this.onShowDevices,
     required this.onOpenTrack,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
   });
 
   final int? trackId;
+  final double volume;
+  final bool muted;
   final void Function(BuildContext) onShowDevices;
   final Future<void> Function(int) onOpenTrack;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
 
   @override
   Widget build(BuildContext context) {
@@ -779,6 +897,12 @@ class _PlaybackInlineActions extends StatelessWidget {
           icon: const Icon(Icons.info_outline),
           label: Text(_tr(context, 'Details')),
         ),
+        _VolumeControl(
+          volume: volume,
+          muted: muted,
+          onChanged: onVolumeChanged,
+          onToggleMute: onToggleMute,
+        ),
       ],
     );
   }
@@ -787,15 +911,23 @@ class _PlaybackInlineActions extends StatelessWidget {
 class _CompactPlaybackExtensions extends StatelessWidget {
   const _CompactPlaybackExtensions({
     required this.page,
+    required this.volume,
+    required this.muted,
     required this.onGoToPage,
     required this.onShowDevices,
     required this.onOpenTrack,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
   });
 
   final int page;
+  final double volume;
+  final bool muted;
   final ValueChanged<int> onGoToPage;
   final void Function(BuildContext) onShowDevices;
   final VoidCallback? onOpenTrack;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
 
   @override
   Widget build(BuildContext context) {
@@ -820,6 +952,12 @@ class _CompactPlaybackExtensions extends StatelessWidget {
           onPressed: onOpenTrack,
           icon: const Icon(Icons.info_outline),
           label: Text(_tr(context, 'Details')),
+        ),
+        _VolumeControl(
+          volume: volume,
+          muted: muted,
+          onChanged: onVolumeChanged,
+          onToggleMute: onToggleMute,
         ),
         _AppTooltip(
           message: _tr(context, 'Lyrics page'),
@@ -1254,6 +1392,9 @@ class _ZonesPanel extends StatelessWidget {
     required this.selectedZoneId,
     required this.activeZoneId,
     required this.hasActiveTrack,
+    required this.currentClientZonePrefix,
+    required this.pinCurrentClientRegion,
+    required this.regionSort,
     required this.onSelect,
     required this.onResume,
     required this.onPause,
@@ -1266,6 +1407,9 @@ class _ZonesPanel extends StatelessWidget {
   final String selectedZoneId;
   final String activeZoneId;
   final bool hasActiveTrack;
+  final String currentClientZonePrefix;
+  final bool pinCurrentClientRegion;
+  final _ZoneRegionSort regionSort;
   final Future<void> Function(Map<String, dynamic>) onSelect;
   final Future<void> Function(String) onResume;
   final Future<void> Function(String) onPause;
@@ -1281,24 +1425,47 @@ class _ZonesPanel extends StatelessWidget {
       final group = _zoneGroupName(zone);
       groups.putIfAbsent(group, () => []).add(zone);
     }
+    bool isPlaying(Map<String, dynamic> zone) =>
+        zone['state']?.toString() == 'playing';
     for (final groupZones in groups.values) {
-      groupZones.sort(
-        (left, right) => (left['name']?.toString() ?? '').compareTo(
-          right['name']?.toString() ?? '',
-        ),
-      );
+      groupZones.sort((left, right) {
+        if (regionSort == _ZoneRegionSort.playingFirst) {
+          final playingOrder =
+              (isPlaying(right) ? 1 : 0) - (isPlaying(left) ? 1 : 0);
+          if (playingOrder != 0) {
+            return playingOrder;
+          }
+        }
+        return _zoneDisplayName(
+          left,
+        ).toLowerCase().compareTo(_zoneDisplayName(right).toLowerCase());
+      });
     }
     final groupEntries = groups.entries.toList()
       ..sort((left, right) {
-        final leftCore = left.value.any((zone) => zone['is_remote'] != true);
-        final rightCore = right.value.any((zone) => zone['is_remote'] != true);
-        if (leftCore && !rightCore) {
-          return -1;
+        if (pinCurrentClientRegion) {
+          final leftCurrent = left.value.any(
+            (zone) =>
+                zone['id']?.toString().startsWith(currentClientZonePrefix) ==
+                true,
+          );
+          final rightCurrent = right.value.any(
+            (zone) =>
+                zone['id']?.toString().startsWith(currentClientZonePrefix) ==
+                true,
+          );
+          if (leftCurrent != rightCurrent) {
+            return leftCurrent ? -1 : 1;
+          }
         }
-        if (rightCore && !leftCore) {
-          return 1;
+        if (regionSort == _ZoneRegionSort.playingFirst) {
+          final leftPlaying = left.value.any(isPlaying);
+          final rightPlaying = right.value.any(isPlaying);
+          if (leftPlaying != rightPlaying) {
+            return leftPlaying ? -1 : 1;
+          }
         }
-        return left.key.compareTo(right.key);
+        return left.key.toLowerCase().compareTo(right.key.toLowerCase());
       });
 
     return Material(
@@ -1599,6 +1766,9 @@ class _DeviceSheetSnapshot {
 class _DeviceSheet extends StatefulWidget {
   const _DeviceSheet({
     required this.snapshot,
+    required this.currentClientZonePrefix,
+    required this.pinCurrentClientRegion,
+    required this.regionSort,
     required this.onRefresh,
     required this.onSelect,
     required this.onResume,
@@ -1611,6 +1781,9 @@ class _DeviceSheet extends StatefulWidget {
   });
 
   final _DeviceSheetSnapshot snapshot;
+  final String currentClientZonePrefix;
+  final bool pinCurrentClientRegion;
+  final _ZoneRegionSort regionSort;
   final Future<_DeviceSheetSnapshot> Function() onRefresh;
   final Future<void> Function(Map<String, dynamic>) onSelect;
   final Future<void> Function(String) onResume;
@@ -1722,6 +1895,9 @@ class _DeviceSheetState extends State<_DeviceSheet> {
                 selectedZoneId: _snapshot.selectedZoneId,
                 activeZoneId: _snapshot.activeZoneId,
                 hasActiveTrack: hasActiveTrack,
+                currentClientZonePrefix: widget.currentClientZonePrefix,
+                pinCurrentClientRegion: widget.pinCurrentClientRegion,
+                regionSort: widget.regionSort,
                 onSelect: (zone) async {
                   await widget.onSelect(zone);
                   await _refresh();

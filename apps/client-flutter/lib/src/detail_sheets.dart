@@ -27,6 +27,11 @@ class _AlbumInfoPage extends StatelessWidget {
     }
     final album = _asMap(detail['album']);
     final tracks = (detail['tracks'] as List?) ?? const [];
+    final discNumbers = tracks
+        .map((item) => _intValue((item as Map)['disc_number']) ?? 1)
+        .toSet();
+    final showDiscSeparators =
+        discNumbers.length > 1 || discNumbers.any((disc) => disc > 1);
     return _PageFrame(
       title: 'Album detail',
       child: Column(
@@ -49,33 +54,81 @@ class _AlbumInfoPage extends StatelessWidget {
           ),
           const Divider(height: 1),
           Expanded(
-            child: ListView.separated(
+            child: ListView.builder(
               padding: const EdgeInsets.symmetric(vertical: 8),
               itemCount: tracks.length,
-              separatorBuilder: (context, index) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 final track = (tracks[index] as Map).cast<String, dynamic>();
                 final id = _intValue(track['id']);
-                return _SheetTrackRow(
-                  coreBaseUrl: coreBaseUrl,
-                  track: track,
-                  indexLabel: _trackNumber(track),
-                  subtitle: _joinParts([
-                    track['artist_display'],
-                    _formatDuration(track['duration_ms']),
-                    _ratingLabel(track),
-                  ]),
-                  onOpen: id == null ? null : () => unawaited(onOpenTrack(id)),
-                  onPlay: id == null ? null : () => unawaited(onPlayTrack(id)),
-                  onToggleFavorite: onToggleFavorite,
-                  onAddToPlaylist: id == null
-                      ? null
-                      : () => unawaited(onAddToPlaylist(id)),
+                final discNumber = _intValue(track['disc_number']) ?? 1;
+                final previousDiscNumber = index == 0
+                    ? null
+                    : _intValue((tracks[index - 1] as Map)['disc_number']) ?? 1;
+                final startsDisc =
+                    showDiscSeparators && discNumber != previousDiscNumber;
+                return Column(
+                  children: [
+                    if (startsDisc) _DiscSeparator(discNumber: discNumber),
+                    if (index > 0 && !startsDisc) const Divider(height: 1),
+                    _SheetTrackRow(
+                      coreBaseUrl: coreBaseUrl,
+                      track: track,
+                      indexLabel: showDiscSeparators
+                          ? (_intValue(track['track_number'])?.toString() ??
+                                '-')
+                          : _trackNumber(track),
+                      subtitle: _joinParts([
+                        track['artist_display'],
+                        _formatDuration(track['duration_ms']),
+                        _ratingLabel(track),
+                      ]),
+                      onOpen: id == null
+                          ? null
+                          : () => unawaited(onOpenTrack(id)),
+                      onPlay: id == null
+                          ? null
+                          : () => unawaited(onPlayTrack(id)),
+                      onToggleFavorite: onToggleFavorite,
+                      onAddToPlaylist: id == null
+                          ? null
+                          : () => unawaited(onAddToPlaylist(id)),
+                    ),
+                  ],
                 );
               },
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _DiscSeparator extends StatelessWidget {
+  const _DiscSeparator({required this.discNumber});
+
+  final int discNumber;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
+    return Semantics(
+      header: true,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 14, 24, 8),
+        child: Row(
+          children: [
+            Text(
+              '${_tr(context, 'Disc')} $discNumber',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                color: tokens.textSecondary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Divider(color: tokens.stroke)),
+          ],
+        ),
       ),
     );
   }

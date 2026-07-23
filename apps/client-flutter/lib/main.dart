@@ -39,6 +39,9 @@ const _prefsArtistViewModeKey = 'intmusic.view.artists';
 const _prefsTrackViewModeKey = 'intmusic.view.tracks';
 const _prefsPlaylistViewModeKey = 'intmusic.view.playlists';
 const _prefsRecentSearchesKey = 'intmusic.search.recent';
+const _prefsPinCurrentClientRegionKey =
+    'intmusic.playback_regions.pin_current_client';
+const _prefsRegionSortKey = 'intmusic.playback_regions.sort';
 final CacheManager _artworkCacheManager = CacheManager(
   Config(
     'intmusicArtworkCache',
@@ -155,6 +158,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   _LibraryViewMode _artistViewMode = _LibraryViewMode.grid;
   _LibraryViewMode _trackViewMode = _LibraryViewMode.list;
   _LibraryViewMode _playlistViewMode = _LibraryViewMode.grid;
+  bool _pinCurrentClientRegion = true;
+  _ZoneRegionSort _zoneRegionSort = _ZoneRegionSort.playingFirst;
   List<_SearchSuggestion> _searchSuggestions = const [];
   List<String> _recentSearches = const [];
   late final AnimationController _playbackRevealController;
@@ -164,6 +169,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   String get _clientId => _sanitizeRendererId(
     'flutter-${Platform.operatingSystem}-${Platform.localHostname}',
   );
+  String get _clientZonePrefix => 'renderer:$_clientId:';
   String get _clientOutputId => 'renderer:$_clientId:default';
 
   @override
@@ -290,6 +296,11 @@ class _CoreDashboardState extends State<CoreDashboard>
       );
       final recentSearches =
           preferences.getStringList(_prefsRecentSearchesKey) ?? const [];
+      final pinCurrentClientRegion =
+          preferences.getBool(_prefsPinCurrentClientRegionKey) ?? true;
+      final zoneRegionSort = _zoneRegionSortFromPreference(
+        preferences.getString(_prefsRegionSortKey),
+      );
       if (!mounted) {
         return;
       }
@@ -304,6 +315,8 @@ class _CoreDashboardState extends State<CoreDashboard>
         _artistViewMode = artistViewMode;
         _trackViewMode = trackViewMode;
         _playlistViewMode = playlistViewMode;
+        _pinCurrentClientRegion = pinCurrentClientRegion;
+        _zoneRegionSort = zoneRegionSort;
         _recentSearches = recentSearches.take(10).toList(growable: false);
         _clientAliasController.text = savedClientAlias?.isNotEmpty == true
             ? savedClientAlias!
@@ -365,6 +378,35 @@ class _CoreDashboardState extends State<CoreDashboard>
       await preferences.setString(preferenceKey, mode.name);
     } catch (_) {
       // View preferences are non-critical and remain valid for this session.
+    }
+  }
+
+  _ZoneRegionSort _zoneRegionSortFromPreference(String? value) {
+    return switch (value) {
+      'name' => _ZoneRegionSort.name,
+      _ => _ZoneRegionSort.playingFirst,
+    };
+  }
+
+  Future<void> _setPinCurrentClientRegion(bool value) async {
+    setState(() => _pinCurrentClientRegion = value);
+    try {
+      final preferences = _preferences ?? await SharedPreferences.getInstance();
+      _preferences = preferences;
+      await preferences.setBool(_prefsPinCurrentClientRegionKey, value);
+    } catch (_) {
+      // Region ordering remains available for the current session.
+    }
+  }
+
+  Future<void> _setZoneRegionSort(_ZoneRegionSort value) async {
+    setState(() => _zoneRegionSort = value);
+    try {
+      final preferences = _preferences ?? await SharedPreferences.getInstance();
+      _preferences = preferences;
+      await preferences.setString(_prefsRegionSortKey, value.name);
+    } catch (_) {
+      // Region ordering remains available for the current session.
     }
   }
 
@@ -1753,6 +1795,33 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  Future<void> _playTrackFromCollection(
+    int trackId,
+    List<dynamic> sourceTracks,
+  ) async {
+    final trackIds = sourceTracks
+        .map((track) => _intValue((track as Map)['id']))
+        .whereType<int>()
+        .toList(growable: false);
+    final startIndex = trackIds.indexOf(trackId);
+    if (startIndex < 0) {
+      await _playTrack(trackId);
+      return;
+    }
+    final queue = await _replaceQueue(
+      trackIds,
+      startIndex: startIndex,
+      mode: _PlaybackMode.sequential,
+    );
+    if (queue == null) {
+      return;
+    }
+    final playback = await _playTrackOnZone(trackId, _activeZoneId());
+    if (mounted && playback != null) {
+      setState(() => _applyPlayback(playback));
+    }
+  }
+
   Future<Map<String, dynamic>?> _playTrackOnZone(int trackId, String zoneId) {
     return _run<Map<String, dynamic>>(
       () async => _asMap(
@@ -2041,6 +2110,9 @@ class _CoreDashboardState extends State<CoreDashboard>
         maxHeight: 620,
         child: _DeviceSheet(
           snapshot: _currentDeviceSheetSnapshot(),
+          currentClientZonePrefix: _clientZonePrefix,
+          pinCurrentClientRegion: _pinCurrentClientRegion,
+          regionSort: _zoneRegionSort,
           onRefresh: _refreshDeviceSheetSnapshot,
           onSelect: _selectZone,
           onResume: _resumeZone,
@@ -2838,6 +2910,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       trackDetail: _activeTrackDetail,
       activeZoneId: _activeZoneId(),
       playbackMode: _playbackMode,
+      volume: _activeZoneVolume(),
+      muted: _activeZoneMuted(),
       onResume: _resumeZone,
       onPause: _pauseZone,
       onPrevious: _playPreviousTrack,
@@ -2847,6 +2921,10 @@ class _CoreDashboardState extends State<CoreDashboard>
       onShowModeMenu: _showPlaybackModeMenu,
       onShowQueue: _showQueueSheet,
       onShowDevices: _showDeviceSheet,
+      onVolumeChanged: (value) => unawaited(_setActiveZoneVolume(value)),
+      onToggleMute: () => unawaited(
+        _setActiveZoneVolume(_activeZoneVolume(), muted: !_activeZoneMuted()),
+      ),
       onToggleFavorite: _toggleFavorite,
       onOpenTrack: _openTrackDetail,
     );
@@ -2942,6 +3020,8 @@ class _CoreDashboardState extends State<CoreDashboard>
           libraryRoots: _libraryRoots,
           diagnostics: _diagnostics,
           language: _language,
+          pinCurrentClientRegion: _pinCurrentClientRegion,
+          zoneRegionSort: _zoneRegionSort,
           libraryRootController: _libraryRootController,
           onConnect: _refreshAll,
           onDiscover: _discoverAndRefresh,
@@ -2951,6 +3031,10 @@ class _CoreDashboardState extends State<CoreDashboard>
           onSaveServerAlias: () => unawaited(_saveServerAlias()),
           onSaveClientAlias: () => unawaited(_saveClientAlias()),
           onLanguageChanged: (language) => unawaited(_setLanguage(language)),
+          onPinCurrentClientRegionChanged: (value) =>
+              unawaited(_setPinCurrentClientRegion(value)),
+          onZoneRegionSortChanged: (value) =>
+              unawaited(_setZoneRegionSort(value)),
           onUpdateFavoriteSettings: _updateFavoriteSettings,
           onUpdateMetadataSettings: _updateMetadataSettings,
         );
@@ -2985,11 +3069,17 @@ class _CoreDashboardState extends State<CoreDashboard>
           onAddToPlaylist: _addTrackToPlaylist,
         );
       case _AppRouteKind.album:
+        final detail =
+            _albumDetailCache[_currentRoute.entityId] ??
+            const <String, dynamic>{};
         return _AlbumInfoPage(
           coreBaseUrl: _coreUrlController.text,
-          detail: _albumDetailCache[_currentRoute.entityId],
+          detail: detail,
           onClose: _closeAlbumDetail,
-          onPlayTrack: _playTrack,
+          onPlayTrack: (trackId) => _playTrackFromCollection(
+            trackId,
+            (detail['tracks'] as List?) ?? const [],
+          ),
           onOpenTrack: _openTrackDetail,
           onToggleFavorite: _toggleFavorite,
           onAddToPlaylist: _addTrackToPlaylist,
@@ -3012,7 +3102,10 @@ class _CoreDashboardState extends State<CoreDashboard>
         return _PlaylistDetailPage(
           coreBaseUrl: _coreUrlController.text,
           detail: detail,
-          onPlayTrack: _playTrack,
+          onPlayTrack: (trackId) => _playTrackFromCollection(
+            trackId,
+            (detail['tracks'] as List?) ?? const [],
+          ),
           onOpenTrack: _openTrackDetail,
           onToggleFavorite: _toggleFavorite,
           onEditSmart: playlistId == null

@@ -97,6 +97,67 @@ void main() {
     expect(preferences.getString('intmusic.view.tracks'), 'grid');
   });
 
+  testWidgets('persists playback device region preferences', (tester) async {
+    await pumpDesktop(tester);
+    await tester.tap(find.byIcon(Icons.tune_outlined).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 280));
+
+    final pinSetting = find.byKey(const Key('pin-current-client-region'));
+    final settingsScroll = find.byKey(const Key('settings-scroll-view'));
+    await tester.drag(settingsScroll, const Offset(0, -320));
+    await tester.pump();
+    await tester.tap(pinSetting);
+    await tester.pump();
+
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.getBool('intmusic.playback_regions.pin_current_client'),
+      isFalse,
+    );
+
+    await tester.tap(find.byKey(const Key('region-sort-dropdown')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Name').last);
+    await tester.pump();
+
+    expect(preferences.getString('intmusic.playback_regions.sort'), 'name');
+  });
+
+  testWidgets('opens a vertical volume control from the playback bar', (
+    tester,
+  ) async {
+    await pumpDesktop(tester);
+
+    await tester.tap(find.byIcon(Icons.volume_up_rounded).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.byKey(const Key('vertical-volume-panel')), findsOneWidget);
+    expect(find.text('100%'), findsOneWidget);
+  });
+
+  testWidgets('animates between split and compact playback layouts', (
+    tester,
+  ) async {
+    await pumpDesktop(tester);
+    await tester.tap(find.text('Playback').first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 340));
+    expect(find.byKey(const ValueKey('split')), findsOneWidget);
+
+    tester.view.physicalSize = const Size(850, 800);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 120));
+    expect(find.byKey(const ValueKey('split')), findsOneWidget);
+    expect(find.byKey(const ValueKey('compact')), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 240));
+    expect(find.byKey(const ValueKey('split')), findsNothing);
+    expect(find.byKey(const ValueKey('compact')), findsOneWidget);
+  });
+
   testWidgets('animates the desktop sidebar across its width threshold', (
     tester,
   ) async {
