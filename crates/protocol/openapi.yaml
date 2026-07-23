@@ -46,6 +46,29 @@ paths:
       responses:
         "200":
           description: Paged tracks.
+  /tracks/{track_id}:
+    get:
+      summary: Return effective track metadata, file information, and lyrics.
+      responses:
+        "200":
+          description: Track detail.
+  /tracks/{track_id}/edit:
+    get:
+      summary: Return editable fields with file values, manual overrides, and revision.
+      responses:
+        "200":
+          description: Track edit snapshot.
+    post:
+      summary: Apply revision-checked, non-destructive metadata and lyric edits.
+      responses:
+        "200":
+          description: Updated track edit snapshot.
+  /tracks/{track_id}/lyrics:
+    get:
+      summary: Return lyrics, translation, pronunciation, timing offset, and parsed cues.
+      responses:
+        "200":
+          description: Structured lyric payload.
   /search:
     get:
       summary: Search tracks, albums, and artists.

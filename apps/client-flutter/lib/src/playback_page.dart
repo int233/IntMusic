@@ -85,6 +85,9 @@ class _PlaybackPage extends StatelessWidget {
                 activeZoneId: activeZoneId,
                 durationMs: durationMs,
                 lyricsText: lyrics?['text']?.toString() ?? '',
+                lyricsTranslation: lyrics?['translation']?.toString() ?? '',
+                lyricsPronunciation: lyrics?['pronunciation']?.toString() ?? '',
+                lyricsOffsetMs: _intValue(lyrics?['offset_ms']) ?? 0,
                 playbackMode: playbackMode,
                 volume: volume,
                 muted: muted,
@@ -178,6 +181,9 @@ class _PlaybackPage extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(24, 18, 28, 28),
             child: _LyricsPanel(
               lyricsText: lyrics?['text']?.toString() ?? '',
+              translationText: lyrics?['translation']?.toString() ?? '',
+              pronunciationText: lyrics?['pronunciation']?.toString() ?? '',
+              offsetMs: _intValue(lyrics?['offset_ms']) ?? 0,
               playback: playback,
               durationMs: durationMs,
               onSeek: onSeek,
@@ -261,6 +267,9 @@ class _CompactPlaybackPager extends StatefulWidget {
     required this.activeZoneId,
     required this.durationMs,
     required this.lyricsText,
+    required this.lyricsTranslation,
+    required this.lyricsPronunciation,
+    required this.lyricsOffsetMs,
     required this.playbackMode,
     required this.volume,
     required this.muted,
@@ -292,6 +301,9 @@ class _CompactPlaybackPager extends StatefulWidget {
   final String activeZoneId;
   final int durationMs;
   final String lyricsText;
+  final String lyricsTranslation;
+  final String lyricsPronunciation;
+  final int lyricsOffsetMs;
   final _PlaybackMode playbackMode;
   final double volume;
   final bool muted;
@@ -381,6 +393,9 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           activeZoneId: widget.activeZoneId,
           durationMs: widget.durationMs,
           lyricsText: widget.lyricsText,
+          lyricsTranslation: widget.lyricsTranslation,
+          lyricsPronunciation: widget.lyricsPronunciation,
+          lyricsOffsetMs: widget.lyricsOffsetMs,
           playbackMode: widget.playbackMode,
           volume: widget.volume,
           muted: widget.muted,
@@ -563,6 +578,9 @@ class _CompactLyricsPane extends StatelessWidget {
     required this.activeZoneId,
     required this.durationMs,
     required this.lyricsText,
+    required this.lyricsTranslation,
+    required this.lyricsPronunciation,
+    required this.lyricsOffsetMs,
     required this.playbackMode,
     required this.volume,
     required this.muted,
@@ -595,6 +613,9 @@ class _CompactLyricsPane extends StatelessWidget {
   final String activeZoneId;
   final int durationMs;
   final String lyricsText;
+  final String lyricsTranslation;
+  final String lyricsPronunciation;
+  final int lyricsOffsetMs;
   final _PlaybackMode playbackMode;
   final double volume;
   final bool muted;
@@ -635,6 +656,9 @@ class _CompactLyricsPane extends StatelessWidget {
           Expanded(
             child: _LyricsPanel(
               lyricsText: lyricsText,
+              translationText: lyricsTranslation,
+              pronunciationText: lyricsPronunciation,
+              offsetMs: lyricsOffsetMs,
               playback: playback,
               durationMs: durationMs,
               onSeek: onSeek,
@@ -1154,6 +1178,9 @@ class _PlaybackProgressControlState extends State<_PlaybackProgressControl> {
 class _LyricsPanel extends StatefulWidget {
   const _LyricsPanel({
     required this.lyricsText,
+    this.translationText = '',
+    this.pronunciationText = '',
+    this.offsetMs = 0,
     required this.playback,
     required this.durationMs,
     this.onSeek,
@@ -1162,6 +1189,9 @@ class _LyricsPanel extends StatefulWidget {
   });
 
   final String lyricsText;
+  final String translationText;
+  final String pronunciationText;
+  final int offsetMs;
   final Map<String, dynamic>? playback;
   final int durationMs;
   final Future<void> Function(int)? onSeek;
@@ -1196,6 +1226,9 @@ class _LyricsPanelState extends State<_LyricsPanel> {
   void _syncTimer() {
     final hasTimedLyrics = _parseLyricLines(
       widget.lyricsText,
+      translationText: widget.translationText,
+      pronunciationText: widget.pronunciationText,
+      offsetMs: widget.offsetMs,
     ).any((line) => line.timeMs != null);
     final shouldTick =
         hasTimedLyrics &&
@@ -1206,7 +1239,7 @@ class _LyricsPanelState extends State<_LyricsPanel> {
       _timer = null;
       return;
     }
-    _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {
+    _timer ??= Timer.periodic(const Duration(milliseconds: 250), (_) {
       if (mounted) {
         setState(() {});
       }
@@ -1263,6 +1296,9 @@ class _LyricsPanelState extends State<_LyricsPanel> {
                 blendMode: BlendMode.dstIn,
                 child: _LyricsView(
                   lyricsText: widget.lyricsText,
+                  translationText: widget.translationText,
+                  pronunciationText: widget.pronunciationText,
+                  offsetMs: widget.offsetMs,
                   positionMs: positionMs,
                   onSeek: widget.onSeek,
                 ),
@@ -1278,11 +1314,17 @@ class _LyricsPanelState extends State<_LyricsPanel> {
 class _LyricsView extends StatefulWidget {
   const _LyricsView({
     required this.lyricsText,
+    required this.translationText,
+    required this.pronunciationText,
+    required this.offsetMs,
     required this.positionMs,
     this.onSeek,
   });
 
   final String lyricsText;
+  final String translationText;
+  final String pronunciationText;
+  final int offsetMs;
   final int positionMs;
   final Future<void> Function(int)? onSeek;
 
@@ -1292,6 +1334,7 @@ class _LyricsView extends StatefulWidget {
 
 class _LyricsViewState extends State<_LyricsView> {
   final _controller = ScrollController();
+  final Map<int, GlobalKey> _lineKeys = {};
 
   @override
   void initState() {
@@ -1302,13 +1345,27 @@ class _LyricsViewState extends State<_LyricsView> {
   @override
   void didUpdateWidget(covariant _LyricsView oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final lyricsChanged = oldWidget.lyricsText != widget.lyricsText;
+    final lyricsChanged =
+        oldWidget.lyricsText != widget.lyricsText ||
+        oldWidget.translationText != widget.translationText ||
+        oldWidget.pronunciationText != widget.pronunciationText ||
+        oldWidget.offsetMs != widget.offsetMs;
     final oldIndex = _currentLyricIndex(
-      _parseLyricLines(oldWidget.lyricsText),
+      _parseLyricLines(
+        oldWidget.lyricsText,
+        translationText: oldWidget.translationText,
+        pronunciationText: oldWidget.pronunciationText,
+        offsetMs: oldWidget.offsetMs,
+      ),
       oldWidget.positionMs,
     );
     final newIndex = _currentLyricIndex(
-      _parseLyricLines(widget.lyricsText),
+      _parseLyricLines(
+        widget.lyricsText,
+        translationText: widget.translationText,
+        pronunciationText: widget.pronunciationText,
+        offsetMs: widget.offsetMs,
+      ),
       widget.positionMs,
     );
     if (lyricsChanged || oldIndex != newIndex) {
@@ -1327,28 +1384,38 @@ class _LyricsViewState extends State<_LyricsView> {
       if (!_controller.hasClients) {
         return;
       }
-      final lines = _parseLyricLines(widget.lyricsText);
+      final lines = _parseLyricLines(
+        widget.lyricsText,
+        translationText: widget.translationText,
+        pronunciationText: widget.pronunciationText,
+        offsetMs: widget.offsetMs,
+      );
       final index = _currentLyricIndex(lines, widget.positionMs);
       if (index < 0) {
         return;
       }
-      final target = (index * 40.0 - 112).clamp(
-        0.0,
-        _controller.position.maxScrollExtent,
-      );
-      unawaited(
-        _controller.animateTo(
-          target,
-          duration: const Duration(milliseconds: 240),
-          curve: Curves.easeOutCubic,
-        ),
-      );
+      final lineContext = _lineKeys[index]?.currentContext;
+      if (lineContext != null) {
+        unawaited(
+          Scrollable.ensureVisible(
+            lineContext,
+            alignment: 0.36,
+            duration: const Duration(milliseconds: 420),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    final lines = _parseLyricLines(widget.lyricsText);
+    final lines = _parseLyricLines(
+      widget.lyricsText,
+      translationText: widget.translationText,
+      pronunciationText: widget.pronunciationText,
+      offsetMs: widget.offsetMs,
+    );
     if (lines.isEmpty) {
       return const Center(child: Text('No embedded lyrics'));
     }
@@ -1361,27 +1428,102 @@ class _LyricsViewState extends State<_LyricsView> {
       itemBuilder: (context, index) {
         final line = lines[index];
         final isCurrent = index == currentIndex;
+        final distance = currentIndex < 0 ? 4 : (index - currentIndex).abs();
+        final opacity = isCurrent
+            ? 1.0
+            : (1 - distance * 0.11).clamp(0.42, 0.8);
         return InkWell(
+          key: _lineKeys.putIfAbsent(index, () => GlobalKey()),
           onTap: line.timeMs == null || widget.onSeek == null
               ? null
               : () => unawaited(widget.onSeek!(line.timeMs!)),
-          borderRadius: BorderRadius.circular(6),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-            child: Text(
-              line.text,
-              style: TextStyle(
-                height: 1.35,
-                fontSize: isCurrent ? 18 : 15,
-                color: isCurrent
-                    ? Theme.of(context).colorScheme.secondary
-                    : null,
-                fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w400,
+          borderRadius: BorderRadius.circular(10),
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 220),
+            opacity: opacity,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+              child: AnimatedDefaultTextStyle(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOutCubic,
+                style: TextStyle(
+                  height: 1.18,
+                  fontSize: isCurrent ? 27 : 21,
+                  color: isCurrent
+                      ? Theme.of(context).colorScheme.secondary
+                      : IntMusicTheme.of(context).textPrimary,
+                  fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w600,
+                  letterSpacing: -0.35,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (line.speaker != null) ...[
+                      Text(
+                        line.speaker!,
+                        style: TextStyle(
+                          color: IntMusicTheme.of(context).accent,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                    ],
+                    _timedLineText(line, isCurrent),
+                    if (line.pronunciation != null) ...[
+                      const SizedBox(height: 5),
+                      Text(
+                        line.pronunciation!,
+                        style: TextStyle(
+                          color: IntMusicTheme.of(context).textSecondary,
+                          fontSize: isCurrent ? 15 : 13,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: 0,
+                        ),
+                      ),
+                    ],
+                    if (line.translation != null) ...[
+                      const SizedBox(height: 5),
+                      Text(
+                        line.translation!,
+                        style: TextStyle(
+                          color: IntMusicTheme.of(context).textSecondary,
+                          fontSize: isCurrent ? 16 : 14,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: 0,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ),
           ),
         );
       },
+    );
+  }
+
+  Widget _timedLineText(_LyricLine line, bool isCurrent) {
+    if (!isCurrent || line.segments.isEmpty) {
+      return Text(line.text);
+    }
+    final tokens = IntMusicTheme.of(context);
+    return Text.rich(
+      TextSpan(
+        children: [
+          for (final segment in line.segments)
+            TextSpan(
+              text: segment.text,
+              style: TextStyle(
+                color: widget.positionMs >= segment.startMs
+                    ? Theme.of(context).colorScheme.secondary
+                    : tokens.textPrimary.withValues(alpha: 0.48),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
@@ -2239,13 +2381,88 @@ class _QueueSheetState extends State<_QueueSheet> {
 }
 
 class _LyricLine {
-  const _LyricLine(this.timeMs, this.text);
+  const _LyricLine(
+    this.timeMs,
+    this.text, {
+    this.translation,
+    this.pronunciation,
+    this.speaker,
+    this.segments = const [],
+  });
 
   final int? timeMs;
   final String text;
+  final String? translation;
+  final String? pronunciation;
+  final String? speaker;
+  final List<_LyricSegment> segments;
+
+  _LyricLine copyWith({String? translation, String? pronunciation}) =>
+      _LyricLine(
+        timeMs,
+        text,
+        translation: translation ?? this.translation,
+        pronunciation: pronunciation ?? this.pronunciation,
+        speaker: speaker,
+        segments: segments,
+      );
 }
 
-List<_LyricLine> _parseLyricLines(String text) {
+class _LyricSegment {
+  const _LyricSegment({required this.startMs, required this.text});
+
+  final int startMs;
+  final String text;
+}
+
+List<_LyricLine> _parseLyricLines(
+  String text, {
+  String translationText = '',
+  String pronunciationText = '',
+  int offsetMs = 0,
+}) {
+  final primary = _parseSingleLyricTrack(text, offsetMs: offsetMs);
+  if (primary.isEmpty) return primary;
+  final translations = _parseSingleLyricTrack(
+    translationText,
+    offsetMs: offsetMs,
+  );
+  final pronunciations = _parseSingleLyricTrack(
+    pronunciationText,
+    offsetMs: offsetMs,
+  );
+  final translationByTime = {
+    for (final line in translations)
+      if (line.timeMs != null) line.timeMs!: line.text,
+  };
+  final pronunciationByTime = {
+    for (final line in pronunciations)
+      if (line.timeMs != null) line.timeMs!: line.text,
+  };
+  final translationsArePlain = translations.every(
+    (line) => line.timeMs == null,
+  );
+  final pronunciationsArePlain = pronunciations.every(
+    (line) => line.timeMs == null,
+  );
+  return [
+    for (var index = 0; index < primary.length; index++)
+      primary[index].copyWith(
+        translation: primary[index].timeMs == null || translationsArePlain
+            ? index < translations.length
+                  ? translations[index].text
+                  : null
+            : translationByTime[primary[index].timeMs],
+        pronunciation: primary[index].timeMs == null || pronunciationsArePlain
+            ? index < pronunciations.length
+                  ? pronunciations[index].text
+                  : null
+            : pronunciationByTime[primary[index].timeMs],
+      ),
+  ];
+}
+
+List<_LyricLine> _parseSingleLyricTrack(String text, {required int offsetMs}) {
   final normalized = text.replaceAll('\r\n', '\n').trim();
   if (normalized.isEmpty) {
     return const [];
@@ -2266,7 +2483,15 @@ List<_LyricLine> _parseLyricLines(String text) {
       continue;
     }
 
-    final lyricText = line.replaceAll(timestampPattern, '').trim();
+    var lyricText = line.replaceAll(timestampPattern, '').trim();
+    String? speaker;
+    final speakerMatch = RegExp(r'^<v\s+([^>]+)>').firstMatch(lyricText);
+    if (speakerMatch != null) {
+      speaker = speakerMatch.group(1)?.trim();
+      lyricText = lyricText.substring(speakerMatch.end).trimLeft();
+    }
+    final enhanced = _parseEnhancedLyricText(lyricText, offsetMs);
+    lyricText = enhanced.$1;
     for (final match in matches) {
       final minutes = int.tryParse(match.group(1) ?? '') ?? 0;
       final seconds = int.tryParse(match.group(2) ?? '') ?? 0;
@@ -2278,8 +2503,10 @@ List<_LyricLine> _parseLyricLines(String text) {
       };
       timed.add(
         _LyricLine(
-          minutes * 60000 + seconds * 1000 + millis,
+          max(0, minutes * 60000 + seconds * 1000 + millis + offsetMs),
           lyricText.isEmpty ? '...' : lyricText,
+          speaker: speaker,
+          segments: enhanced.$2,
         ),
       );
     }
@@ -2290,6 +2517,38 @@ List<_LyricLine> _parseLyricLines(String text) {
   }
   timed.sort((left, right) => left.timeMs!.compareTo(right.timeMs!));
   return timed;
+}
+
+(String, List<_LyricSegment>) _parseEnhancedLyricText(
+  String text,
+  int offsetMs,
+) {
+  final pattern = RegExp(r'<(\d{1,3}):(\d{2})(?:[.:,](\d{1,3}))?>');
+  final matches = pattern.allMatches(text).toList();
+  if (matches.isEmpty) return (text, const []);
+  final plain = text.replaceAll(pattern, '');
+  final segments = <_LyricSegment>[];
+  for (var index = 0; index < matches.length; index++) {
+    final match = matches[index];
+    final nextStart = index + 1 < matches.length
+        ? matches[index + 1].start
+        : text.length;
+    final minutes = int.tryParse(match.group(1) ?? '') ?? 0;
+    final seconds = int.tryParse(match.group(2) ?? '') ?? 0;
+    final fraction = match.group(3) ?? '0';
+    final millis = switch (fraction.length) {
+      1 => (int.tryParse(fraction) ?? 0) * 100,
+      2 => (int.tryParse(fraction) ?? 0) * 10,
+      _ => int.tryParse(fraction.substring(0, 3)) ?? 0,
+    };
+    segments.add(
+      _LyricSegment(
+        startMs: max(0, minutes * 60000 + seconds * 1000 + millis + offsetMs),
+        text: text.substring(match.end, nextStart),
+      ),
+    );
+  }
+  return (plain, segments);
 }
 
 int _currentLyricIndex(List<_LyricLine> lines, int positionMs) {

@@ -48,8 +48,9 @@ use protocol::{
     PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
     RendererCommandPayload, RendererRegistration, RendererStateReport, ReplacePlaybackQueue,
     ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate, TrackFavoriteUpdate,
-    UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, ZoneAliasUpdate,
-    ZoneTransferRequest, ZoneVolume, ZoneVolumeUpdate, API_PREFIX, EVENTS_WS_PATH,
+    TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual,
+    UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, ZoneVolumeUpdate, API_PREFIX,
+    EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -362,6 +363,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/tracks", get(list_tracks))
         .route("/tracks/{track_id}", get(track_detail))
+        .route(
+            "/tracks/{track_id}/edit",
+            get(track_edit_snapshot).post(update_track_metadata),
+        )
         .route("/tracks/{track_id}/favorite", post(update_track_favorite))
         .route("/tracks/{track_id}/lyrics", get(track_lyrics))
         .route("/tracks/{track_id}/stream", get(track_stream))
@@ -920,8 +925,51 @@ async fn track_detail(
 ) -> ApiResult<protocol::TrackDetail> {
     let mut detail = core_db::track_detail(state.pool(), track_id).await?;
     fill_missing_lyrics_from_file(&mut detail).await;
+    enrich_lyrics(&mut detail);
     apply_favorite_settings_to_track(&state.config().favorites, &mut detail.track);
     Ok(Json(detail))
+}
+
+async fn track_edit_snapshot(
+    State(state): State<AppState>,
+    Path(track_id): Path<i64>,
+) -> ApiResult<protocol::TrackEditSnapshot> {
+    let mut snapshot = core_db::track_edit_snapshot(state.pool(), track_id).await?;
+    fill_missing_lyrics_from_file(&mut snapshot.detail).await;
+    enrich_lyrics(&mut snapshot.detail);
+    apply_favorite_settings_to_track(&state.config().favorites, &mut snapshot.detail.track);
+    Ok(Json(snapshot))
+}
+
+async fn update_track_metadata(
+    State(state): State<AppState>,
+    Path(track_id): Path<i64>,
+    Json(update): Json<TrackMetadataUpdate>,
+) -> ApiResult<protocol::TrackEditSnapshot> {
+    let parsed = update.lyrics.as_ref().map(|lyrics| {
+        lyrics_engine::parse_lyrics(
+            &lyrics.kind,
+            &lyrics.text,
+            lyrics.translation.as_deref(),
+            lyrics.pronunciation.as_deref(),
+            lyrics.offset_ms,
+        )
+        .cues
+    });
+    let mut snapshot =
+        core_db::update_track_metadata(state.pool(), track_id, &update, parsed.as_deref()).await?;
+    enrich_lyrics(&mut snapshot.detail);
+    apply_favorite_settings_to_track(&state.config().favorites, &mut snapshot.detail.track);
+    state.bump_library_revision("track metadata updated");
+    state.emit(
+        "track.metadata_changed",
+        json!({
+            "track_id": track_id,
+            "revision": snapshot.revision,
+            "lyrics_changed": update.lyrics.is_some(),
+        }),
+    );
+    Ok(Json(snapshot))
 }
 
 async fn track_lyrics(
@@ -930,6 +978,7 @@ async fn track_lyrics(
 ) -> ApiResult<Option<protocol::LyricPayload>> {
     let mut detail = core_db::track_detail(state.pool(), track_id).await?;
     fill_missing_lyrics_from_file(&mut detail).await;
+    enrich_lyrics(&mut detail);
     Ok(Json(detail.lyrics))
 }
 
@@ -946,10 +995,37 @@ async fn fill_missing_lyrics_from_file(detail: &mut protocol::TrackDetail) {
         .await
     {
         Ok(Ok(Some((kind, text)))) if !text.trim().is_empty() => {
-            detail.lyrics = Some(protocol::LyricPayload { kind, text });
+            detail.lyrics = Some(protocol::LyricPayload {
+                kind,
+                text,
+                language: None,
+                translation: None,
+                pronunciation: None,
+                offset_ms: 0,
+                source: "file".to_string(),
+                revision: 0,
+                cues: Vec::new(),
+            });
         }
         _ => {}
     }
+}
+
+fn enrich_lyrics(detail: &mut protocol::TrackDetail) {
+    let Some(lyrics) = detail.lyrics.as_mut() else {
+        return;
+    };
+    if !lyrics.cues.is_empty() {
+        return;
+    }
+    lyrics.cues = lyrics_engine::parse_lyrics(
+        &lyrics.kind,
+        &lyrics.text,
+        lyrics.translation.as_deref(),
+        lyrics.pronunciation.as_deref(),
+        lyrics.offset_ms,
+    )
+    .cues;
 }
 
 async fn track_stream(

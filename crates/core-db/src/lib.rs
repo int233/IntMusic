@@ -4,16 +4,18 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use protocol::{
     AlbumDetail, AlbumSummary, ArtistAsset, ArtistDetail, ArtistProfile, ArtistSummary,
     ArtistVisual, ArtistVisualRegion, LibraryCounts, LibraryRoot, LyricPayload, NewPlaylist,
     PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession, PlaybackStats,
     PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation, ReplacePlaybackQueue,
-    ScanProblem, TrackDetail, TrackFavoriteUpdate, TrackPlaybackStat, TrackSummary,
-    UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, ZoneVolume,
+    ScanProblem, TrackDetail, TrackEditSnapshot, TrackFavoriteUpdate, TrackMetadataField,
+    TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateArtistAsset, UpdateArtistProfile,
+    UpdateArtistVisual, UpdatePlaylist, ZoneVolume,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha384};
 use sqlx::{
@@ -230,9 +232,12 @@ pub struct FileIngest {
     pub bit_depth: Option<i64>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrackIngest {
     pub title: String,
+    pub sort_title: Option<String>,
+    pub subtitle: Option<String>,
     pub album: Option<String>,
     pub track_artists: Vec<String>,
     pub album_artists: Vec<String>,
@@ -246,6 +251,7 @@ pub struct TrackIngest {
     pub duration_ms: Option<i64>,
     pub date: Option<String>,
     pub year: Option<i64>,
+    pub bpm: Option<i64>,
     pub comment: Option<String>,
     pub lyrics: Option<String>,
     pub lyrics_kind: Option<String>,
@@ -323,7 +329,15 @@ pub async fn upsert_scanned_file(
         .try_get("id")?;
 
     if let Some(track) = track {
-        upsert_track(pool, file_id, file.library_root_id, track).await?;
+        save_track_metadata_source(pool, file_id, track).await?;
+        let mut effective = track.clone();
+        if let Some(track_id) = track_id_for_file(pool, file_id).await? {
+            apply_metadata_overrides(
+                &mut effective,
+                &load_track_metadata_overrides(pool, track_id).await?,
+            )?;
+        }
+        upsert_track(pool, file_id, file.library_root_id, &effective).await?;
     } else {
         sqlx::query("DELETE FROM tracks WHERE file_id = ?1")
             .bind(file_id)
@@ -332,6 +346,231 @@ pub async fn upsert_scanned_file(
     }
 
     Ok(file_id)
+}
+
+const TRACK_METADATA_FIELDS: &[(&str, &str, &str, &str)] = &[
+    ("title", "Title", "track", "string"),
+    ("sort_title", "Sort title", "track", "string"),
+    ("subtitle", "Subtitle / version", "track", "string"),
+    ("album", "Album", "album", "string"),
+    ("track_artists", "Artists", "credits", "string_list"),
+    ("album_artists", "Album artists", "album", "string_list"),
+    ("composers", "Composers", "credits", "string_list"),
+    ("lyricists", "Lyricists", "credits", "string_list"),
+    ("genres", "Genres", "classification", "string_list"),
+    ("disc_number", "Disc number", "album", "integer"),
+    ("disc_total", "Total discs", "album", "integer"),
+    ("track_number", "Track number", "track", "integer"),
+    ("track_total", "Total tracks", "album", "integer"),
+    ("date", "Release date", "album", "string"),
+    ("year", "Year", "album", "integer"),
+    ("bpm", "BPM", "track", "integer"),
+    ("comment", "Comment", "track", "string"),
+];
+
+async fn track_id_for_file(pool: &DbPool, file_id: i64) -> Result<Option<i64>> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM tracks WHERE file_id = ?1")
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+async fn save_track_metadata_source(
+    pool: &DbPool,
+    file_id: i64,
+    track: &TrackIngest,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let data = serde_json::to_string(track)?;
+    sqlx::query(
+        r#"
+        INSERT INTO track_metadata_sources (file_id, source_kind, data_json, captured_at)
+        VALUES (?1, 'file', ?2, ?3)
+        ON CONFLICT(file_id) DO UPDATE SET
+            source_kind = 'file',
+            data_json = excluded.data_json,
+            captured_at = excluded.captured_at
+        "#,
+    )
+    .bind(file_id)
+    .bind(data)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn load_track_metadata_source(pool: &DbPool, file_id: i64) -> Result<Option<TrackIngest>> {
+    let source: Option<String> =
+        sqlx::query_scalar("SELECT data_json FROM track_metadata_sources WHERE file_id = ?1")
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await?;
+    source
+        .map(|source| serde_json::from_str(&source).context("invalid metadata source snapshot"))
+        .transpose()
+}
+
+async fn load_track_metadata_overrides(
+    pool: &DbPool,
+    track_id: i64,
+) -> Result<HashMap<String, Value>> {
+    let rows = sqlx::query(
+        "SELECT field_key, value_json FROM track_metadata_overrides WHERE track_id = ?1",
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await?;
+    let mut values = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let key: String = row.try_get("field_key")?;
+        let value: String = row.try_get("value_json")?;
+        values.insert(
+            key,
+            serde_json::from_str(&value).context("invalid metadata override value")?,
+        );
+    }
+    Ok(values)
+}
+
+fn is_supported_metadata_field(key: &str) -> bool {
+    TRACK_METADATA_FIELDS
+        .iter()
+        .any(|(candidate, _, _, _)| candidate == &key)
+}
+
+fn normalize_metadata_value(key: &str, value: &Value) -> Result<Value> {
+    let value = match key {
+        "title" => {
+            let title = value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("title cannot be empty")?;
+            Value::String(title.to_string())
+        }
+        "sort_title" | "subtitle" | "album" | "date" | "comment" => match value {
+            Value::Null => Value::Null,
+            Value::String(value) => {
+                let value = value.trim();
+                if value.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(value.to_string())
+                }
+            }
+            _ => bail!("{key} must be a string or null"),
+        },
+        "track_artists" | "album_artists" | "composers" | "lyricists" | "genres" => {
+            let raw_values = match value {
+                Value::Array(values) => values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(ToOwned::to_owned)
+                            .with_context(|| format!("{key} must contain only strings"))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                Value::String(value) => value
+                    .split([';', '\n'])
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>(),
+                Value::Null => Vec::new(),
+                _ => bail!("{key} must be a string list"),
+            };
+            let mut values = Vec::new();
+            for value in raw_values {
+                let value = value.trim();
+                if value.is_empty()
+                    || values
+                        .iter()
+                        .any(|existing: &String| existing.eq_ignore_ascii_case(value))
+                {
+                    continue;
+                }
+                values.push(value.to_string());
+            }
+            serde_json::to_value(values)?
+        }
+        "disc_number" | "disc_total" | "track_number" | "track_total" | "year" | "bpm" => {
+            if value.is_null() {
+                Value::Null
+            } else {
+                let number = value
+                    .as_i64()
+                    .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+                    .with_context(|| format!("{key} must be an integer or null"))?;
+                if number < 0 {
+                    bail!("{key} cannot be negative");
+                }
+                if key == "year" && number > 9999 {
+                    bail!("year must be between 0 and 9999");
+                }
+                if key == "bpm" && number > 999 {
+                    bail!("BPM must be between 0 and 999");
+                }
+                Value::Number(number.into())
+            }
+        }
+        _ => bail!("unsupported metadata field: {key}"),
+    };
+    Ok(value)
+}
+
+fn metadata_field_value(track: &TrackIngest, key: &str) -> Value {
+    match key {
+        "title" => Value::String(track.title.clone()),
+        "sort_title" => serde_json::to_value(&track.sort_title).unwrap_or(Value::Null),
+        "subtitle" => serde_json::to_value(&track.subtitle).unwrap_or(Value::Null),
+        "album" => serde_json::to_value(&track.album).unwrap_or(Value::Null),
+        "track_artists" => serde_json::to_value(&track.track_artists).unwrap_or(Value::Null),
+        "album_artists" => serde_json::to_value(&track.album_artists).unwrap_or(Value::Null),
+        "composers" => serde_json::to_value(&track.composers).unwrap_or(Value::Null),
+        "lyricists" => serde_json::to_value(&track.lyricists).unwrap_or(Value::Null),
+        "genres" => serde_json::to_value(&track.genres).unwrap_or(Value::Null),
+        "disc_number" => serde_json::to_value(track.disc_number).unwrap_or(Value::Null),
+        "disc_total" => serde_json::to_value(track.disc_total).unwrap_or(Value::Null),
+        "track_number" => serde_json::to_value(track.track_number).unwrap_or(Value::Null),
+        "track_total" => serde_json::to_value(track.track_total).unwrap_or(Value::Null),
+        "date" => serde_json::to_value(&track.date).unwrap_or(Value::Null),
+        "year" => serde_json::to_value(track.year).unwrap_or(Value::Null),
+        "bpm" => serde_json::to_value(track.bpm).unwrap_or(Value::Null),
+        "comment" => serde_json::to_value(&track.comment).unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
+fn apply_metadata_overrides(
+    track: &mut TrackIngest,
+    overrides: &HashMap<String, Value>,
+) -> Result<()> {
+    for (key, value) in overrides {
+        let value = normalize_metadata_value(key, value)?;
+        match key.as_str() {
+            "title" => track.title = value.as_str().unwrap_or_default().to_string(),
+            "sort_title" => track.sort_title = value.as_str().map(ToOwned::to_owned),
+            "subtitle" => track.subtitle = value.as_str().map(ToOwned::to_owned),
+            "album" => track.album = value.as_str().map(ToOwned::to_owned),
+            "track_artists" => track.track_artists = serde_json::from_value(value)?,
+            "album_artists" => track.album_artists = serde_json::from_value(value)?,
+            "composers" => track.composers = serde_json::from_value(value)?,
+            "lyricists" => track.lyricists = serde_json::from_value(value)?,
+            "genres" => track.genres = serde_json::from_value(value)?,
+            "disc_number" => track.disc_number = value.as_i64(),
+            "disc_total" => track.disc_total = value.as_i64(),
+            "track_number" => track.track_number = value.as_i64(),
+            "track_total" => track.track_total = value.as_i64(),
+            "date" => track.date = value.as_str().map(ToOwned::to_owned),
+            "year" => track.year = value.as_i64(),
+            "bpm" => track.bpm = value.as_i64(),
+            "comment" => track.comment = value.as_str().map(ToOwned::to_owned),
+            _ => bail!("unsupported metadata field: {key}"),
+        }
+    }
+    Ok(())
 }
 
 async fn upsert_track(
@@ -417,13 +656,19 @@ async fn upsert_track(
     sqlx::query(
         r#"
         INSERT INTO tracks (
-            file_id, album_id, title, disc_number, disc_total, track_number, track_total,
-            duration_ms, date, year, comment, tag_rating, tag_rating_scale, created_at, updated_at
+            file_id, album_id, title, sort_title, subtitle, disc_number, disc_total,
+            track_number, track_total, duration_ms, date, year, bpm, comment,
+            tag_rating, tag_rating_scale, created_at, updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)
+        VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+            ?14, ?15, ?16, ?17, ?17
+        )
         ON CONFLICT(file_id) DO UPDATE SET
             album_id = excluded.album_id,
             title = excluded.title,
+            sort_title = excluded.sort_title,
+            subtitle = excluded.subtitle,
             disc_number = excluded.disc_number,
             disc_total = excluded.disc_total,
             track_number = excluded.track_number,
@@ -431,6 +676,7 @@ async fn upsert_track(
             duration_ms = excluded.duration_ms,
             date = excluded.date,
             year = excluded.year,
+            bpm = excluded.bpm,
             comment = excluded.comment,
             tag_rating = excluded.tag_rating,
             tag_rating_scale = excluded.tag_rating_scale,
@@ -440,6 +686,8 @@ async fn upsert_track(
     .bind(file_id)
     .bind(album_id)
     .bind(&track.title)
+    .bind(&track.sort_title)
+    .bind(&track.subtitle)
     .bind(track.disc_number)
     .bind(track.disc_total)
     .bind(track.track_number)
@@ -447,6 +695,7 @@ async fn upsert_track(
     .bind(track.duration_ms)
     .bind(&track.date)
     .bind(track.year)
+    .bind(track.bpm)
     .bind(&track.comment)
     .bind(track.tag_rating)
     .bind(track.tag_rating_scale)
@@ -498,13 +747,21 @@ async fn upsert_track(
             .unwrap_or("text");
         sqlx::query(
             r#"
-            INSERT INTO lyrics (track_id, kind, text, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?4)
+            INSERT INTO lyrics (
+                track_id, kind, text, source, is_locked, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, 'file', 0, ?4, ?4)
             ON CONFLICT(track_id) DO UPDATE SET
                 kind = excluded.kind,
                 text = excluded.text,
                 parsed_json = NULL,
+                language = NULL,
+                translation_text = NULL,
+                pronunciation_text = NULL,
+                offset_ms = 0,
+                source = 'file',
                 updated_at = excluded.updated_at
+            WHERE lyrics.is_locked = 0
             "#,
         )
         .bind(track_id)
@@ -514,7 +771,7 @@ async fn upsert_track(
         .execute(pool)
         .await?;
     } else {
-        sqlx::query("DELETE FROM lyrics WHERE track_id = ?1")
+        sqlx::query("DELETE FROM lyrics WHERE track_id = ?1 AND is_locked = 0")
             .bind(track_id)
             .execute(pool)
             .await?;
@@ -1867,17 +2124,35 @@ pub async fn track_detail(pool: &DbPool, track_id: i64) -> Result<TrackDetail> {
     let composers = track_artist_role_names(pool, track_id, "composer").await?;
     let lyricists = track_artist_role_names(pool, track_id, "lyricist").await?;
 
-    let lyrics = sqlx::query("SELECT kind, text FROM lyrics WHERE track_id = ?1")
-        .bind(track_id)
-        .fetch_optional(pool)
-        .await?
-        .map(|row| {
-            Ok::<_, sqlx::Error>(LyricPayload {
-                kind: row.try_get("kind")?,
-                text: row.try_get("text")?,
-            })
+    let lyrics = sqlx::query(
+        r#"
+        SELECT kind, text, language, translation_text, pronunciation_text,
+               offset_ms, source, revision, parsed_json
+        FROM lyrics
+        WHERE track_id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|row| {
+        let parsed_json: Option<String> = row.try_get("parsed_json")?;
+        Ok::<_, sqlx::Error>(LyricPayload {
+            kind: row.try_get("kind")?,
+            text: row.try_get("text")?,
+            language: row.try_get("language")?,
+            translation: row.try_get("translation_text")?,
+            pronunciation: row.try_get("pronunciation_text")?,
+            offset_ms: row.try_get("offset_ms")?,
+            source: row.try_get("source")?,
+            revision: row.try_get("revision")?,
+            cues: parsed_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str(value).ok())
+                .unwrap_or_default(),
         })
-        .transpose()?;
+    })
+    .transpose()?;
 
     Ok(TrackDetail {
         track,
@@ -1911,6 +2186,354 @@ async fn track_artist_role_names(pool: &DbPool, track_id: i64, role: &str) -> Re
     .into_iter()
     .map(|row| row.try_get("name"))
     .collect::<Result<Vec<String>, sqlx::Error>>()?)
+}
+
+async fn current_track_ingest(pool: &DbPool, track_id: i64) -> Result<TrackIngest> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            t.title, t.sort_title, t.subtitle, al.title AS album,
+            t.disc_number, t.disc_total, t.track_number, t.track_total,
+            t.duration_ms, t.date, t.year, t.bpm, t.comment,
+            t.tag_rating, t.tag_rating_scale, t.album_id
+        FROM tracks t
+        LEFT JOIN albums al ON al.id = t.album_id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await?;
+    let album_id: Option<i64> = row.try_get("album_id")?;
+    let album_artists = if let Some(album_id) = album_id {
+        sqlx::query(
+            r#"
+            SELECT ar.name
+            FROM album_artists aa
+            JOIN artists ar ON ar.id = aa.artist_id
+            WHERE aa.album_id = ?1
+            ORDER BY aa.position, ar.name
+            "#,
+        )
+        .bind(album_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get("name"))
+        .collect::<Result<Vec<String>, sqlx::Error>>()?
+    } else {
+        Vec::new()
+    };
+    let genres = sqlx::query(
+        r#"
+        SELECT g.name
+        FROM track_genres tg
+        JOIN genres g ON g.id = tg.genre_id
+        WHERE tg.track_id = ?1
+        ORDER BY g.name
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| row.try_get("name"))
+    .collect::<Result<Vec<String>, sqlx::Error>>()?;
+    let lyrics = sqlx::query("SELECT kind, text FROM lyrics WHERE track_id = ?1")
+        .bind(track_id)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(TrackIngest {
+        title: row.try_get("title")?,
+        sort_title: row.try_get("sort_title")?,
+        subtitle: row.try_get("subtitle")?,
+        album: row.try_get("album")?,
+        track_artists: track_artist_role_names(pool, track_id, "primary").await?,
+        album_artists,
+        composers: track_artist_role_names(pool, track_id, "composer").await?,
+        lyricists: track_artist_role_names(pool, track_id, "lyricist").await?,
+        genres,
+        disc_number: row.try_get("disc_number")?,
+        disc_total: row.try_get("disc_total")?,
+        track_number: row.try_get("track_number")?,
+        track_total: row.try_get("track_total")?,
+        duration_ms: row.try_get("duration_ms")?,
+        date: row.try_get("date")?,
+        year: row.try_get("year")?,
+        bpm: row.try_get("bpm")?,
+        comment: row.try_get("comment")?,
+        lyrics: lyrics
+            .as_ref()
+            .map(|lyrics| lyrics.try_get("text"))
+            .transpose()?,
+        lyrics_kind: lyrics
+            .as_ref()
+            .map(|lyrics| lyrics.try_get("kind"))
+            .transpose()?,
+        tag_rating: row.try_get("tag_rating")?,
+        tag_rating_scale: row.try_get("tag_rating_scale")?,
+    })
+}
+
+pub async fn track_edit_snapshot(pool: &DbPool, track_id: i64) -> Result<TrackEditSnapshot> {
+    let detail = track_detail(pool, track_id).await?;
+    let file_id = detail.track.file_id;
+    let source = match load_track_metadata_source(pool, file_id).await? {
+        Some(source) => source,
+        None => current_track_ingest(pool, track_id).await?,
+    };
+    let overrides = load_track_metadata_overrides(pool, track_id).await?;
+    let mut effective = source.clone();
+    apply_metadata_overrides(&mut effective, &overrides)?;
+    let revision =
+        sqlx::query_scalar("SELECT revision FROM track_metadata_state WHERE track_id = ?1")
+            .bind(track_id)
+            .fetch_optional(pool)
+            .await?
+            .unwrap_or(0);
+    let fields = TRACK_METADATA_FIELDS
+        .iter()
+        .map(|(key, label, scope, value_kind)| {
+            let override_value = overrides.get(*key).cloned();
+            TrackMetadataField {
+                key: (*key).to_string(),
+                label: (*label).to_string(),
+                scope: (*scope).to_string(),
+                value_kind: (*value_kind).to_string(),
+                effective_value: metadata_field_value(&effective, key),
+                file_value: metadata_field_value(&source, key),
+                source: if override_value.is_some() {
+                    "manual".to_string()
+                } else {
+                    "file".to_string()
+                },
+                override_value,
+            }
+        })
+        .collect();
+    let file_lyrics = source
+        .lyrics
+        .as_ref()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| LyricPayload {
+            kind: source
+                .lyrics_kind
+                .clone()
+                .unwrap_or_else(|| "text".to_string()),
+            text: text.clone(),
+            language: None,
+            translation: None,
+            pronunciation: None,
+            offset_ms: 0,
+            source: "file".to_string(),
+            revision: 0,
+            cues: Vec::new(),
+        });
+    Ok(TrackEditSnapshot {
+        detail,
+        revision,
+        fields,
+        file_lyrics,
+    })
+}
+
+pub async fn update_track_metadata(
+    pool: &DbPool,
+    track_id: i64,
+    update: &TrackMetadataUpdate,
+    parsed_lyrics: Option<&[protocol::LyricCue]>,
+) -> Result<TrackEditSnapshot> {
+    let identity = sqlx::query(
+        r#"
+        SELECT t.file_id, f.library_root_id
+        FROM tracks t
+        JOIN files f ON f.id = t.file_id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await?;
+    let file_id: i64 = identity.try_get("file_id")?;
+    let library_root_id: i64 = identity.try_get("library_root_id")?;
+    let source = match load_track_metadata_source(pool, file_id).await? {
+        Some(source) => source,
+        None => {
+            let source = current_track_ingest(pool, track_id).await?;
+            save_track_metadata_source(pool, file_id, &source).await?;
+            source
+        }
+    };
+    let mut overrides = load_track_metadata_overrides(pool, track_id).await?;
+
+    let mut affected_fields = Vec::<String>::new();
+    for key in &update.clear_fields {
+        if !is_supported_metadata_field(key) {
+            bail!("unsupported metadata field: {key}");
+        }
+        overrides.remove(key);
+        if !affected_fields.contains(key) {
+            affected_fields.push(key.clone());
+        }
+    }
+    for field in &update.fields {
+        if !is_supported_metadata_field(&field.key) {
+            bail!("unsupported metadata field: {}", field.key);
+        }
+        let value = normalize_metadata_value(&field.key, &field.value)?;
+        if value == metadata_field_value(&source, &field.key) {
+            overrides.remove(&field.key);
+        } else {
+            overrides.insert(field.key.clone(), value);
+        }
+        if !affected_fields.contains(&field.key) {
+            affected_fields.push(field.key.clone());
+        }
+    }
+    let mut effective = source.clone();
+    apply_metadata_overrides(&mut effective, &overrides)?;
+    if effective.title.trim().is_empty() {
+        bail!("title cannot be empty");
+    }
+
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO track_metadata_state (track_id, revision, updated_at)
+        VALUES (?1, 0, ?2)
+        "#,
+    )
+    .bind(track_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    let current_revision: i64 =
+        sqlx::query_scalar("SELECT revision FROM track_metadata_state WHERE track_id = ?1")
+            .bind(track_id)
+            .fetch_one(pool)
+            .await?;
+    if let Some(expected_revision) = update.expected_revision {
+        if expected_revision != current_revision {
+            bail!(
+                "metadata revision conflict: expected {expected_revision}, current {current_revision}"
+            );
+        }
+    }
+    let next_revision = current_revision + 1;
+    let updated = sqlx::query(
+        r#"
+        UPDATE track_metadata_state
+        SET revision = ?1, updated_at = ?2
+        WHERE track_id = ?3 AND revision = ?4
+        "#,
+    )
+    .bind(next_revision)
+    .bind(&now)
+    .bind(track_id)
+    .bind(current_revision)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() != 1 {
+        bail!("metadata revision conflict");
+    }
+
+    for key in &affected_fields {
+        sqlx::query("DELETE FROM track_metadata_overrides WHERE track_id = ?1 AND field_key = ?2")
+            .bind(track_id)
+            .bind(key)
+            .execute(pool)
+            .await?;
+        if let Some(value) = overrides.get(key) {
+            sqlx::query(
+                r#"
+                INSERT INTO track_metadata_overrides (
+                    track_id, field_key, value_json, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?4)
+                "#,
+            )
+            .bind(track_id)
+            .bind(key)
+            .bind(serde_json::to_string(value)?)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+        }
+    }
+
+    if update.clear_lyrics_override {
+        sqlx::query("DELETE FROM lyrics WHERE track_id = ?1 AND is_locked = 1")
+            .bind(track_id)
+            .execute(pool)
+            .await?;
+    }
+    upsert_track(pool, file_id, library_root_id, &effective).await?;
+
+    if let Some(lyrics) = &update.lyrics {
+        let kind = if lyrics.kind.trim().is_empty() {
+            "text"
+        } else {
+            lyrics.kind.trim()
+        };
+        let language = trimmed_option(lyrics.language.as_deref());
+        let translation = trimmed_option(lyrics.translation.as_deref());
+        let pronunciation = trimmed_option(lyrics.pronunciation.as_deref());
+        let parsed_json = parsed_lyrics.map(serde_json::to_string).transpose()?;
+        sqlx::query(
+            r#"
+            INSERT INTO lyrics (
+                track_id, kind, text, parsed_json, language, translation_text,
+                pronunciation_text, offset_ms, source, is_locked, revision,
+                created_at, updated_at
+            )
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'manual', 1, 1, ?9, ?9
+            )
+            ON CONFLICT(track_id) DO UPDATE SET
+                kind = excluded.kind,
+                text = excluded.text,
+                parsed_json = excluded.parsed_json,
+                language = excluded.language,
+                translation_text = excluded.translation_text,
+                pronunciation_text = excluded.pronunciation_text,
+                offset_ms = excluded.offset_ms,
+                source = 'manual',
+                is_locked = 1,
+                revision = lyrics.revision + 1,
+                updated_at = excluded.updated_at
+            "#,
+        )
+        .bind(track_id)
+        .bind(kind)
+        .bind(lyrics.text.trim())
+        .bind(parsed_json)
+        .bind(language)
+        .bind(translation)
+        .bind(pronunciation)
+        .bind(lyrics.offset_ms)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+        rebuild_track_search_row(pool, track_id).await?;
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO track_metadata_revisions (
+            track_id, revision, changes_json, created_at
+        )
+        VALUES (?1, ?2, ?3, ?4)
+        "#,
+    )
+    .bind(track_id)
+    .bind(next_revision)
+    .bind(serde_json::to_string(update)?)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    track_edit_snapshot(pool, track_id).await
 }
 
 pub async fn track_file_path(pool: &DbPool, track_id: i64) -> Result<String> {
@@ -3687,6 +4310,144 @@ mod tests {
         assert!(detail.artist.has_artwork);
         assert_eq!(detail.profile.genres, vec!["Pop"]);
         assert_eq!(detail.visuals[0].regions.len(), 5);
+
+        close_test_pool(pool, path).await;
+    }
+
+    #[tokio::test]
+    async fn manual_track_metadata_and_lyrics_survive_rescan() {
+        let (pool, path) = test_pool().await;
+        let file = FileIngest {
+            library_root_id: 1,
+            path: "/music/1.flac".to_string(),
+            relative_path: "1.flac".to_string(),
+            extension: "flac".to_string(),
+            size_bytes: 1024,
+            modified_at: Utc::now().to_rfc3339(),
+            quick_hash: None,
+            scan_status: "ok".to_string(),
+            scan_message: None,
+            codec: Some("flac".to_string()),
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            duration_ms: Some(180_000),
+            bitrate: None,
+            bit_depth: Some(24),
+        };
+        let mut scanned = TrackIngest {
+            title: "File title".to_string(),
+            album: Some("File album".to_string()),
+            track_artists: vec!["File artist".to_string()],
+            genres: vec!["Pop".to_string()],
+            lyrics: Some("[00:01.00]file lyric".to_string()),
+            lyrics_kind: Some("lrc".to_string()),
+            ..Default::default()
+        };
+        upsert_scanned_file(&pool, &file, Some(&scanned))
+            .await
+            .expect("initial scan");
+
+        let initial = track_edit_snapshot(&pool, 1)
+            .await
+            .expect("initial edit snapshot");
+        let update = TrackMetadataUpdate {
+            expected_revision: Some(initial.revision),
+            fields: vec![
+                protocol::TrackMetadataFieldUpdate {
+                    key: "title".to_string(),
+                    value: Value::String("Manual title".to_string()),
+                },
+                protocol::TrackMetadataFieldUpdate {
+                    key: "genres".to_string(),
+                    value: serde_json::json!(["Art Pop", "Live"]),
+                },
+            ],
+            lyrics: Some(protocol::TrackLyricsUpdate {
+                kind: "lrc".to_string(),
+                text: "[00:02.00]manual lyric".to_string(),
+                language: Some("en".to_string()),
+                translation: Some("[00:02.00]人工翻译".to_string()),
+                pronunciation: None,
+                offset_ms: 25,
+            }),
+            ..Default::default()
+        };
+        let edited = update_track_metadata(
+            &pool,
+            1,
+            &update,
+            Some(&[protocol::LyricCue {
+                start_ms: 2_025,
+                text: "manual lyric".to_string(),
+                ..Default::default()
+            }]),
+        )
+        .await
+        .expect("edit metadata");
+        assert_eq!(edited.detail.track.title, "Manual title");
+        assert_eq!(edited.detail.genres, vec!["Art Pop", "Live"]);
+
+        scanned.title = "New file title".to_string();
+        scanned.genres = vec!["Rock".to_string()];
+        scanned.lyrics = Some("[00:03.00]new file lyric".to_string());
+        upsert_scanned_file(&pool, &file, Some(&scanned))
+            .await
+            .expect("rescan");
+
+        let after_rescan = track_edit_snapshot(&pool, 1)
+            .await
+            .expect("snapshot after rescan");
+        assert_eq!(after_rescan.detail.track.title, "Manual title");
+        assert_eq!(after_rescan.detail.genres, vec!["Art Pop", "Live"]);
+        assert_eq!(
+            after_rescan.detail.lyrics.as_ref().unwrap().text,
+            "[00:02.00]manual lyric"
+        );
+        let title = after_rescan
+            .fields
+            .iter()
+            .find(|field| field.key == "title")
+            .unwrap();
+        assert_eq!(
+            title.file_value,
+            Value::String("New file title".to_string())
+        );
+        assert_eq!(title.source, "manual");
+
+        let reverted = update_track_metadata(
+            &pool,
+            1,
+            &TrackMetadataUpdate {
+                expected_revision: Some(after_rescan.revision),
+                clear_fields: vec!["title".to_string()],
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("revert title");
+        assert_eq!(reverted.detail.track.title, "New file title");
+
+        let restored_lyrics = update_track_metadata(
+            &pool,
+            1,
+            &TrackMetadataUpdate {
+                expected_revision: Some(reverted.revision),
+                clear_lyrics_override: true,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("restore file lyrics");
+        assert_eq!(
+            restored_lyrics.detail.lyrics.as_ref().unwrap().text,
+            "[00:03.00]new file lyric"
+        );
+        assert_eq!(
+            restored_lyrics.detail.lyrics.as_ref().unwrap().source,
+            "file"
+        );
 
         close_test_pool(pool, path).await;
     }

@@ -614,6 +614,7 @@ class _TrackInfoPage extends StatelessWidget {
     required this.onOpenAlbum,
     required this.onToggleFavorite,
     required this.onAddToPlaylist,
+    required this.onEdit,
   });
 
   final String coreBaseUrl;
@@ -623,6 +624,7 @@ class _TrackInfoPage extends StatelessWidget {
   final Future<void> Function(int) onOpenAlbum;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onAddToPlaylist;
+  final Future<void> Function() onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -662,6 +664,13 @@ class _TrackInfoPage extends StatelessWidget {
                   imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
                 );
                 final actions = <Widget>[
+                  OutlinedButton.icon(
+                    onPressed: trackId == null
+                        ? null
+                        : () => unawaited(onEdit()),
+                    icon: const Icon(Icons.edit_outlined),
+                    label: Text(_tr(context, 'Edit')),
+                  ),
                   _TrackActions(
                     track: track,
                     onToggleFavorite: onToggleFavorite,

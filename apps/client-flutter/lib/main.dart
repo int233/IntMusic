@@ -27,6 +27,7 @@ part 'src/settings_page.dart';
 part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
 part 'src/artist_editor.dart';
+part 'src/track_editor.dart';
 part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
 part 'src/i18n.dart';
@@ -1562,6 +1563,54 @@ class _CoreDashboardState extends State<CoreDashboard>
     });
   }
 
+  Future<void> _editTrack(int trackId) async {
+    final snapshot = await _run<Map<String, dynamic>>(
+      () async => _asMap(await _api.getJson('/tracks/$trackId/edit')),
+    );
+    if (!mounted || snapshot == null) {
+      return;
+    }
+    final updated = await showDialog<Map<String, dynamic>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _LocaleScope(
+        language: _language,
+        child: _TrackEditorDialog(
+          api: _api,
+          trackId: trackId,
+          snapshot: snapshot,
+        ),
+      ),
+    );
+    if (!mounted || updated == null) {
+      return;
+    }
+    final detail = _asMap(updated['detail']);
+    final results = await Future.wait([
+      _loadPagedList('/albums'),
+      _loadPagedList('/artists'),
+      _loadPagedList('/tracks'),
+    ]);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _trackDetailCache[trackId] = detail;
+      _albums = results[0];
+      _artists = results[1];
+      _tracks = results[2];
+      _albumDetailCache.clear();
+      _artistDetailCache.clear();
+      _playlistDetailCache.clear();
+      _searchResultCache.clear();
+      final updatedTrack = _asMap(detail['track']);
+      _replaceTrackInCollections(updatedTrack);
+      if (_activeTrackDetailId == trackId) {
+        _activeTrackDetail = detail;
+      }
+    });
+  }
+
   void _closeTrackDetail() => _closeDetailPage();
 
   Future<void> _openPlaylistDetail(int playlistId) async {
@@ -3094,14 +3143,16 @@ class _CoreDashboardState extends State<CoreDashboard>
           onAddToPlaylist: _addTrackToPlaylist,
         );
       case _AppRouteKind.track:
+        final trackId = _currentRoute.entityId;
         return _TrackInfoPage(
           coreBaseUrl: _coreUrlController.text,
-          detail: _trackDetailCache[_currentRoute.entityId],
+          detail: _trackDetailCache[trackId],
           onClose: _closeTrackDetail,
           onPlayTrack: _playTrack,
           onOpenAlbum: _openAlbumDetail,
           onToggleFavorite: _toggleFavorite,
           onAddToPlaylist: _addTrackToPlaylist,
+          onEdit: trackId == null ? () async {} : () => _editTrack(trackId),
         );
       case _AppRouteKind.album:
         final detail =

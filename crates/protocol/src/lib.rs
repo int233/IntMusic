@@ -258,6 +258,93 @@ pub struct TrackDetail {
 pub struct LyricPayload {
     pub kind: String,
     pub text: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub translation: Option<String>,
+    #[serde(default)]
+    pub pronunciation: Option<String>,
+    #[serde(default)]
+    pub offset_ms: i64,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub revision: i64,
+    #[serde(default)]
+    pub cues: Vec<LyricCue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LyricCue {
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
+    pub text: String,
+    #[serde(default)]
+    pub translation: Option<String>,
+    #[serde(default)]
+    pub pronunciation: Option<String>,
+    #[serde(default)]
+    pub speaker: Option<String>,
+    #[serde(default)]
+    pub background: bool,
+    #[serde(default)]
+    pub segments: Vec<LyricSegment>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LyricSegment {
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrackLyricsUpdate {
+    pub kind: String,
+    pub text: String,
+    pub language: Option<String>,
+    pub translation: Option<String>,
+    pub pronunciation: Option<String>,
+    #[serde(default)]
+    pub offset_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMetadataFieldUpdate {
+    pub key: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrackMetadataUpdate {
+    pub expected_revision: Option<i64>,
+    #[serde(default)]
+    pub fields: Vec<TrackMetadataFieldUpdate>,
+    #[serde(default)]
+    pub clear_fields: Vec<String>,
+    pub lyrics: Option<TrackLyricsUpdate>,
+    #[serde(default)]
+    pub clear_lyrics_override: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMetadataField {
+    pub key: String,
+    pub label: String,
+    pub scope: String,
+    pub value_kind: String,
+    pub effective_value: Value,
+    pub file_value: Value,
+    pub override_value: Option<Value>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackEditSnapshot {
+    pub detail: TrackDetail,
+    pub revision: i64,
+    pub fields: Vec<TrackMetadataField>,
+    pub file_lyrics: Option<LyricPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

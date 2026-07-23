@@ -16,6 +16,7 @@ futures-util.workspace = true
 hex.workspace = true
 image.workspace = true
 library-scanner = { path = "../library-scanner" }
+lyrics-engine = { path = "../lyrics-engine" }
 lofty.workspace = true
 output-cpal = { path = "../output-cpal" }
 playback = { path = "../playback" }
