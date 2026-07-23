@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -25,6 +26,7 @@ part 'src/playlist_pages.dart';
 part 'src/settings_page.dart';
 part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
+part 'src/artist_editor.dart';
 part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
 part 'src/i18n.dart';
@@ -1514,6 +1516,39 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   void _closeArtistDetail() => _closeDetailPage();
 
+  Future<void> _editArtist(int artistId, Map<String, dynamic> detail) async {
+    final changed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _LocaleScope(
+        language: _language,
+        child: _ArtistEditorDialog(
+          api: _api,
+          coreBaseUrl: _coreUrlController.text,
+          artistId: artistId,
+          detail: detail,
+        ),
+      ),
+    );
+    if (changed != true || !mounted) {
+      return;
+    }
+    final refreshed = await _run<Map<String, dynamic>>(
+      () async => _asMap(await _api.getJson('/artists/$artistId')),
+    );
+    if (!mounted || refreshed == null) {
+      return;
+    }
+    final artists = await _loadPagedList('/artists');
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _artistDetailCache[artistId] = refreshed;
+      _artists = artists;
+    });
+  }
+
   Future<void> _openTrackDetail(int trackId) async {
     final detail = await _run<Map<String, dynamic>>(
       () async => _asMap(await _api.getJson('/tracks/$trackId')),
@@ -2959,6 +2994,7 @@ class _CoreDashboardState extends State<CoreDashboard>
         );
       case _AppRouteKind.artists:
         return _ArtistsPage(
+          coreBaseUrl: _coreUrlController.text,
           artists: _artists,
           onOpenArtist: _openArtistDetail,
           viewMode: _artistViewMode,
@@ -3085,10 +3121,16 @@ class _CoreDashboardState extends State<CoreDashboard>
           onAddToPlaylist: _addTrackToPlaylist,
         );
       case _AppRouteKind.artist:
+        final artistId = _currentRoute.entityId;
+        final detail =
+            _artistDetailCache[artistId] ?? const <String, dynamic>{};
         return _ArtistInfoPage(
           coreBaseUrl: _coreUrlController.text,
-          detail: _artistDetailCache[_currentRoute.entityId],
+          detail: detail,
           onClose: _closeArtistDetail,
+          onEdit: artistId == null
+              ? () async {}
+              : () => _editArtist(artistId, detail),
           onOpenAlbum: _openAlbumDetail,
           onPlayTrack: _playTrack,
           onOpenTrack: _openTrackDetail,

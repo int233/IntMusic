@@ -229,12 +229,14 @@ class _AlbumCard extends StatelessWidget {
 
 class _ArtistsPage extends StatefulWidget {
   const _ArtistsPage({
+    required this.coreBaseUrl,
     required this.artists,
     required this.onOpenArtist,
     required this.viewMode,
     required this.onViewModeChanged,
   });
 
+  final String coreBaseUrl;
   final List<dynamic> artists;
   final Future<void> Function(int) onOpenArtist;
   final _LibraryViewMode viewMode;
@@ -349,6 +351,15 @@ class _ArtistsPageState extends State<_ArtistsPage> {
                                           subtitle: subtitle,
                                           size: constraints.maxWidth,
                                           icon: Icons.person_outline,
+                                          imageUrl: _artistArtworkUrl(
+                                            widget.coreBaseUrl,
+                                            id,
+                                            'artist_card',
+                                            revision:
+                                                artist['artwork_revision'],
+                                            width: 640,
+                                            height: 800,
+                                          ),
                                         ),
                                   ),
                                 ),
@@ -396,6 +407,14 @@ class _ArtistsPageState extends State<_ArtistsPage> {
                           subtitle: 'artist',
                           size: 48,
                           icon: Icons.person_outline,
+                          imageUrl: _artistArtworkUrl(
+                            widget.coreBaseUrl,
+                            id,
+                            'search_list',
+                            revision: artist['artwork_revision'],
+                            width: 128,
+                            height: 128,
+                          ),
                         ),
                         title: name,
                         subtitle:

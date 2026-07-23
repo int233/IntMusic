@@ -14,6 +14,53 @@ class CoreApiClient {
 
   Future<dynamic> deleteJson(String path) => _request('DELETE', path);
 
+  Future<dynamic> uploadFile(
+    String path,
+    XFile file, {
+    String photoType = 'other',
+  }) async {
+    const uploadTimeout = Duration(minutes: 5);
+    final client = HttpClient();
+    client.connectionTimeout = uploadTimeout;
+    final boundary =
+        '----IntMusic${DateTime.now().microsecondsSinceEpoch.toRadixString(16)}';
+    try {
+      final uri = Uri.parse(apiUrl(path));
+      final request = await client.postUrl(uri).timeout(uploadTimeout);
+      request.headers.set(
+        HttpHeaders.contentTypeHeader,
+        'multipart/form-data; boundary=$boundary',
+      );
+      void writeField(String name, String value) {
+        request.write('--$boundary\r\n');
+        request.write('Content-Disposition: form-data; name="$name"\r\n\r\n');
+        request.write(value);
+        request.write('\r\n');
+      }
+
+      writeField('photo_type', photoType);
+      final safeName = file.name.replaceAll(RegExp(r'["\r\n]'), '_');
+      request.write('--$boundary\r\n');
+      request.write(
+        'Content-Disposition: form-data; name="file"; filename="$safeName"\r\n',
+      );
+      request.write('Content-Type: application/octet-stream\r\n\r\n');
+      request.add(await file.readAsBytes().timeout(uploadTimeout));
+      request.write('\r\n--$boundary--\r\n');
+      final response = await request.close().timeout(uploadTimeout);
+      final text = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(uploadTimeout);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException('HTTP ${response.statusCode}: $text', uri: uri);
+      }
+      return text.isEmpty ? null : jsonDecode(text);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   String apiUrl(String path) => '$baseUrl/api/v1$path';
 
   String wsUrl(String path) =>

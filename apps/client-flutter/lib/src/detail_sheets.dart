@@ -139,6 +139,7 @@ class _ArtistInfoPage extends StatelessWidget {
     required this.coreBaseUrl,
     required this.detail,
     required this.onClose,
+    required this.onEdit,
     required this.onOpenAlbum,
     required this.onPlayTrack,
     required this.onOpenTrack,
@@ -149,6 +150,7 @@ class _ArtistInfoPage extends StatelessWidget {
   final String coreBaseUrl;
   final Map<String, dynamic>? detail;
   final VoidCallback onClose;
+  final Future<void> Function() onEdit;
   final Future<void> Function(int) onOpenAlbum;
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(int) onOpenTrack;
@@ -162,6 +164,9 @@ class _ArtistInfoPage extends StatelessWidget {
       return const Center(child: CircularProgressIndicator());
     }
     final artist = _asMap(detail['artist']);
+    final profile = detail['profile'] == null
+        ? <String, dynamic>{}
+        : _asMap(detail['profile']);
     final albums = (detail['albums'] as List?) ?? const [];
     final tracks = (detail['tracks'] as List?) ?? const [];
     final trackMaps = tracks
@@ -176,92 +181,357 @@ class _ArtistInfoPage extends StatelessWidget {
     return _PageFrame(
       title: 'Artist detail',
       child: ListView(
-        padding: const EdgeInsets.fromLTRB(24, 10, 24, 28),
+        padding: const EdgeInsets.only(bottom: 28),
         children: [
-          _ResponsiveDetailHeading(
-            header: _DetailHeader(
-              icon: Icons.person_outline,
-              title: artist['name']?.toString() ?? 'Unknown Artist',
-              subtitle: '${albums.length} albums - ${tracks.length} tracks',
-            ),
-            actions: _CollectionActions(tracks: tracks, onClose: onClose),
+          _ArtistHero(
+            coreBaseUrl: coreBaseUrl,
+            artist: artist,
+            profile: profile,
+            albumCount: albums.length,
+            trackCount: tracks.length,
+            collectionTracks: tracks,
+            onEdit: onEdit,
           ),
-          const SizedBox(height: 18),
-          Text(
-            _tr(context, 'Albums'),
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 8),
-          SizedBox(
-            height: 190,
-            child: albums.isEmpty
-                ? Center(child: Text(_tr(context, 'No albums')))
-                : ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: albums.length,
-                    separatorBuilder: (context, index) =>
-                        const SizedBox(width: 12),
-                    itemBuilder: (context, index) {
-                      final album = (albums[index] as Map)
-                          .cast<String, dynamic>();
-                      final id = _intValue(album['id']);
-                      return SizedBox(
-                        width: 132,
-                        child: InkWell(
-                          onTap: id == null
-                              ? null
-                              : () => unawaited(onOpenAlbum(id)),
-                          borderRadius: BorderRadius.circular(8),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _ArtworkTile(
-                                title: album['title']?.toString() ?? 'Untitled',
-                                subtitle:
-                                    album['album_artist_display']?.toString() ??
-                                    '',
-                                size: 120,
-                                icon: Icons.album_outlined,
-                                imageUrl: _albumArtworkUrl(
-                                  coreBaseUrl,
-                                  album['id'],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 22, 24, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if ((profile['biography']?.toString().trim() ?? '').isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 20),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 880),
+                      child: Text(
+                        profile['biography'].toString(),
+                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                          height: 1.55,
+                          color: IntMusicTheme.of(context).textSecondary,
+                        ),
+                      ),
+                    ),
+                  ),
+                if ((profile['genres'] as List? ?? const []).isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 20),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: (profile['genres'] as List)
+                          .map((genre) => Chip(label: Text(genre.toString())))
+                          .toList(),
+                    ),
+                  ),
+                Text(
+                  _tr(context, 'Albums'),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 196,
+                  child: albums.isEmpty
+                      ? Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(_tr(context, 'No albums')),
+                        )
+                      : ListView.separated(
+                          scrollDirection: Axis.horizontal,
+                          itemCount: albums.length,
+                          separatorBuilder: (context, index) =>
+                              const SizedBox(width: 14),
+                          itemBuilder: (context, index) {
+                            final album = (albums[index] as Map)
+                                .cast<String, dynamic>();
+                            final id = _intValue(album['id']);
+                            return SizedBox(
+                              width: 136,
+                              child: InkWell(
+                                onTap: id == null
+                                    ? null
+                                    : () => unawaited(onOpenAlbum(id)),
+                                borderRadius: BorderRadius.circular(12),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    _ArtworkTile(
+                                      title:
+                                          album['title']?.toString() ??
+                                          'Untitled',
+                                      subtitle:
+                                          album['album_artist_display']
+                                              ?.toString() ??
+                                          '',
+                                      size: 126,
+                                      icon: Icons.album_outlined,
+                                      imageUrl: _albumArtworkUrl(
+                                        coreBaseUrl,
+                                        album['id'],
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      album['title']?.toString() ?? 'Untitled',
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ],
                                 ),
                               ),
-                              const SizedBox(height: 8),
-                              Text(
-                                album['title']?.toString() ?? 'Untitled',
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ],
-                          ),
+                            );
+                          },
                         ),
-                      );
-                    },
+                ),
+                if (singleTracks.isNotEmpty)
+                  _ArtistTrackSection(
+                    title: 'Singles',
+                    coreBaseUrl: coreBaseUrl,
+                    tracks: singleTracks,
+                    onOpenTrack: onOpenTrack,
+                    onPlayTrack: onPlayTrack,
+                    onToggleFavorite: onToggleFavorite,
+                    onAddToPlaylist: onAddToPlaylist,
                   ),
+                if (albumTracks.isNotEmpty)
+                  _ArtistTrackSection(
+                    title: 'Tracks',
+                    coreBaseUrl: coreBaseUrl,
+                    tracks: albumTracks,
+                    onOpenTrack: onOpenTrack,
+                    onPlayTrack: onPlayTrack,
+                    onToggleFavorite: onToggleFavorite,
+                    onAddToPlaylist: onAddToPlaylist,
+                  ),
+              ],
+            ),
           ),
-          if (singleTracks.isNotEmpty)
-            _ArtistTrackSection(
-              title: 'Singles',
-              coreBaseUrl: coreBaseUrl,
-              tracks: singleTracks,
-              onOpenTrack: onOpenTrack,
-              onPlayTrack: onPlayTrack,
-              onToggleFavorite: onToggleFavorite,
-              onAddToPlaylist: onAddToPlaylist,
-            ),
-          if (albumTracks.isNotEmpty)
-            _ArtistTrackSection(
-              title: 'Tracks',
-              coreBaseUrl: coreBaseUrl,
-              tracks: albumTracks,
-              onOpenTrack: onOpenTrack,
-              onPlayTrack: onPlayTrack,
-              onToggleFavorite: onToggleFavorite,
-              onAddToPlaylist: onAddToPlaylist,
-            ),
         ],
       ),
+    );
+  }
+}
+
+class _ArtistHero extends StatelessWidget {
+  const _ArtistHero({
+    required this.coreBaseUrl,
+    required this.artist,
+    required this.profile,
+    required this.albumCount,
+    required this.trackCount,
+    required this.collectionTracks,
+    required this.onEdit,
+  });
+
+  final String coreBaseUrl;
+  final Map<String, dynamic> artist;
+  final Map<String, dynamic> profile;
+  final int albumCount;
+  final int trackCount;
+  final List<dynamic> collectionTracks;
+  final Future<void> Function() onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final artistId = _intValue(artist['id']);
+    final name = artist['name']?.toString() ?? 'Unknown Artist';
+    final revision = artist['artwork_revision'];
+    final heroUrl = _artistArtworkUrl(
+      coreBaseUrl,
+      artistId,
+      'detail_hero',
+      revision: revision,
+      width: 1800,
+      height: 620,
+    );
+    final avatarUrl = _artistArtworkUrl(
+      coreBaseUrl,
+      artistId,
+      'avatar',
+      revision: revision,
+      width: 420,
+      height: 420,
+    );
+    final metadata =
+        [
+              profile['artist_type'],
+              profile['country'],
+              if ((profile['begin_date']?.toString() ?? '').isNotEmpty)
+                (profile['end_date']?.toString() ?? '').isEmpty
+                    ? '${profile['begin_date']}–'
+                    : '${profile['begin_date']}–${profile['end_date']}',
+            ]
+            .where((item) => item != null && item.toString().trim().isNotEmpty)
+            .join(' · ');
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 720;
+        final actions = Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            _CollectionActions(tracks: collectionTracks),
+            OutlinedButton.icon(
+              onPressed: () => unawaited(onEdit()),
+              icon: const Icon(Icons.edit_outlined),
+              label: Text(_tr(context, 'Edit')),
+            ),
+          ],
+        );
+        return SizedBox(
+          height: compact ? 350 : 320,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [_seededColor(name, 0), _seededColor(name, 1)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                ),
+              ),
+              if (heroUrl != null)
+                CachedNetworkImage(
+                  cacheManager: _artworkCacheManager,
+                  imageUrl: heroUrl,
+                  fit: BoxFit.cover,
+                  fadeInDuration: const Duration(milliseconds: 220),
+                  errorWidget: (context, url, error) => const SizedBox.shrink(),
+                ),
+              DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: compact
+                        ? const [
+                            Color(0xc8000000),
+                            Color(0x77000000),
+                            Color(0x22000000),
+                          ]
+                        : const [
+                            Color(0xe6000000),
+                            Color(0xa8000000),
+                            Color(0x33000000),
+                            Color(0x08000000),
+                          ],
+                    stops: compact
+                        ? const [0, 0.7, 1]
+                        : const [0, 0.36, 0.7, 1],
+                  ),
+                ),
+              ),
+              const DecoratedBox(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Color(0x33000000),
+                      Colors.transparent,
+                      Color(0x88000000),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                left: compact ? 20 : 28,
+                right: compact ? 20 : 28,
+                bottom: compact ? 22 : 28,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    ClipOval(
+                      child: _ArtworkTile(
+                        title: name,
+                        subtitle: 'artist',
+                        size: compact ? 84 : 112,
+                        icon: Icons.person_outline,
+                        imageUrl: avatarUrl,
+                      ),
+                    ),
+                    const SizedBox(width: 18),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style:
+                                (compact
+                                        ? Theme.of(
+                                            context,
+                                          ).textTheme.headlineSmall
+                                        : Theme.of(
+                                            context,
+                                          ).textTheme.headlineMedium)
+                                    ?.copyWith(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w800,
+                                      shadows: const [
+                                        Shadow(
+                                          color: Colors.black54,
+                                          blurRadius: 8,
+                                        ),
+                                      ],
+                                    ),
+                          ),
+                          if (metadata.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              metadata,
+                              style: Theme.of(context).textTheme.bodyMedium
+                                  ?.copyWith(color: Colors.white70),
+                            ),
+                          ],
+                          const SizedBox(height: 4),
+                          Text(
+                            '$albumCount albums · $trackCount tracks',
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: Colors.white70),
+                          ),
+                          if (compact) ...[
+                            const SizedBox(height: 12),
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: actions,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (!compact)
+                Positioned(
+                  top: 20,
+                  right: 24,
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Theme.of(
+                        context,
+                      ).colorScheme.surface.withValues(alpha: 0.88),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.12),
+                      ),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: actions,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

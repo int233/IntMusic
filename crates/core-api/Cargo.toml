@@ -14,11 +14,13 @@ core-db = { path = "../core-db" }
 discovery = { path = "../discovery" }
 futures-util.workspace = true
 hex.workspace = true
+image.workspace = true
 library-scanner = { path = "../library-scanner" }
 lofty.workspace = true
 output-cpal = { path = "../output-cpal" }
 playback = { path = "../playback" }
 protocol = { path = "../protocol" }
+reqwest.workspace = true
 search-index = { path = "../search-index" }
 serde.workspace = true
 serde_json.workspace = true

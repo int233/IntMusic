@@ -52,6 +52,138 @@ pub struct ArtistSummary {
     pub sort_name: Option<String>,
     pub track_count: i64,
     pub album_count: i64,
+    #[serde(default)]
+    pub artwork_revision: i64,
+    #[serde(default)]
+    pub has_artwork: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtistProfile {
+    pub display_name: Option<String>,
+    pub sort_name: Option<String>,
+    pub musicbrainz_id: Option<String>,
+    pub artist_type: Option<String>,
+    pub country: Option<String>,
+    pub begin_date: Option<String>,
+    pub end_date: Option<String>,
+    pub disambiguation: Option<String>,
+    pub biography: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub links: Vec<ArtistLink>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ArtistLink {
+    pub label: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateArtistProfile {
+    pub display_name: Option<String>,
+    pub sort_name: Option<String>,
+    pub musicbrainz_id: Option<String>,
+    pub artist_type: Option<String>,
+    pub country: Option<String>,
+    pub begin_date: Option<String>,
+    pub end_date: Option<String>,
+    pub disambiguation: Option<String>,
+    pub biography: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub links: Vec<ArtistLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistAsset {
+    pub id: i64,
+    pub artist_id: i64,
+    pub original_filename: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub byte_size: u64,
+    pub photo_type: String,
+    pub sort_order: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistVisualRegion {
+    pub position: u8,
+    pub asset_id: i64,
+    pub crop_x: f32,
+    pub crop_y: f32,
+    pub crop_width: f32,
+    pub crop_height: f32,
+    pub focal_x: f32,
+    pub focal_y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistVisual {
+    pub slot: String,
+    pub asset_id: Option<i64>,
+    pub template: String,
+    pub fit: String,
+    pub focal_x: f32,
+    pub focal_y: f32,
+    pub blur: f32,
+    pub brightness: f32,
+    pub revision: i64,
+    #[serde(default)]
+    pub regions: Vec<ArtistVisualRegion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateArtistVisual {
+    pub asset_id: Option<i64>,
+    pub template: String,
+    pub fit: String,
+    pub focal_x: f32,
+    pub focal_y: f32,
+    pub blur: f32,
+    pub brightness: f32,
+    #[serde(default)]
+    pub regions: Vec<ArtistVisualRegion>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MusicBrainzArtistPreviewRequest {
+    pub musicbrainz_id: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MusicBrainzArtistPreview {
+    pub musicbrainz_id: String,
+    pub name: String,
+    pub sort_name: Option<String>,
+    pub artist_type: Option<String>,
+    pub country: Option<String>,
+    pub begin_date: Option<String>,
+    pub end_date: Option<String>,
+    pub disambiguation: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub links: Vec<ArtistLink>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateArtistAsset {
+    pub photo_type: Option<String>,
+    pub sort_order: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +207,11 @@ pub struct AlbumDetail {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtistDetail {
     pub artist: ArtistSummary,
+    pub profile: ArtistProfile,
+    #[serde(default)]
+    pub assets: Vec<ArtistAsset>,
+    #[serde(default)]
+    pub visuals: Vec<ArtistVisual>,
     pub albums: Vec<AlbumSummary>,
     pub tracks: Vec<TrackSummary>,
 }

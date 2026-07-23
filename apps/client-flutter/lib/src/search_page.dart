@@ -306,7 +306,14 @@ class _SearchResultRow extends StatelessWidget {
     final imageUrl = switch (kind) {
       _ResultKind.track => null,
       _ResultKind.album => _albumArtworkUrl(coreBaseUrl, item['id']),
-      _ResultKind.artist => null,
+      _ResultKind.artist => _artistArtworkUrl(
+        coreBaseUrl,
+        item['id'],
+        'search_list',
+        revision: item['artwork_revision'],
+        width: 128,
+        height: 128,
+      ),
       _ResultKind.playlist => null,
     };
 

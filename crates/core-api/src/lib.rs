@@ -2,22 +2,22 @@ mod renderers;
 
 use std::{
     future::Future,
-    io::SeekFrom,
+    io::{Cursor, SeekFrom},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path as FsPath, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, RwLock,
     },
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, Query, State,
+        DefaultBodyLimit, Multipart, Path, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -28,6 +28,11 @@ use chrono::Utc;
 use core_config::{CoreConfig, CorePaths, FavoritesConfig};
 use core_db::DbPool;
 use discovery::DiscoveryPublisher;
+use image::{
+    codecs::jpeg::JpegEncoder,
+    imageops::{self, FilterType},
+    DynamicImage, GenericImageView, ImageFormat, RgbaImage,
+};
 use library_scanner::{ScannerConfig, ScannerEvent};
 use lofty::{
     file::TaggedFileExt,
@@ -38,12 +43,13 @@ use playback::PlaybackController;
 use protocol::{
     AddPlaybackQueueItems, ApiErrorBody, CoreStatus, EventEnvelope, FavoriteSettingsUpdate,
     LibraryChangedPayload, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
-    NewLibraryRoot, NewPlaylist, PlayRequest, PlaybackEvent, PlaybackModeUpdate, PlaybackQueue,
-    PlaybackSession, PlaybackState, PlaybackStats, PlaybackTransportState, PlaylistDetail,
-    PlaylistTrackMutation, RendererCommandPayload, RendererRegistration, RendererStateReport,
-    ReplacePlaybackQueue, ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate,
-    TrackFavoriteUpdate, UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume,
-    ZoneVolumeUpdate, API_PREFIX, EVENTS_WS_PATH,
+    MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
+    PlayRequest, PlaybackEvent, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
+    PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
+    RendererCommandPayload, RendererRegistration, RendererStateReport, ReplacePlaybackQueue,
+    ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate, TrackFavoriteUpdate,
+    UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, ZoneAliasUpdate,
+    ZoneTransferRequest, ZoneVolume, ZoneVolumeUpdate, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -76,6 +82,7 @@ struct AppStateInner {
     server_id: Uuid,
     bind_address: SocketAddr,
     discovery_service: Option<String>,
+    musicbrainz_gate: tokio::sync::Mutex<tokio::time::Instant>,
 }
 
 impl AppState {
@@ -101,6 +108,9 @@ impl AppState {
                 server_id,
                 bind_address,
                 discovery_service,
+                musicbrainz_gate: tokio::sync::Mutex::new(
+                    tokio::time::Instant::now() - Duration::from_secs(1),
+                ),
             }),
         }
     }
@@ -330,7 +340,26 @@ pub fn build_router(state: AppState) -> Router {
         .route("/albums", get(list_albums))
         .route("/albums/{album_id}", get(album_detail))
         .route("/artists", get(list_artists))
-        .route("/artists/{artist_id}", get(artist_detail))
+        .route(
+            "/artists/{artist_id}",
+            get(artist_detail).post(update_artist_profile),
+        )
+        .route(
+            "/artists/{artist_id}/musicbrainz/preview",
+            post(musicbrainz_artist_preview),
+        )
+        .route(
+            "/artists/{artist_id}/assets",
+            get(list_artist_assets).post(upload_artist_assets),
+        )
+        .route(
+            "/artists/{artist_id}/assets/{asset_id}",
+            post(update_artist_asset).delete(delete_artist_asset),
+        )
+        .route(
+            "/artists/{artist_id}/visuals/{slot}",
+            post(update_artist_visual),
+        )
         .route("/tracks", get(list_tracks))
         .route("/tracks/{track_id}", get(track_detail))
         .route("/tracks/{track_id}/favorite", post(update_track_favorite))
@@ -338,6 +367,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/tracks/{track_id}/stream", get(track_stream))
         .route("/artwork/albums/{album_id}", get(album_artwork))
         .route("/artwork/tracks/{track_id}", get(track_artwork))
+        .route("/artwork/artists/{artist_id}/{slot}", get(artist_artwork))
         .route("/search", get(search))
         .route("/playlists", get(list_playlists).post(create_playlist))
         .route(
@@ -403,6 +433,7 @@ pub fn build_router(state: AppState) -> Router {
         .route(EVENTS_WS_PATH, get(events_ws))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -545,6 +576,335 @@ async fn artist_detail(
     Ok(Json(detail))
 }
 
+async fn update_artist_profile(
+    State(state): State<AppState>,
+    Path(artist_id): Path<i64>,
+    Json(update): Json<UpdateArtistProfile>,
+) -> ApiResult<protocol::ArtistDetail> {
+    if let Some(mbid) = update
+        .musicbrainz_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    {
+        parse_musicbrainz_artist_id(mbid)?;
+    }
+    core_db::update_artist_profile(state.pool(), artist_id, &update).await?;
+    let mut detail = core_db::artist_detail(state.pool(), artist_id).await?;
+    apply_favorite_settings_to_tracks(&state.config().favorites, &mut detail.tracks);
+    state.bump_library_revision("artist profile updated");
+    state.emit(
+        "artist.updated",
+        json!({"artist_id": artist_id, "kind": "profile"}),
+    );
+    Ok(Json(detail))
+}
+
+async fn list_artist_assets(
+    State(state): State<AppState>,
+    Path(artist_id): Path<i64>,
+) -> ApiResult<Vec<protocol::ArtistAsset>> {
+    Ok(Json(
+        core_db::list_artist_assets(state.pool(), artist_id).await?,
+    ))
+}
+
+async fn upload_artist_assets(
+    State(state): State<AppState>,
+    Path(artist_id): Path<i64>,
+    mut multipart: Multipart,
+) -> ApiResult<Vec<protocol::ArtistAsset>> {
+    let mut uploaded = Vec::new();
+    let mut photo_type = "other".to_string();
+    while let Some(field) = multipart.next_field().await? {
+        if field.name() == Some("photo_type") {
+            photo_type = field.text().await?.trim().to_string();
+            continue;
+        }
+        if field.name() != Some("file") {
+            continue;
+        }
+        let original_filename = field
+            .file_name()
+            .and_then(|name| FsPath::new(name).file_name())
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("artist-image")
+            .to_string();
+        let bytes = field.bytes().await?;
+        if bytes.is_empty() {
+            return Err(anyhow::anyhow!("the uploaded image is empty").into());
+        }
+        if bytes.len() > 256 * 1024 * 1024 {
+            return Err(anyhow::anyhow!("the uploaded image exceeds 256 MiB").into());
+        }
+
+        let owned_bytes = bytes.to_vec();
+        let (format, width, height) =
+            tokio::task::spawn_blocking(move || inspect_artist_image(&owned_bytes))
+                .await
+                .map_err(anyhow::Error::from)??;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let sha256 = hex::encode(hasher.finalize());
+        let extension = artist_image_extension(format);
+        let mime_type = format.to_mime_type();
+        let storage_dir = state.inner.paths.data_dir.join("artist-media");
+        tokio::fs::create_dir_all(&storage_dir).await?;
+        let storage_path = storage_dir.join(format!("{sha256}.{extension}"));
+        if tokio::fs::metadata(&storage_path).await.is_err() {
+            let temporary_path =
+                storage_dir.join(format!(".upload-{}.{extension}", Uuid::new_v4()));
+            tokio::fs::write(&temporary_path, &bytes).await?;
+            tokio::fs::rename(&temporary_path, &storage_path).await?;
+        }
+        let storage_path_text = format!("artist-media/{sha256}.{extension}");
+        let asset = core_db::add_artist_asset(
+            state.pool(),
+            artist_id,
+            core_db::NewArtistAsset {
+                sha256: &sha256,
+                original_filename: &original_filename,
+                storage_path: &storage_path_text,
+                mime_type,
+                width,
+                height,
+                byte_size: bytes.len() as u64,
+                photo_type: if photo_type.is_empty() {
+                    "other"
+                } else {
+                    &photo_type
+                },
+            },
+        )
+        .await?;
+        uploaded.push(asset);
+    }
+    if uploaded.is_empty() {
+        return Err(anyhow::anyhow!("no image file was provided").into());
+    }
+
+    let visuals = core_db::list_artist_visuals(state.pool(), artist_id).await?;
+    let first_asset_id = uploaded[0].id;
+    for slot in ["avatar", "detail_hero"] {
+        if !visuals.iter().any(|visual| visual.slot == slot) {
+            core_db::save_artist_visual(
+                state.pool(),
+                artist_id,
+                slot,
+                &UpdateArtistVisual {
+                    asset_id: Some(first_asset_id),
+                    template: "single".to_string(),
+                    fit: "cover".to_string(),
+                    focal_x: 0.5,
+                    focal_y: 0.5,
+                    blur: 0.0,
+                    brightness: 1.0,
+                    regions: Vec::new(),
+                },
+            )
+            .await?;
+        }
+    }
+    state.bump_library_revision("artist artwork uploaded");
+    state.emit(
+        "artist.asset.ready",
+        json!({
+            "artist_id": artist_id,
+            "asset_ids": uploaded.iter().map(|asset| asset.id).collect::<Vec<_>>()
+        }),
+    );
+    Ok(Json(uploaded))
+}
+
+fn inspect_artist_image(bytes: &[u8]) -> Result<(ImageFormat, u32, u32)> {
+    let format = image::guess_format(bytes).context("unsupported or invalid image format")?;
+    let reader = image::ImageReader::with_format(Cursor::new(bytes), format);
+    let (width, height) = reader
+        .into_dimensions()
+        .context("failed to read image dimensions")?;
+    anyhow::ensure!(width > 0 && height > 0, "image dimensions are invalid");
+    anyhow::ensure!(
+        u64::from(width) * u64::from(height) <= 250_000_000,
+        "decoded image exceeds the 250 megapixel safety limit"
+    );
+    image::load_from_memory_with_format(bytes, format).context("failed to decode image")?;
+    Ok((format, width, height))
+}
+
+fn artist_image_extension(format: ImageFormat) -> &'static str {
+    match format {
+        ImageFormat::Jpeg => "jpg",
+        ImageFormat::Png => "png",
+        ImageFormat::WebP => "webp",
+        ImageFormat::Gif => "gif",
+        ImageFormat::Bmp => "bmp",
+        ImageFormat::Tiff => "tiff",
+        ImageFormat::Avif => "avif",
+        ImageFormat::Ico => "ico",
+        ImageFormat::Pnm => "pnm",
+        ImageFormat::Tga => "tga",
+        ImageFormat::Qoi => "qoi",
+        _ => "img",
+    }
+}
+
+async fn update_artist_asset(
+    State(state): State<AppState>,
+    Path((artist_id, asset_id)): Path<(i64, i64)>,
+    Json(update): Json<UpdateArtistAsset>,
+) -> ApiResult<protocol::ArtistAsset> {
+    let asset = core_db::update_artist_asset(state.pool(), artist_id, asset_id, &update).await?;
+    state.emit(
+        "artist.updated",
+        json!({"artist_id": artist_id, "kind": "asset"}),
+    );
+    Ok(Json(asset))
+}
+
+async fn delete_artist_asset(
+    State(state): State<AppState>,
+    Path((artist_id, asset_id)): Path<(i64, i64)>,
+) -> ApiResult<serde_json::Value> {
+    core_db::delete_artist_asset(state.pool(), artist_id, asset_id).await?;
+    state.bump_library_revision("artist artwork removed");
+    state.emit(
+        "artist.visual.updated",
+        json!({"artist_id": artist_id, "removed_asset_id": asset_id}),
+    );
+    Ok(Json(json!({"deleted": true})))
+}
+
+async fn update_artist_visual(
+    State(state): State<AppState>,
+    Path((artist_id, slot)): Path<(i64, String)>,
+    Json(update): Json<UpdateArtistVisual>,
+) -> ApiResult<protocol::ArtistVisual> {
+    let visual = core_db::save_artist_visual(state.pool(), artist_id, &slot, &update).await?;
+    state.bump_library_revision("artist visual updated");
+    state.emit(
+        "artist.visual.updated",
+        json!({"artist_id": artist_id, "slot": slot, "revision": visual.revision}),
+    );
+    Ok(Json(visual))
+}
+
+#[derive(Debug, Deserialize)]
+struct MusicBrainzArtistResponse {
+    id: String,
+    name: String,
+    #[serde(rename = "sort-name")]
+    sort_name: Option<String>,
+    #[serde(rename = "type")]
+    artist_type: Option<String>,
+    country: Option<String>,
+    disambiguation: Option<String>,
+    #[serde(rename = "life-span", default)]
+    life_span: MusicBrainzLifeSpan,
+    #[serde(default)]
+    aliases: Vec<MusicBrainzNamedValue>,
+    #[serde(default)]
+    genres: Vec<MusicBrainzNamedValue>,
+    #[serde(default)]
+    relations: Vec<MusicBrainzRelation>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MusicBrainzLifeSpan {
+    begin: Option<String>,
+    end: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MusicBrainzNamedValue {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct MusicBrainzRelation {
+    #[serde(rename = "type")]
+    relation_type: String,
+    url: Option<MusicBrainzUrl>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MusicBrainzUrl {
+    resource: String,
+}
+
+async fn musicbrainz_artist_preview(
+    State(state): State<AppState>,
+    Path(_artist_id): Path<i64>,
+    Json(request): Json<MusicBrainzArtistPreviewRequest>,
+) -> ApiResult<MusicBrainzArtistPreview> {
+    let mbid = parse_musicbrainz_artist_id(&request.musicbrainz_id)?;
+    {
+        let mut last_request = state.inner.musicbrainz_gate.lock().await;
+        let elapsed = last_request.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            tokio::time::sleep(Duration::from_secs(1) - elapsed).await;
+        }
+        *last_request = tokio::time::Instant::now();
+    }
+    let url =
+        format!("https://musicbrainz.org/ws/2/artist/{mbid}?inc=aliases+genres+url-rels&fmt=json");
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .user_agent(format!(
+            "IntMusic/{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            env!("CARGO_PKG_REPOSITORY")
+        ))
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<MusicBrainzArtistResponse>()
+        .await?;
+    let mut links = response
+        .relations
+        .into_iter()
+        .filter_map(|relation| {
+            if relation.relation_type == "image" {
+                return None;
+            }
+            relation.url.map(|url| protocol::ArtistLink {
+                label: relation.relation_type,
+                url: url.resource,
+            })
+        })
+        .collect::<Vec<_>>();
+    links.sort_by(|left, right| left.url.cmp(&right.url));
+    links.dedup_by(|left, right| left.url == right.url);
+    Ok(Json(MusicBrainzArtistPreview {
+        musicbrainz_id: response.id,
+        name: response.name,
+        sort_name: response.sort_name,
+        artist_type: response.artist_type,
+        country: response.country,
+        begin_date: response.life_span.begin,
+        end_date: response.life_span.end,
+        disambiguation: response.disambiguation,
+        aliases: response
+            .aliases
+            .into_iter()
+            .map(|alias| alias.name)
+            .collect(),
+        genres: response
+            .genres
+            .into_iter()
+            .map(|genre| genre.name)
+            .collect(),
+        links,
+    }))
+}
+
+fn parse_musicbrainz_artist_id(value: &str) -> Result<Uuid> {
+    let trimmed = value.trim().trim_end_matches('/');
+    let candidate = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    Uuid::parse_str(candidate).context("invalid MusicBrainz artist ID or URL")
+}
+
 async fn list_tracks(
     State(state): State<AppState>,
     Query(paging): Query<Paging>,
@@ -664,6 +1024,285 @@ async fn track_artwork(
     Path(track_id): Path<i64>,
 ) -> Result<Response, ApiError> {
     artwork_response_for_track(&state, track_id).await
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtistArtworkQuery {
+    w: Option<u32>,
+    h: Option<u32>,
+}
+
+async fn artist_artwork(
+    State(state): State<AppState>,
+    Path((artist_id, slot)): Path<(i64, String)>,
+    Query(query): Query<ArtistArtworkQuery>,
+) -> Result<Response, ApiError> {
+    let mut source = if let Some(asset_id) = slot
+        .strip_prefix("asset-")
+        .and_then(|value| value.parse::<i64>().ok())
+    {
+        let asset = core_db::artist_asset_storage(state.pool(), artist_id, asset_id).await?;
+        core_db::ArtistVisualSource {
+            visual: protocol::ArtistVisual {
+                slot: slot.clone(),
+                asset_id: Some(asset_id),
+                template: "single".to_string(),
+                fit: "cover".to_string(),
+                focal_x: 0.5,
+                focal_y: 0.5,
+                blur: 0.0,
+                brightness: 1.0,
+                revision: 0,
+                regions: Vec::new(),
+            },
+            assets: vec![asset],
+        }
+    } else {
+        let Some(source) = core_db::artist_visual_source(state.pool(), artist_id, &slot).await?
+        else {
+            return Ok(empty_response(StatusCode::NOT_FOUND));
+        };
+        source
+    };
+    for asset in &mut source.assets {
+        let path = FsPath::new(&asset.storage_path);
+        if path.is_relative() {
+            asset.storage_path = state
+                .inner
+                .paths
+                .data_dir
+                .join(path)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+
+    let default_size = match slot.as_str() {
+        "detail_hero" | "home_feature" | "playback_background" => (1600, 560),
+        "artist_card" => (768, 960),
+        _ => (512, 512),
+    };
+    let width = query.w.unwrap_or(default_size.0).clamp(32, 2048);
+    let height = query.h.unwrap_or(default_size.1).clamp(32, 2048);
+    let mut hasher = Sha256::new();
+    hasher.update(artist_id.to_le_bytes());
+    hasher.update(slot.as_bytes());
+    hasher.update(source.visual.revision.to_le_bytes());
+    hasher.update(width.to_le_bytes());
+    hasher.update(height.to_le_bytes());
+    for asset in &source.assets {
+        hasher.update(asset.asset.id.to_le_bytes());
+        hasher.update(asset.storage_path.as_bytes());
+    }
+    let cache_key = hex::encode(hasher.finalize());
+    let cache_dir = state.inner.paths.cache_dir.join("artist-artwork");
+    tokio::fs::create_dir_all(&cache_dir).await?;
+    let cache_path = cache_dir.join(format!("{cache_key}.jpg"));
+    if tokio::fs::metadata(&cache_path).await.is_err() {
+        let source_for_render = source.clone();
+        let temporary_path = cache_dir.join(format!(".render-{}.jpg", Uuid::new_v4()));
+        let temporary_for_render = temporary_path.clone();
+        tokio::task::spawn_blocking(move || {
+            render_artist_visual(&source_for_render, width, height, &temporary_for_render)
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
+        if tokio::fs::rename(&temporary_path, &cache_path)
+            .await
+            .is_err()
+            && tokio::fs::metadata(&cache_path).await.is_err()
+        {
+            return Err(anyhow::anyhow!("failed to save rendered artist artwork").into());
+        }
+    }
+
+    let file = tokio::fs::File::open(&cache_path).await?;
+    let len = file.metadata().await?.len();
+    let body = Body::from_stream(ReaderStream::new(file));
+    let mut response = Response::new(body);
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&len.to_string()).map_err(anyhow::Error::from)?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{cache_key}\"")).map_err(anyhow::Error::from)?,
+    );
+    Ok(response)
+}
+
+fn render_artist_visual(
+    source: &core_db::ArtistVisualSource,
+    width: u32,
+    height: u32,
+    output_path: &FsPath,
+) -> Result<()> {
+    let mut canvas = RgbaImage::new(width, height);
+    let regions = &source.visual.regions;
+    if regions.is_empty() {
+        let asset_id = source
+            .visual
+            .asset_id
+            .or_else(|| source.assets.first().map(|asset| asset.asset.id))
+            .context("artist visual has no source asset")?;
+        let asset = source
+            .assets
+            .iter()
+            .find(|asset| asset.asset.id == asset_id)
+            .context("artist visual source asset is missing")?;
+        let image = load_artist_image(&asset.storage_path)?;
+        let rendered = crop_and_resize_with_focal(
+            &image,
+            width,
+            height,
+            source.visual.focal_x,
+            source.visual.focal_y,
+            None,
+        );
+        imageops::overlay(&mut canvas, &rendered.to_rgba8(), 0, 0);
+    } else {
+        let layout = composition_layout(regions.len(), &source.visual.template);
+        for (region, target) in regions.iter().zip(layout) {
+            let Some(asset) = source
+                .assets
+                .iter()
+                .find(|asset| asset.asset.id == region.asset_id)
+            else {
+                continue;
+            };
+            let target_x = (target.0 * width as f32).round() as u32;
+            let target_y = (target.1 * height as f32).round() as u32;
+            let target_width = (target.2 * width as f32).round().max(1.0) as u32;
+            let target_height = (target.3 * height as f32).round().max(1.0) as u32;
+            let image = load_artist_image(&asset.storage_path)?;
+            let crop = (
+                region.crop_x,
+                region.crop_y,
+                region.crop_width,
+                region.crop_height,
+            );
+            let rendered = crop_and_resize_with_focal(
+                &image,
+                target_width,
+                target_height,
+                region.focal_x,
+                region.focal_y,
+                Some(crop),
+            );
+            imageops::overlay(
+                &mut canvas,
+                &rendered.to_rgba8(),
+                i64::from(target_x),
+                i64::from(target_y),
+            );
+        }
+    }
+
+    let mut rendered = DynamicImage::ImageRgba8(canvas);
+    if source.visual.blur > 0.1 {
+        rendered = rendered.blur(source.visual.blur.min(40.0));
+    }
+    if (source.visual.brightness - 1.0).abs() > 0.01 {
+        rendered = rendered.brighten(((source.visual.brightness - 1.0) * 100.0) as i32);
+    }
+    let rgb = rendered.to_rgb8();
+    let file = std::fs::File::create(output_path)?;
+    JpegEncoder::new_with_quality(file, 90).encode(
+        &rgb,
+        width,
+        height,
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(())
+}
+
+fn load_artist_image(path: &str) -> Result<DynamicImage> {
+    image::ImageReader::open(path)?
+        .with_guessed_format()?
+        .decode()
+        .with_context(|| format!("failed to decode artist image {path}"))
+}
+
+fn crop_and_resize_with_focal(
+    image: &DynamicImage,
+    target_width: u32,
+    target_height: u32,
+    focal_x: f32,
+    focal_y: f32,
+    normalized_crop: Option<(f32, f32, f32, f32)>,
+) -> DynamicImage {
+    let (image_width, image_height) = image.dimensions();
+    let (mut x, mut y, mut crop_width, mut crop_height) =
+        if let Some((x, y, width, height)) = normalized_crop {
+            (
+                (x.clamp(0.0, 1.0) * image_width as f32).floor() as u32,
+                (y.clamp(0.0, 1.0) * image_height as f32).floor() as u32,
+                (width.clamp(0.001, 1.0) * image_width as f32).round() as u32,
+                (height.clamp(0.001, 1.0) * image_height as f32).round() as u32,
+            )
+        } else {
+            (0, 0, image_width, image_height)
+        };
+    crop_width = crop_width.min(image_width.saturating_sub(x)).max(1);
+    crop_height = crop_height.min(image_height.saturating_sub(y)).max(1);
+    let target_ratio = target_width as f32 / target_height as f32;
+    let source_ratio = crop_width as f32 / crop_height as f32;
+    if source_ratio > target_ratio {
+        let wanted_width = (crop_height as f32 * target_ratio).round() as u32;
+        let focal_pixel = x as f32 + focal_x.clamp(0.0, 1.0) * crop_width as f32;
+        x = (focal_pixel - wanted_width as f32 / 2.0)
+            .clamp(x as f32, (x + crop_width - wanted_width) as f32)
+            .round() as u32;
+        crop_width = wanted_width.max(1);
+    } else if source_ratio < target_ratio {
+        let wanted_height = (crop_width as f32 / target_ratio).round() as u32;
+        let focal_pixel = y as f32 + focal_y.clamp(0.0, 1.0) * crop_height as f32;
+        y = (focal_pixel - wanted_height as f32 / 2.0)
+            .clamp(y as f32, (y + crop_height - wanted_height) as f32)
+            .round() as u32;
+        crop_height = wanted_height.max(1);
+    }
+    image.crop_imm(x, y, crop_width, crop_height).resize_exact(
+        target_width,
+        target_height,
+        FilterType::Lanczos3,
+    )
+}
+
+fn composition_layout(count: usize, template: &str) -> Vec<(f32, f32, f32, f32)> {
+    match (count, template) {
+        (1, _) => vec![(0.0, 0.0, 1.0, 1.0)],
+        (2, "stacked") => vec![(0.0, 0.0, 1.0, 0.5), (0.0, 0.5, 1.0, 0.5)],
+        (2, _) => vec![(0.0, 0.0, 0.5, 1.0), (0.5, 0.0, 0.5, 1.0)],
+        (3, _) => vec![
+            (0.0, 0.0, 0.66, 1.0),
+            (0.66, 0.0, 0.34, 0.5),
+            (0.66, 0.5, 0.34, 0.5),
+        ],
+        (4, _) => vec![
+            (0.0, 0.0, 0.5, 0.5),
+            (0.5, 0.0, 0.5, 0.5),
+            (0.0, 0.5, 0.5, 0.5),
+            (0.5, 0.5, 0.5, 0.5),
+        ],
+        _ => vec![
+            (0.0, 0.0, 0.6, 1.0),
+            (0.6, 0.0, 0.2, 0.5),
+            (0.8, 0.0, 0.2, 0.5),
+            (0.6, 0.5, 0.2, 0.5),
+            (0.8, 0.5, 0.2, 0.5),
+        ]
+        .into_iter()
+        .take(count.min(5))
+        .collect(),
+    }
 }
 
 async fn artwork_response_for_track(state: &AppState, track_id: i64) -> Result<Response, ApiError> {
@@ -2159,6 +2798,24 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<std::io::Error> for ApiError {
+    fn from(error: std::io::Error) -> Self {
+        Self(error.into())
+    }
+}
+
+impl From<reqwest::Error> for ApiError {
+    fn from(error: reqwest::Error) -> Self {
+        Self(error.into())
+    }
+}
+
+impl From<axum::extract::multipart::MultipartError> for ApiError {
+    fn from(error: axum::extract::multipart::MultipartError) -> Self {
+        Self(error.into())
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         error!(error = %self.0, "api error");
@@ -2188,4 +2845,33 @@ pub async fn run_until_shutdown(bind_addr: SocketAddr, router: Router) -> Result
         })
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_musicbrainz_artist_id_and_url() {
+        let expected = Uuid::parse_str("20244d07-534f-4eff-b4d4-930878889970").unwrap();
+        assert_eq!(
+            parse_musicbrainz_artist_id("20244d07-534f-4eff-b4d4-930878889970").unwrap(),
+            expected
+        );
+        assert_eq!(
+            parse_musicbrainz_artist_id(
+                "https://musicbrainz.org/artist/20244d07-534f-4eff-b4d4-930878889970/"
+            )
+            .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn composition_layout_never_emits_more_than_five_tiles() {
+        for count in 1..=5 {
+            assert_eq!(composition_layout(count, "feature").len(), count);
+        }
+        assert_eq!(composition_layout(6, "feature").len(), 5);
+    }
 }

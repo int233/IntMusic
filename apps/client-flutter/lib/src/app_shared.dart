@@ -1059,6 +1059,28 @@ String? _albumArtworkUrl(String coreBaseUrl, Object? albumId) =>
 String? _trackArtworkUrl(String coreBaseUrl, Object? trackId) =>
     _artworkUrl(coreBaseUrl, 'tracks', trackId);
 
+String? _artistArtworkUrl(
+  String coreBaseUrl,
+  Object? artistId,
+  String slot, {
+  Object? revision,
+  int? width,
+  int? height,
+}) {
+  final value = artistId?.toString();
+  final baseUrl = coreBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+  if (value == null || value.isEmpty || baseUrl.isEmpty) {
+    return null;
+  }
+  final query = <String>[
+    if (width != null) 'w=$width',
+    if (height != null) 'h=$height',
+    if (revision != null) 'revision=$revision',
+  ];
+  return '$baseUrl/api/v1/artwork/artists/$value/$slot'
+      '${query.isEmpty ? '' : '?${query.join('&')}'}';
+}
+
 String? _artworkUrl(String coreBaseUrl, String kind, Object? id) {
   final value = id?.toString();
   if (value == null || value.isEmpty) {

@@ -39,6 +39,7 @@ dependencies:
   audioplayers_windows: 4.3.0
   cached_network_image: ^3.4.1
   cupertino_icons: ^1.0.8
+  file_selector: ^1.1.0
   flutter_cache_manager: ^3.4.1
   # libmpv is used only on macOS/Windows for real output enumeration/routing.
   media_kit: ^1.2.6
