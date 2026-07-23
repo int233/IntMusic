@@ -239,6 +239,8 @@ pub struct ZoneSummary {
     pub output_id: Option<String>,
     pub state: PlaybackTransportState,
     pub volume: f32,
+    #[serde(default)]
+    pub muted: bool,
     pub track_id: Option<i64>,
     pub track_title: Option<String>,
     pub position_ms: u64,
@@ -264,6 +266,70 @@ pub struct PlaybackState {
     pub track_title: Option<String>,
     pub position_ms: u64,
     pub queue_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackMode {
+    Single,
+    RepeatOne,
+    Shuffle,
+    RepeatAll,
+    #[default]
+    Sequential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackQueueItem {
+    pub id: i64,
+    pub position: i64,
+    pub track: TrackSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackQueue {
+    pub zone_id: String,
+    pub revision: u64,
+    pub mode: PlaybackMode,
+    pub current_index: Option<i64>,
+    pub items: Vec<PlaybackQueueItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReplacePlaybackQueue {
+    pub track_ids: Vec<i64>,
+    pub start_index: Option<i64>,
+    pub mode: Option<PlaybackMode>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddPlaybackQueueItems {
+    pub track_ids: Vec<i64>,
+    pub position: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MovePlaybackQueueItem {
+    pub from: i64,
+    pub to: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackModeUpdate {
+    pub mode: PlaybackMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneVolumeUpdate {
+    pub volume: f32,
+    pub muted: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZoneVolume {
+    pub zone_id: String,
+    pub volume: f32,
+    pub muted: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -335,6 +401,10 @@ pub struct RendererCommandPayload {
     pub track_title: Option<String>,
     pub stream_path: Option<String>,
     pub position_ms: Option<u64>,
+    #[serde(default)]
+    pub volume: Option<f32>,
+    #[serde(default)]
+    pub muted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

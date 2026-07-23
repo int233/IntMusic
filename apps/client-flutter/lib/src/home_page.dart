@@ -117,11 +117,19 @@ class _HomePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: appSurface,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: appBorder),
+        color: tokens.surface.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(tokens.radiusLarge),
+        border: Border.all(color: tokens.stroke),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x26000000),
+            blurRadius: 24,
+            offset: Offset(0, 10),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

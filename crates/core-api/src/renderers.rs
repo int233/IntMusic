@@ -143,6 +143,7 @@ impl RendererRegistry {
                             PlaybackTransportState::Stopped
                         },
                         volume: 1.0,
+                        muted: false,
                         track_id: if online { state.track_id } else { None },
                         track_title: if online { state.track_title } else { None },
                         position_ms: if online { state.position_ms } else { 0 },

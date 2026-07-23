@@ -27,11 +27,11 @@ part 'src/detail_sheets.dart';
 part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
 part 'src/i18n.dart';
+part 'src/platform_integration.dart';
 
 const _prefsCoreUrlKey = 'intmusic.core_url';
 const _prefsLanguageKey = 'intmusic.language';
 const _prefsClientAliasKey = 'intmusic.client_alias';
-const _systemChannel = MethodChannel('dev.intmusic/system');
 final CacheManager _artworkCacheManager = CacheManager(
   Config(
     'intmusicArtworkCache',
@@ -55,7 +55,9 @@ class IntMusicClientApp extends StatelessWidget {
     return MaterialApp(
       title: 'IntMusic',
       debugShowCheckedModeBanner: false,
-      theme: buildIntMusicTheme(),
+      theme: buildIntMusicTheme(brightness: Brightness.light),
+      darkTheme: buildIntMusicTheme(),
+      themeMode: ThemeMode.dark,
       home: const CoreDashboard(),
       builder: (context, child) {
         if (child == null) {
@@ -107,6 +109,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   Map<String, dynamic>? _diagnostics;
   Map<String, dynamic>? _serverSettings;
   Map<String, dynamic>? _playback;
+  Map<String, dynamic>? _playbackQueue;
   Map<String, dynamic>? _activeTrackDetail;
   Map<String, dynamic>? _trackInfoDetail;
   Map<String, dynamic>? _albumInfoDetail;
@@ -195,8 +198,37 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _initializeAndRefresh() async {
+    await _IntMusicPlatform.instance.initialize(
+      onCommand: _handlePlatformCommand,
+      onSeek: _seekPlayback,
+    );
     await _loadSavedCoreUrl();
     await _refreshAll();
+  }
+
+  Future<void> _handlePlatformCommand(_PlatformCommand command) async {
+    switch (command) {
+      case _PlatformCommand.play:
+        await _resumePlayback();
+      case _PlatformCommand.pause:
+        await _pausePlayback();
+      case _PlatformCommand.togglePlayPause:
+        if (_playback?['state']?.toString() == 'playing') {
+          await _pausePlayback();
+        } else {
+          await _resumePlayback();
+        }
+      case _PlatformCommand.previous:
+        await _playPreviousTrack();
+      case _PlatformCommand.next:
+        await _playNextTrack();
+      case _PlatformCommand.stop:
+        await _stopZone(_activeZoneId());
+      case _PlatformCommand.showWindow:
+        await _IntMusicPlatform.instance.showWindow();
+      case _PlatformCommand.quit:
+        await SystemNavigator.pop();
+    }
   }
 
   Future<void> _loadSavedCoreUrl() async {
@@ -473,6 +505,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     _libraryRoots = results[12] as List<dynamic>;
     _keepSelectedZoneValid();
     _syncPlaybackFromSelectedZone();
+    await _refreshPlaybackQueue();
     _scheduleActiveTrackDetailLoad(_playback);
   }
 
@@ -605,15 +638,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _handleOutputComplete(String outputId) async {
-    final nextId = _nextTrackId(autoAdvance: true);
-    if (nextId == null) {
-      await _reportRendererState('stopped', outputId: outputId);
-      return;
-    }
-    final playback = await _playTrackOnZone(nextId, outputId);
-    if (mounted && playback != null) {
-      setState(() => _applyPlayback(playback));
-    }
+    await _reportRendererState('stopped', outputId: outputId);
   }
 
   bool _isClientOutputId(String? outputId) => outputId == _clientOutputId;
@@ -809,6 +834,38 @@ class _CoreDashboardState extends State<CoreDashboard>
         setState(() {
           _mergePlaybackEvent(playback);
         });
+        return;
+      }
+
+      if (eventType == 'playback.queue_changed' && payload is Map) {
+        final queue = payload.cast<String, dynamic>();
+        if (queue['zone_id']?.toString() == _activeZoneId()) {
+          setState(() => _applyPlaybackQueue(queue));
+        }
+        return;
+      }
+
+      if (eventType == 'zone.volume_changed' && payload is Map) {
+        final volume = payload.cast<String, dynamic>();
+        final zoneId = volume['zone_id']?.toString();
+        if (zoneId == null) {
+          return;
+        }
+        setState(() {
+          _zones = _zones
+              .map((item) {
+                final zone = (item as Map).cast<String, dynamic>();
+                if (zone['id']?.toString() != zoneId) {
+                  return zone;
+                }
+                return <String, dynamic>{
+                  ...zone,
+                  'volume': volume['volume'],
+                  'muted': volume['muted'],
+                };
+              })
+              .toList(growable: false);
+        });
       }
     } catch (error) {
       if (mounted) {
@@ -893,6 +950,12 @@ class _CoreDashboardState extends State<CoreDashboard>
             command: command,
             positionMs: positionMs,
           );
+          break;
+        case 'volume':
+          final volume =
+              (command['volume'] as num?)?.toDouble().clamp(0.0, 1.0) ?? 1.0;
+          final muted = command['muted'] == true;
+          await player.setVolume(muted ? 0.0 : volume);
           break;
       }
     } catch (error) {
@@ -1362,6 +1425,36 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _playTrack(int trackId) async {
+    final queueItems = (_playbackQueue?['items'] as List?) ?? const [];
+    final queued = queueItems.any((item) {
+      final queueItem = (item as Map).cast<String, dynamic>();
+      final track = (queueItem['track'] as Map?)?.cast<String, dynamic>();
+      return _intValue(track?['id']) == trackId;
+    });
+    if (!queued) {
+      final trackIds = _tracks
+          .map((track) => _intValue((track as Map)['id']))
+          .whereType<int>()
+          .toList(growable: false);
+      final startIndex = trackIds.indexOf(trackId);
+      if (startIndex >= 0) {
+        final queue = await _run<Map<String, dynamic>>(
+          () async => _asMap(
+            await _api.postJson(
+              '/zones/${Uri.encodeComponent(_selectedZoneId)}/queue',
+              <String, dynamic>{
+                'track_ids': trackIds,
+                'start_index': startIndex,
+                'mode': _playbackMode.nameForApi,
+              },
+            ),
+          ),
+        );
+        if (queue != null) {
+          _applyPlaybackQueue(queue);
+        }
+      }
+    }
     final playback = await _playTrackOnZone(trackId, _selectedZoneId);
     if (mounted && playback != null) {
       setState(() {
@@ -1382,98 +1475,106 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _playPreviousTrack() async {
-    final trackId = _nextTrackId(previous: true);
-    if (trackId == null) {
-      return;
-    }
-    final playback = await _playTrackOnZone(trackId, _activeZoneId());
+    final playback = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/previous',
+          const <String, dynamic>{},
+        ),
+      ),
+    );
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
     }
   }
 
   Future<void> _playNextTrack() async {
-    final trackId = _nextTrackId();
-    if (trackId == null) {
-      return;
-    }
-    final playback = await _playTrackOnZone(trackId, _activeZoneId());
+    final playback = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/next',
+          const <String, dynamic>{},
+        ),
+      ),
+    );
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
     }
   }
 
-  int? _nextTrackId({bool previous = false, bool autoAdvance = false}) {
-    final currentId = _intValue(_playback?['track_id']);
-    final trackIds = _tracks
-        .map((track) => _intValue((track as Map)['id']))
-        .whereType<int>()
-        .toList(growable: false);
-    if (trackIds.isEmpty) {
-      return currentId;
-    }
-    if (_playbackMode == _PlaybackMode.repeatOne) {
-      return currentId ?? trackIds.first;
-    }
-    if (autoAdvance && _playbackMode == _PlaybackMode.single) {
-      return null;
-    }
-    if (_playbackMode == _PlaybackMode.shuffle) {
-      final choices = currentId == null
-          ? trackIds
-          : trackIds.where((id) => id != currentId).toList(growable: false);
-      if (choices.isEmpty) {
-        return currentId;
+  Future<void> _refreshPlaybackQueue({String? zoneId}) async {
+    final targetZoneId = zoneId ?? _activeZoneId();
+    try {
+      final queue = _asMap(
+        await _api.getJson('/zones/${Uri.encodeComponent(targetZoneId)}/queue'),
+      );
+      if (!mounted || targetZoneId != _activeZoneId()) {
+        return;
       }
-      return choices[Random().nextInt(choices.length)];
+      setState(() => _applyPlaybackQueue(queue));
+    } catch (_) {
+      // Zone refresh and the event stream will retry the queue snapshot.
     }
-    final index = currentId == null ? -1 : trackIds.indexOf(currentId);
-    if (index < 0) {
-      return trackIds.first;
-    }
-    final nextIndex = previous ? index - 1 : index + 1;
-    if (nextIndex < 0 || nextIndex >= trackIds.length) {
-      return autoAdvance ? null : trackIds[nextIndex % trackIds.length];
-    }
-    return trackIds[nextIndex];
   }
 
-  List<Map<String, dynamic>> _queuePreviewTracks() {
-    final currentId = _intValue(_playback?['track_id']);
-    final maps = _tracks
-        .map((track) => (track as Map).cast<String, dynamic>())
-        .toList(growable: false);
-    if (maps.isEmpty) {
-      return const [];
-    }
-    if (_playbackMode == _PlaybackMode.repeatOne && currentId != null) {
-      return maps
-          .where((track) => _intValue(track['id']) == currentId)
-          .take(1)
+  void _applyPlaybackQueue(Map<String, dynamic> queue) {
+    _playbackQueue = queue;
+    _playbackMode = _PlaybackMode.fromApi(queue['mode']?.toString());
+  }
+
+  List<Map<String, dynamic>> _queueItems() =>
+      ((_playbackQueue?['items'] as List?) ?? const [])
+          .map((item) => (item as Map).cast<String, dynamic>())
           .toList(growable: false);
+
+  Future<Map<String, dynamic>?> _moveQueueItem(int from, int to) async {
+    final queue = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue/move',
+          <String, dynamic>{'from': from, 'to': to},
+        ),
+      ),
+    );
+    if (mounted && queue != null) {
+      setState(() => _applyPlaybackQueue(queue));
     }
-    if (_playbackMode == _PlaybackMode.shuffle) {
-      final shuffled = [...maps]..shuffle(Random());
-      return shuffled
-          .where((track) => _intValue(track['id']) != currentId)
-          .take(25)
-          .toList(growable: false);
+    return queue;
+  }
+
+  Future<Map<String, dynamic>?> _removeQueueItem(int itemId) async {
+    final queue = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.deleteJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue/items/$itemId',
+        ),
+      ),
+    );
+    if (mounted && queue != null) {
+      setState(() => _applyPlaybackQueue(queue));
     }
-    final index = currentId == null
-        ? -1
-        : maps.indexWhere((track) => _intValue(track['id']) == currentId);
-    return maps.skip(index + 1).take(25).toList(growable: false);
+    return queue;
   }
 
   void _cyclePlaybackMode() {
     final nextIndex =
         (_PlaybackMode.values.indexOf(_playbackMode) + 1) %
         _PlaybackMode.values.length;
-    setState(() => _playbackMode = _PlaybackMode.values[nextIndex]);
+    unawaited(_setPlaybackMode(_PlaybackMode.values[nextIndex]));
   }
 
-  void _setPlaybackMode(_PlaybackMode mode) {
-    setState(() => _playbackMode = mode);
+  Future<void> _setPlaybackMode(_PlaybackMode mode) async {
+    final queue = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue/mode',
+          <String, dynamic>{'mode': mode.nameForApi},
+        ),
+      ),
+    );
+    if (mounted && queue != null) {
+      setState(() => _applyPlaybackQueue(queue));
+    }
   }
 
   void _showPlaybackModeMenu(BuildContext anchorContext) {
@@ -1487,7 +1588,7 @@ class _CoreDashboardState extends State<CoreDashboard>
           playbackMode: _playbackMode,
           onSelected: (mode) {
             Navigator.of(anchorContext).pop();
-            _setPlaybackMode(mode);
+            unawaited(_setPlaybackMode(mode));
           },
         ),
       ),
@@ -1521,14 +1622,16 @@ class _CoreDashboardState extends State<CoreDashboard>
         maxHeight: 560,
         child: _QueueSheet(
           coreBaseUrl: _coreUrlController.text,
-          tracks: _queuePreviewTracks(),
+          items: _queueItems(),
+          currentIndex: _intValue(_playbackQueue?['current_index']),
           onPlayTrack: (trackId) async {
-            Navigator.of(anchorContext).pop();
             final playback = await _playTrackOnZone(trackId, _activeZoneId());
             if (mounted && playback != null) {
               setState(() => _applyPlayback(playback));
             }
           },
+          onMove: _moveQueueItem,
+          onRemove: _removeQueueItem,
         ),
       ),
     );
@@ -1701,6 +1804,51 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  double _activeZoneVolume() {
+    final zone = _zoneById(_activeZoneId());
+    return ((zone?['volume'] as num?)?.toDouble() ?? 1.0).clamp(0.0, 1.0);
+  }
+
+  bool _activeZoneMuted() => _zoneById(_activeZoneId())?['muted'] == true;
+
+  Future<void> _setActiveZoneVolume(double volume, {bool? muted}) async {
+    final zoneId = _activeZoneId();
+    final normalized = volume.clamp(0.0, 1.0);
+    final effectiveMuted = muted ?? (normalized <= 0.001);
+    final result = await _run<Map<String, dynamic>>(
+      () async => _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(zoneId)}/volume',
+          <String, dynamic>{'volume': normalized, 'muted': effectiveMuted},
+        ),
+      ),
+    );
+    if (!mounted || result == null) {
+      return;
+    }
+    setState(() {
+      _zones = _zones
+          .map((item) {
+            final zone = (item as Map).cast<String, dynamic>();
+            if (zone['id']?.toString() != zoneId) {
+              return zone;
+            }
+            return <String, dynamic>{
+              ...zone,
+              'volume': result['volume'],
+              'muted': result['muted'],
+            };
+          })
+          .toList(growable: false);
+    });
+    unawaited(
+      _IntMusicPlatform.instance.updateVolume(
+        normalized,
+        muted: effectiveMuted,
+      ),
+    );
+  }
+
   String _activeZoneId() =>
       _playback?['zone_id']?.toString() ?? _selectedZoneId;
 
@@ -1711,6 +1859,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       _selectedZoneLabel = _zoneDisplayName(zone);
       _syncPlaybackFromZone(zone);
     });
+    await _refreshPlaybackQueue(zoneId: zoneId);
   }
 
   Future<void> _renameZone(String zoneId, String? alias) async {
@@ -1937,6 +2086,18 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
     _playback = _withPlaybackTimestamp(playback);
     _scheduleActiveTrackDetailLoad(playback);
+    _syncSystemPlayback();
+  }
+
+  void _syncSystemPlayback() {
+    _IntMusicPlatform.instance._activeCoreBaseUrlForPlatform =
+        _coreUrlController.text;
+    unawaited(
+      _IntMusicPlatform.instance.updatePlayback(
+        playback: _playback,
+        detail: _activeTrackDetail,
+      ),
+    );
   }
 
   void _scheduleActiveTrackDetailLoad(Map<String, dynamic>? playback) {
@@ -1963,6 +2124,7 @@ class _CoreDashboardState extends State<CoreDashboard>
         return;
       }
       setState(() => _activeTrackDetail = detail);
+      _syncSystemPlayback();
     } catch (_) {
       // Track detail loading is secondary to playback control.
     }
@@ -1996,11 +2158,13 @@ class _CoreDashboardState extends State<CoreDashboard>
             unawaited(_handleBackNavigation());
           }
         },
-        child: Scaffold(
-          body: _WindowsA11yQuiet(
-            child: SafeArea(
-              child: LayoutBuilder(
-                builder: (context, constraints) => _buildShell(constraints),
+        child: IntMusicBackdrop(
+          child: Scaffold(
+            body: _WindowsA11yQuiet(
+              child: SafeArea(
+                child: LayoutBuilder(
+                  builder: (context, constraints) => _buildShell(constraints),
+                ),
               ),
             ),
           ),
@@ -2037,11 +2201,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (!Platform.isAndroid) {
       return;
     }
-    try {
-      await _systemChannel.invokeMethod<void>('moveToBackground');
-    } catch (_) {
-      await SystemNavigator.pop();
-    }
+    await _IntMusicPlatform.instance.moveToBackground();
   }
 
   void _startPlaybackReveal() {
@@ -2108,11 +2268,17 @@ class _CoreDashboardState extends State<CoreDashboard>
       trackDetail: _activeTrackDetail,
       targetLabel: _selectedZoneLabel,
       playbackMode: _playbackMode,
+      volume: _activeZoneVolume(),
+      muted: _activeZoneMuted(),
       onResume: _resumePlayback,
       onPause: _pausePlayback,
       onPrevious: _playPreviousTrack,
       onNext: _playNextTrack,
       onSeek: _seekPlayback,
+      onVolumeChanged: (value) => unawaited(_setActiveZoneVolume(value)),
+      onToggleMute: () => unawaited(
+        _setActiveZoneVolume(_activeZoneVolume(), muted: !_activeZoneMuted()),
+      ),
       onCycleMode: _cyclePlaybackMode,
       onShowModeMenu: _showPlaybackModeMenu,
       onShowQueue: _showQueueSheet,

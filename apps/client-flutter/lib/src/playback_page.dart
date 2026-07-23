@@ -1837,16 +1837,72 @@ class _ModeSheet extends StatelessWidget {
   }
 }
 
-class _QueueSheet extends StatelessWidget {
+class _QueueSheet extends StatefulWidget {
   const _QueueSheet({
     required this.coreBaseUrl,
-    required this.tracks,
+    required this.items,
+    required this.currentIndex,
     required this.onPlayTrack,
+    required this.onMove,
+    required this.onRemove,
   });
 
   final String coreBaseUrl;
-  final List<Map<String, dynamic>> tracks;
+  final List<Map<String, dynamic>> items;
+  final int? currentIndex;
   final Future<void> Function(int) onPlayTrack;
+  final Future<Map<String, dynamic>?> Function(int, int) onMove;
+  final Future<Map<String, dynamic>?> Function(int) onRemove;
+
+  @override
+  State<_QueueSheet> createState() => _QueueSheetState();
+}
+
+class _QueueSheetState extends State<_QueueSheet> {
+  late List<Map<String, dynamic>> _items = widget.items;
+  late int? _currentIndex = widget.currentIndex;
+  bool _mutating = false;
+
+  void _applyQueue(Map<String, dynamic> queue) {
+    _items = ((queue['items'] as List?) ?? const [])
+        .map((item) => (item as Map).cast<String, dynamic>())
+        .toList(growable: false);
+    _currentIndex = _intValue(queue['current_index']);
+  }
+
+  Future<void> _move(int oldIndex, int newIndex) async {
+    if (_mutating || oldIndex == newIndex) {
+      return;
+    }
+    setState(() => _mutating = true);
+    final queue = await widget.onMove(oldIndex, newIndex);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      if (queue != null) {
+        _applyQueue(queue);
+      }
+      _mutating = false;
+    });
+  }
+
+  Future<void> _remove(int itemId) async {
+    if (_mutating) {
+      return;
+    }
+    setState(() => _mutating = true);
+    final queue = await widget.onRemove(itemId);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      if (queue != null) {
+        _applyQueue(queue);
+      }
+      _mutating = false;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1861,38 +1917,86 @@ class _QueueSheet extends StatelessWidget {
               _tr(context, 'Queue'),
               style: Theme.of(context).textTheme.titleLarge,
             ),
+            const SizedBox(height: 4),
+            Text(
+              _tr(context, 'Drag to reorder. Queue is synced across devices.'),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
             const SizedBox(height: 12),
             Expanded(
-              child: tracks.isEmpty
+              child: _items.isEmpty
                   ? Center(child: Text(_tr(context, 'No upcoming tracks')))
-                  : ListView.separated(
-                      itemCount: tracks.length,
-                      separatorBuilder: (context, index) =>
-                          const Divider(height: 1),
+                  : ReorderableListView.builder(
+                      buildDefaultDragHandles: false,
+                      onReorderItem: (oldIndex, newIndex) =>
+                          unawaited(_move(oldIndex, newIndex)),
+                      itemCount: _items.length,
                       itemBuilder: (context, index) {
-                        final track = tracks[index];
+                        final item = _items[index];
+                        final itemId = _intValue(item['id']);
+                        final track = (item['track'] as Map)
+                            .cast<String, dynamic>();
                         final id = _intValue(track['id']);
                         final title = track['title']?.toString() ?? 'Untitled';
                         final artist =
                             track['artist_display']?.toString() ?? '';
-                        return _SimpleListRow(
-                          leading: _ArtworkTile(
-                            title: title,
-                            subtitle: artist,
-                            size: 42,
-                            icon: Icons.music_note_outlined,
-                            imageUrl: _trackArtworkUrl(coreBaseUrl, id),
+                        final isCurrent = _currentIndex == index;
+                        return Container(
+                          key: ValueKey(itemId ?? 'queue-$index-$id'),
+                          decoration: BoxDecoration(
+                            color: isCurrent
+                                ? appPrimary.withValues(alpha: 0.1)
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
                           ),
-                          title: title,
-                          subtitle: _joinParts([
-                            artist,
-                            track['album_title'],
-                            _formatDuration(track['duration_ms']),
-                          ]),
-                          trailing: const Icon(Icons.play_arrow),
-                          onTap: id == null
-                              ? null
-                              : () => unawaited(onPlayTrack(id)),
+                          child: _SimpleListRow(
+                            leading: isCurrent
+                                ? const Icon(
+                                    Icons.graphic_eq_rounded,
+                                    color: appPlaying,
+                                  )
+                                : _ArtworkTile(
+                                    title: title,
+                                    subtitle: artist,
+                                    size: 42,
+                                    icon: Icons.music_note_outlined,
+                                    imageUrl: _trackArtworkUrl(
+                                      widget.coreBaseUrl,
+                                      id,
+                                    ),
+                                  ),
+                            title: title,
+                            subtitle: _joinParts([
+                              isCurrent ? _tr(context, 'Now playing') : artist,
+                              track['album_title'],
+                              _formatDuration(track['duration_ms']),
+                            ]),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  onPressed: itemId == null || _mutating
+                                      ? null
+                                      : () => unawaited(_remove(itemId)),
+                                  icon: const Icon(
+                                    Icons.close_rounded,
+                                    size: 18,
+                                  ),
+                                  tooltip: _tr(context, 'Remove from queue'),
+                                ),
+                                ReorderableDragStartListener(
+                                  index: index,
+                                  child: const Padding(
+                                    padding: EdgeInsets.all(10),
+                                    child: Icon(Icons.drag_handle_rounded),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            onTap: id == null
+                                ? null
+                                : () => unawaited(widget.onPlayTrack(id)),
+                          ),
                         );
                       },
                     ),

@@ -7,11 +7,15 @@ class _PlaybackBar extends StatelessWidget {
     required this.trackDetail,
     required this.targetLabel,
     required this.playbackMode,
+    required this.volume,
+    required this.muted,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
     required this.onNext,
     required this.onSeek,
+    required this.onVolumeChanged,
+    required this.onToggleMute,
     required this.onCycleMode,
     required this.onShowModeMenu,
     required this.onShowQueue,
@@ -28,11 +32,15 @@ class _PlaybackBar extends StatelessWidget {
   final Map<String, dynamic>? trackDetail;
   final String targetLabel;
   final _PlaybackMode playbackMode;
+  final double volume;
+  final bool muted;
   final VoidCallback onResume;
   final VoidCallback onPause;
   final VoidCallback onPrevious;
   final VoidCallback onNext;
   final Future<void> Function(int) onSeek;
+  final ValueChanged<double> onVolumeChanged;
+  final VoidCallback onToggleMute;
   final VoidCallback onCycleMode;
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
@@ -57,217 +65,233 @@ class _PlaybackBar extends StatelessWidget {
     final durationMs = _intValue(track?['duration_ms']) ?? 0;
     final canNavigate = hasTrack && trackDetail != null;
 
-    final bar = AnimatedSize(
-      duration: const Duration(milliseconds: 180),
-      curve: Curves.easeOutCubic,
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-        decoration: const BoxDecoration(
-          color: appSurface,
-          border: Border(top: BorderSide(color: appBorder)),
-        ),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth;
-            final compact = width < 760;
-            final tight = width < 520;
-            final showCover = width >= 430;
-            final showPrevious = width >= 470;
-            final showDeviceInline = width >= 620;
-            final showModeInline = width >= 560;
-            Widget cover(double size) {
-              final artwork = _ArtworkTile(
-                title: title,
-                subtitle: artist,
-                size: size,
-                icon: hasTrack
-                    ? Icons.album_outlined
-                    : Icons.music_note_outlined,
-                imageUrl: _trackArtworkUrl(coreBaseUrl, state?['track_id']),
-              );
-              if (!hasTrack) {
-                return artwork;
-              }
-              return MouseRegion(
-                cursor: SystemMouseCursors.click,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: onOpenPlayback,
-                  child: artwork,
-                ),
-              );
-            }
-
-            final info = Expanded(
-              flex: compact ? 1 : 0,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: tight ? 112 : 160,
-                  maxWidth: compact ? double.infinity : 280,
-                ),
-                child: InkWell(
-                  onTap: hasTrack ? onOpenPlayback : null,
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 4,
+    final bar = Padding(
+      padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+      child: IntMusicGlass(
+        blur: 26,
+        borderRadius: BorderRadius.circular(18),
+        child: AnimatedSize(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final width = constraints.maxWidth;
+                final compact = width < 760;
+                final tight = width < 520;
+                final showCover = width >= 430;
+                final showPrevious = width >= 470;
+                final showDeviceInline = width >= 620;
+                final showModeInline = width >= 560;
+                final showVolumeInline = width >= 980;
+                Widget cover(double size) {
+                  final artwork = _ArtworkTile(
+                    title: title,
+                    subtitle: artist,
+                    size: size,
+                    icon: hasTrack
+                        ? Icons.album_outlined
+                        : Icons.music_note_outlined,
+                    imageUrl: _trackArtworkUrl(coreBaseUrl, state?['track_id']),
+                  );
+                  if (!hasTrack) {
+                    return artwork;
+                  }
+                  return MouseRegion(
+                    cursor: SystemMouseCursors.click,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: onOpenPlayback,
+                      child: artwork,
                     ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.titleMedium,
+                  );
+                }
+
+                final info = Expanded(
+                  flex: compact ? 1 : 0,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minWidth: tight ? 112 : 160,
+                      maxWidth: compact ? double.infinity : 280,
+                    ),
+                    child: InkWell(
+                      onTap: hasTrack ? onOpenPlayback : null,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 4,
                         ),
-                        const SizedBox(height: 2),
-                        Text(
-                          artist,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.bodySmall
-                              ?.copyWith(color: const Color(0xffa9b0ba)),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            );
-
-            final controls = Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (showPrevious)
-                  _AppTooltip(
-                    message: _tr(context, 'Previous'),
-                    child: IconButton(
-                      onPressed: canNavigate ? onPrevious : null,
-                      icon: const Icon(Icons.skip_previous),
-                    ),
-                  ),
-                _AppTooltip(
-                  message: isPaused
-                      ? _tr(context, 'Resume')
-                      : _tr(context, 'Pause'),
-                  child: IconButton.filled(
-                    onPressed: hasTrack
-                        ? (isPaused ? onResume : onPause)
-                        : null,
-                    icon: Icon(isPaused ? Icons.play_arrow : Icons.pause),
-                  ),
-                ),
-                _AppTooltip(
-                  message: _tr(context, 'Next'),
-                  child: IconButton(
-                    onPressed: canNavigate ? onNext : null,
-                    icon: const Icon(Icons.skip_next),
-                  ),
-                ),
-              ],
-            );
-
-            final actions = Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (showModeInline)
-                  Builder(
-                    builder: (buttonContext) => GestureDetector(
-                      onLongPress: () => onShowModeMenu(buttonContext),
-                      child: _AppTooltip(
-                        message: _playbackModeLabel(context, playbackMode),
-                        child: IconButton(
-                          onPressed: onCycleMode,
-                          icon: Icon(_playbackModeIcon(playbackMode)),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              artist,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: const Color(0xffa9b0ba)),
+                            ),
+                          ],
                         ),
                       ),
                     ),
                   ),
-                Builder(
-                  builder: (buttonContext) => _AppTooltip(
-                    message: _tr(context, 'Queue'),
-                    child: IconButton(
-                      onPressed: () => onShowQueue(buttonContext),
-                      icon: const Icon(Icons.queue_music_outlined),
-                    ),
-                  ),
-                ),
-                if (showDeviceInline)
-                  Builder(
-                    builder: (buttonContext) => _AppTooltip(
-                      message: targetLabel,
-                      child: IconButton(
-                        onPressed: () => onShowDevices(buttonContext),
-                        icon: const Icon(Icons.speaker_group_outlined),
-                      ),
-                    ),
-                  ),
-                if (!showModeInline || !showDeviceInline)
-                  Builder(
-                    builder: (buttonContext) => _AppTooltip(
-                      message: _tr(context, 'Devices'),
-                      child: IconButton(
-                        onPressed: () => onShowDevices(buttonContext),
-                        icon: const Icon(Icons.more_horiz),
-                      ),
-                    ),
-                  ),
-              ],
-            );
+                );
 
-            final topRow = Row(
-              children: [
-                if (showCover) ...[
-                  cover(compact ? 46 : 56),
-                  const SizedBox(width: 10),
-                ],
-                info,
-                const SizedBox(width: 8),
-                controls,
-                const SizedBox(width: 6),
-                actions,
-              ],
-            );
-
-            final progress = _PlaybackProgressControl(
-              playback: state,
-              durationMs: durationMs,
-              onSeek: onSeek,
-              dense: true,
-            );
-
-            if (!compact) {
-              return SizedBox(
-                height: 74,
-                child: Row(
+                final controls = Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (showCover) ...[cover(56), const SizedBox(width: 10)],
+                    if (showPrevious)
+                      _AppTooltip(
+                        message: _tr(context, 'Previous'),
+                        child: IconButton(
+                          onPressed: canNavigate ? onPrevious : null,
+                          icon: const Icon(Icons.skip_previous),
+                        ),
+                      ),
+                    _AppTooltip(
+                      message: isPaused
+                          ? _tr(context, 'Resume')
+                          : _tr(context, 'Pause'),
+                      child: IconButton.filled(
+                        onPressed: hasTrack
+                            ? (isPaused ? onResume : onPause)
+                            : null,
+                        icon: Icon(isPaused ? Icons.play_arrow : Icons.pause),
+                      ),
+                    ),
+                    _AppTooltip(
+                      message: _tr(context, 'Next'),
+                      child: IconButton(
+                        onPressed: canNavigate ? onNext : null,
+                        icon: const Icon(Icons.skip_next),
+                      ),
+                    ),
+                  ],
+                );
+
+                final actions = Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (showModeInline)
+                      Builder(
+                        builder: (buttonContext) => GestureDetector(
+                          onLongPress: () => onShowModeMenu(buttonContext),
+                          child: _AppTooltip(
+                            message: _playbackModeLabel(context, playbackMode),
+                            child: IconButton(
+                              onPressed: onCycleMode,
+                              icon: Icon(_playbackModeIcon(playbackMode)),
+                            ),
+                          ),
+                        ),
+                      ),
+                    Builder(
+                      builder: (buttonContext) => _AppTooltip(
+                        message: _tr(context, 'Queue'),
+                        child: IconButton(
+                          onPressed: () => onShowQueue(buttonContext),
+                          icon: const Icon(Icons.queue_music_outlined),
+                        ),
+                      ),
+                    ),
+                    if (showDeviceInline)
+                      Builder(
+                        builder: (buttonContext) => _AppTooltip(
+                          message: targetLabel,
+                          child: IconButton(
+                            onPressed: () => onShowDevices(buttonContext),
+                            icon: const Icon(Icons.speaker_group_outlined),
+                          ),
+                        ),
+                      ),
+                    if (showVolumeInline) ...[
+                      const SizedBox(width: 4),
+                      _VolumeControl(
+                        volume: volume,
+                        muted: muted,
+                        onChanged: onVolumeChanged,
+                        onToggleMute: onToggleMute,
+                      ),
+                    ],
+                    if (!showModeInline || !showDeviceInline)
+                      Builder(
+                        builder: (buttonContext) => _AppTooltip(
+                          message: _tr(context, 'Devices'),
+                          child: IconButton(
+                            onPressed: () => onShowDevices(buttonContext),
+                            icon: const Icon(Icons.more_horiz),
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+
+                final topRow = Row(
+                  children: [
+                    if (showCover) ...[
+                      cover(compact ? 46 : 56),
+                      const SizedBox(width: 10),
+                    ],
                     info,
-                    const SizedBox(width: 14),
+                    const SizedBox(width: 8),
                     controls,
-                    const SizedBox(width: 18),
-                    Expanded(child: progress),
-                    const SizedBox(width: 10),
+                    const SizedBox(width: 6),
                     actions,
                   ],
-                ),
-              );
-            }
+                );
 
-            return SizedBox(
-              height: 112,
-              child: Column(
-                children: [
-                  topRow,
-                  const SizedBox(height: 4),
-                  Expanded(child: progress),
-                ],
-              ),
-            );
-          },
+                final progress = _PlaybackProgressControl(
+                  playback: state,
+                  durationMs: durationMs,
+                  onSeek: onSeek,
+                  dense: true,
+                );
+
+                if (!compact) {
+                  return SizedBox(
+                    height: 74,
+                    child: Row(
+                      children: [
+                        if (showCover) ...[
+                          cover(56),
+                          const SizedBox(width: 10),
+                        ],
+                        info,
+                        const SizedBox(width: 14),
+                        controls,
+                        const SizedBox(width: 18),
+                        Expanded(child: progress),
+                        const SizedBox(width: 10),
+                        actions,
+                      ],
+                    ),
+                  );
+                }
+
+                return SizedBox(
+                  height: 112,
+                  child: Column(
+                    children: [
+                      topRow,
+                      const SizedBox(height: 4),
+                      Expanded(child: progress),
+                    ],
+                  ),
+                );
+              },
+            ),
+          ),
         ),
       ),
     );
@@ -286,6 +310,68 @@ class _PlaybackBar extends StatelessWidget {
       },
       onVerticalDragCancel: () => onRevealEnd?.call(0),
       child: bar,
+    );
+  }
+}
+
+class _VolumeControl extends StatefulWidget {
+  const _VolumeControl({
+    required this.volume,
+    required this.muted,
+    required this.onChanged,
+    required this.onToggleMute,
+  });
+
+  final double volume;
+  final bool muted;
+  final ValueChanged<double> onChanged;
+  final VoidCallback onToggleMute;
+
+  @override
+  State<_VolumeControl> createState() => _VolumeControlState();
+}
+
+class _VolumeControlState extends State<_VolumeControl> {
+  double? _dragValue;
+
+  @override
+  void didUpdateWidget(covariant _VolumeControl oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_dragValue == null && oldWidget.volume != widget.volume) {
+      _dragValue = null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = (_dragValue ?? widget.volume).clamp(0.0, 1.0);
+    final icon = widget.muted || value <= 0.001
+        ? Icons.volume_off_rounded
+        : value < 0.5
+        ? Icons.volume_down_rounded
+        : Icons.volume_up_rounded;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _AppTooltip(
+          message: _tr(context, widget.muted ? 'Unmute' : 'Mute'),
+          child: IconButton(
+            onPressed: widget.onToggleMute,
+            icon: Icon(icon, size: 20),
+          ),
+        ),
+        SizedBox(
+          width: 92,
+          child: Slider(
+            value: value,
+            onChanged: (next) => setState(() => _dragValue = next),
+            onChangeEnd: (next) {
+              setState(() => _dragValue = null);
+              widget.onChanged(next);
+            },
+          ),
+        ),
+      ],
     );
   }
 }
@@ -318,9 +404,11 @@ class _AppTopBar extends StatelessWidget {
     return Container(
       height: 66,
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-      decoration: const BoxDecoration(
-        color: appBg,
-        border: Border(bottom: BorderSide(color: appBorder)),
+      decoration: BoxDecoration(
+        color: IntMusicTheme.of(context).canvas.withValues(alpha: 0.42),
+        border: Border(
+          bottom: BorderSide(color: IntMusicTheme.of(context).stroke),
+        ),
       ),
       child: Row(
         children: [
@@ -651,128 +739,133 @@ class _AppSidebar extends StatelessWidget {
       playback: playback,
     );
 
-    return Container(
-      width: _sidebarWidth,
-      color: appSurface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
-            child: Row(
-              children: [
-                Container(
-                  width: 38,
-                  height: 38,
-                  decoration: BoxDecoration(
-                    color: appPrimary.withValues(alpha: 0.16),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: appPrimary.withValues(alpha: 0.3),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(10, 10, 4, 10),
+      child: IntMusicGlass(
+        blur: 32,
+        borderRadius: BorderRadius.circular(22),
+        child: SizedBox(
+          width: _sidebarWidth - 14,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: appPrimary.withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: appPrimary.withValues(alpha: 0.3),
+                        ),
+                      ),
+                      child: const Icon(Icons.graphic_eq, color: appPrimary),
                     ),
-                  ),
-                  child: const Icon(Icons.graphic_eq, color: appPrimary),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Expanded(
-                            child: Text(
-                              'IntMusic',
-                              style: Theme.of(context).textTheme.titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.w700),
-                            ),
-                          ),
-                          Container(
-                            width: 9,
-                            height: 9,
-                            decoration: BoxDecoration(
-                              color: dotColor,
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: dotColor.withValues(alpha: 0.35),
-                                  blurRadius: 8,
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  'IntMusic',
+                                  style: Theme.of(context).textTheme.titleMedium
+                                      ?.copyWith(fontWeight: FontWeight.w700),
                                 ),
-                              ],
-                            ),
+                              ),
+                              Container(
+                                width: 9,
+                                height: 9,
+                                decoration: BoxDecoration(
+                                  color: dotColor,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: dotColor.withValues(alpha: 0.35),
+                                      blurRadius: 8,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          Text(
+                            '${counts['tracks'] ?? 0} ${_tr(context, 'Tracks').toLowerCase()}',
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: const Color(0xff9aa1ab)),
                           ),
                         ],
                       ),
-                      Text(
-                        '${counts['tracks'] ?? 0} ${_tr(context, 'Tracks').toLowerCase()}',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: const Color(0xff9aa1ab),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
-              itemCount: _destinations.length,
-              itemBuilder: (context, index) {
-                final destination = _destinations[index];
-                final selected = selectedIndex == index;
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: _SidebarItem(
-                    label: _tr(context, destination.label),
-                    icon: selected
-                        ? destination.selectedIcon
-                        : destination.icon,
-                    selected: selected,
-                    onTap: () => onSelected(index),
-                  ),
-                );
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: appSurfaceHigh,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: appBorder),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      _tr(context, 'Library'),
-                      style: Theme.of(context).textTheme.labelLarge,
-                    ),
-                    const SizedBox(height: 10),
-                    _MiniStat(
-                      label: _tr(context, 'Albums'),
-                      value: '${counts['albums'] ?? 0}',
-                    ),
-                    _MiniStat(
-                      label: _tr(context, 'Artists'),
-                      value: '${counts['artists'] ?? 0}',
-                    ),
-                    _MiniStat(
-                      label: _tr(context, 'Online'),
-                      value: '$onlineZones outputs',
                     ),
                   ],
                 ),
               ),
-            ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView.builder(
+                  padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+                  itemCount: _destinations.length,
+                  itemBuilder: (context, index) {
+                    final destination = _destinations[index];
+                    final selected = selectedIndex == index;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: _SidebarItem(
+                        label: _tr(context, destination.label),
+                        icon: selected
+                            ? destination.selectedIcon
+                            : destination.icon,
+                        selected: selected,
+                        onTap: () => onSelected(index),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 16),
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: appSurfaceHigh,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: appBorder),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _tr(context, 'Library'),
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                        const SizedBox(height: 10),
+                        _MiniStat(
+                          label: _tr(context, 'Albums'),
+                          value: '${counts['albums'] ?? 0}',
+                        ),
+                        _MiniStat(
+                          label: _tr(context, 'Artists'),
+                          value: '${counts['artists'] ?? 0}',
+                        ),
+                        _MiniStat(
+                          label: _tr(context, 'Online'),
+                          value: '$onlineZones outputs',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -795,10 +888,10 @@ class _SidebarItem extends StatelessWidget {
   Widget build(BuildContext context) {
     return Material(
       color: selected ? appPrimary.withValues(alpha: 0.14) : Colors.transparent,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(12),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(12),
         child: SizedBox(
           height: 42,
           child: Padding(

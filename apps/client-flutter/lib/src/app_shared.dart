@@ -23,6 +23,7 @@ class _ArtworkTile extends StatelessWidget {
     final base = _seededColor('$title$subtitle', 0);
     final accent = _seededColor('$subtitle$title', 1);
     final showLetter = size >= 80;
+    final radius = size >= 100 ? 16.0 : 11.0;
     final imageCacheExtent =
         ((size * MediaQuery.devicePixelRatioOf(context)) / 64).ceil() * 64;
     final fallback = Stack(
@@ -59,7 +60,7 @@ class _ArtworkTile extends StatelessWidget {
       dimension: size,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(radius),
           border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
           gradient: LinearGradient(
             begin: Alignment.topLeft,
@@ -75,7 +76,7 @@ class _ArtworkTile extends StatelessWidget {
           ],
         ),
         child: ClipRRect(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(radius),
           child: imageUrl == null || deferImage
               ? fallback
               : CachedNetworkImage(
@@ -110,14 +111,15 @@ class _MetricTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
     return SizedBox(
       width: 180,
       height: 120,
       child: DecoratedBox(
         decoration: BoxDecoration(
-          color: appSurface,
-          border: Border.all(color: appBorder),
-          borderRadius: BorderRadius.circular(8),
+          color: tokens.surfaceRaised.withValues(alpha: 0.72),
+          border: Border.all(color: tokens.stroke),
+          borderRadius: BorderRadius.circular(tokens.radiusMedium),
         ),
         child: Padding(
           padding: const EdgeInsets.all(14),
@@ -393,7 +395,29 @@ class _Destination {
   final IconData selectedIcon;
 }
 
-enum _PlaybackMode { single, repeatOne, shuffle, sequential }
+enum _PlaybackMode {
+  single,
+  repeatOne,
+  shuffle,
+  repeatAll,
+  sequential;
+
+  String get nameForApi => switch (this) {
+    _PlaybackMode.single => 'single',
+    _PlaybackMode.repeatOne => 'repeat_one',
+    _PlaybackMode.shuffle => 'shuffle',
+    _PlaybackMode.repeatAll => 'repeat_all',
+    _PlaybackMode.sequential => 'sequential',
+  };
+
+  static _PlaybackMode fromApi(String? value) => switch (value) {
+    'single' => _PlaybackMode.single,
+    'repeat_one' => _PlaybackMode.repeatOne,
+    'shuffle' => _PlaybackMode.shuffle,
+    'repeat_all' => _PlaybackMode.repeatAll,
+    _ => _PlaybackMode.sequential,
+  };
+}
 
 enum _SearchScope { all, tracks, albums, artists }
 
@@ -426,6 +450,7 @@ String _playbackModeLabel(BuildContext context, _PlaybackMode mode) {
     _PlaybackMode.single => _tr(context, 'Single play'),
     _PlaybackMode.repeatOne => _tr(context, 'Repeat one'),
     _PlaybackMode.shuffle => _tr(context, 'Shuffle'),
+    _PlaybackMode.repeatAll => _tr(context, 'Repeat all'),
     _PlaybackMode.sequential => _tr(context, 'Sequential'),
   };
 }
@@ -457,7 +482,8 @@ IconData _playbackModeIcon(_PlaybackMode mode) {
     _PlaybackMode.single => Icons.looks_one_outlined,
     _PlaybackMode.repeatOne => Icons.repeat_one,
     _PlaybackMode.shuffle => Icons.shuffle,
-    _PlaybackMode.sequential => Icons.repeat,
+    _PlaybackMode.repeatAll => Icons.repeat,
+    _PlaybackMode.sequential => Icons.format_list_numbered,
   };
 }
 

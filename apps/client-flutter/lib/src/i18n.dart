@@ -135,6 +135,12 @@ const _zh = <String, String>{
   'Mode': '播放模式',
   'Single play': '单次播放',
   'Repeat one': '单曲循环',
+  'Repeat all': '列表循环',
+  'Mute': '静音',
+  'Unmute': '取消静音',
+  'Now playing': '正在播放',
+  'Remove from queue': '从队列中移除',
+  'Drag to reorder. Queue is synced across devices.': '拖动即可排序，队列会在设备间同步。',
   'Shuffle': '随机播放',
   'Sequential': '顺序播放',
 };

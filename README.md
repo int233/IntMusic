@@ -25,6 +25,9 @@ packaging/
   windows-installer/ Windows 安装器和服务注册脚本
 ```
 
+客户端 v2 的状态归属、跨平台边界、原生能力矩阵和合并门槛见
+[docs/client-v2-architecture.md](docs/client-v2-architecture.md)。
+
 ## 开发环境
 
 打开新的 PowerShell 后先执行：

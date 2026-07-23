@@ -36,13 +36,14 @@ use lofty::{
 };
 use playback::PlaybackController;
 use protocol::{
-    ApiErrorBody, CoreStatus, EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload,
-    MetadataSettingsUpdate, MultiZonePlayRequest, NewLibraryRoot, NewPlaylist, PlayRequest,
-    PlaybackEvent, PlaybackSession, PlaybackState, PlaybackStats, PlaybackTransportState,
-    PlaylistDetail, PlaylistTrackMutation, RendererCommandPayload, RendererRegistration,
-    RendererStateReport, ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate,
-    TrackFavoriteUpdate, UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, API_PREFIX,
-    EVENTS_WS_PATH,
+    AddPlaybackQueueItems, ApiErrorBody, CoreStatus, EventEnvelope, FavoriteSettingsUpdate,
+    LibraryChangedPayload, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
+    NewLibraryRoot, NewPlaylist, PlayRequest, PlaybackEvent, PlaybackModeUpdate, PlaybackQueue,
+    PlaybackSession, PlaybackState, PlaybackStats, PlaybackTransportState, PlaylistDetail,
+    PlaylistTrackMutation, RendererCommandPayload, RendererRegistration, RendererStateReport,
+    ReplacePlaybackQueue, ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate,
+    TrackFavoriteUpdate, UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume,
+    ZoneVolumeUpdate, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -178,6 +179,7 @@ where
     let state = AppState::new(config, paths, pool, server_id, bind_addr, discovery_service);
     state.emit("core.ready", json!({ "api_prefix": API_PREFIX }));
     start_renderer_expiry_monitor(state.clone());
+    start_local_playback_monitor(state.clone());
     let router = build_router(state);
     info!(address = %bind_addr, "local music core listening");
     let _discovery_publisher = discovery_publisher;
@@ -193,6 +195,48 @@ fn start_renderer_expiry_monitor(state: AppState) {
         loop {
             interval.tick().await;
             expire_offline_renderer_playback(&state).await;
+        }
+    });
+}
+
+fn start_local_playback_monitor(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(750));
+        loop {
+            interval.tick().await;
+            for previous in state.inner.playback.cached_states().await {
+                if previous.state != PlaybackTransportState::Playing || previous.track_id.is_none()
+                {
+                    continue;
+                }
+                let current = state.inner.playback.state_for_zone(&previous.zone_id).await;
+                if current.state != PlaybackTransportState::Stopped {
+                    continue;
+                }
+                record_playback_finish(&state, &previous, "completed", "completed", None).await;
+                state.emit("playback.state_changed", &current);
+                match step_playback_queue_and_emit(&state, &previous.zone_id, false, true).await {
+                    Ok(Some(track_id)) => {
+                        if let Err(error) =
+                            play_track_on_zone(&state, &previous.zone_id, track_id, 0).await
+                        {
+                            error!(
+                                zone_id = previous.zone_id,
+                                %error,
+                                "failed to advance the local playback queue"
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        error!(
+                            zone_id = previous.zone_id,
+                            %error,
+                            "failed to resolve the next local queue item"
+                        );
+                    }
+                }
+            }
         }
     });
 }
@@ -284,6 +328,23 @@ pub fn build_router(state: AppState) -> Router {
         .route("/zones/{zone_id}/pause", post(pause_zone))
         .route("/zones/{zone_id}/stop", post(stop_zone))
         .route("/zones/{zone_id}/seek", post(seek_zone))
+        .route(
+            "/zones/{zone_id}/queue",
+            get(get_zone_queue).post(replace_zone_queue),
+        )
+        .route("/zones/{zone_id}/queue/items", post(add_zone_queue_items))
+        .route(
+            "/zones/{zone_id}/queue/items/{item_id}",
+            delete(remove_zone_queue_item),
+        )
+        .route("/zones/{zone_id}/queue/move", post(move_zone_queue_item))
+        .route("/zones/{zone_id}/queue/mode", post(update_zone_queue_mode))
+        .route("/zones/{zone_id}/next", post(next_zone_track))
+        .route("/zones/{zone_id}/previous", post(previous_zone_track))
+        .route(
+            "/zones/{zone_id}/volume",
+            get(get_zone_volume).post(update_zone_volume),
+        )
         .route("/zones/{zone_id}/alias", post(update_zone_alias))
         .route("/zones/{zone_id}/transfer", post(transfer_zone))
         .route("/playback/history", get(playback_history))
@@ -933,6 +994,11 @@ async fn report_renderer_state(
         renderers::remote_output_id(&client_id, &payload.output_id)
     };
     let previous = state.inner.renderers.state_for_output(&output_id).await;
+    let completed = previous.as_ref().is_some_and(|previous| {
+        previous.track_id.is_some()
+            && previous.state == PlaybackTransportState::Playing
+            && payload.state == PlaybackTransportState::Stopped
+    });
     let playback = state
         .inner
         .renderers
@@ -940,6 +1006,15 @@ async fn report_renderer_state(
         .await?;
     record_renderer_state_transition(&state, previous, &playback).await;
     state.emit("playback.state_changed", &playback);
+    if completed {
+        if let Some(track_id) =
+            step_playback_queue_and_emit(&state, &output_id, false, true).await?
+        {
+            return Ok(Json(
+                play_track_on_zone(&state, &output_id, track_id, 0).await?,
+            ));
+        }
+    }
     Ok(Json(playback))
 }
 
@@ -976,6 +1051,7 @@ async fn list_zones(State(state): State<AppState>) -> ApiResult<Vec<protocol::Zo
             output_id: Some(zone_id),
             state: playback.state,
             volume: 1.0,
+            muted: false,
             track_id: None,
             track_title: None,
             position_ms: 0,
@@ -989,6 +1065,7 @@ async fn list_zones(State(state): State<AppState>) -> ApiResult<Vec<protocol::Zo
     }
     zones.extend(state.inner.renderers.list_zones().await);
     apply_zone_aliases(&state, &mut zones).await?;
+    apply_zone_preferences(&state, &mut zones).await?;
     Ok(Json(zones))
 }
 
@@ -1015,6 +1092,18 @@ async fn apply_zone_aliases(state: &AppState, zones: &mut [protocol::ZoneSummary
             zone.alias = Some(alias.clone());
             zone.name = alias.clone();
         }
+    }
+    Ok(())
+}
+
+async fn apply_zone_preferences(
+    state: &AppState,
+    zones: &mut [protocol::ZoneSummary],
+) -> Result<()> {
+    for zone in zones {
+        let preference = core_db::zone_volume(state.pool(), &zone.id).await?;
+        zone.volume = preference.volume;
+        zone.muted = preference.muted;
     }
     Ok(())
 }
@@ -1122,6 +1211,102 @@ async fn seek_zone(
 ) -> ApiResult<PlaybackState> {
     let playback = seek_zone_internal(&state, &zone_id, payload.position_ms).await?;
     Ok(Json(playback))
+}
+
+async fn get_zone_queue(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+) -> ApiResult<PlaybackQueue> {
+    Ok(Json(core_db::playback_queue(state.pool(), &zone_id).await?))
+}
+
+async fn replace_zone_queue(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    Json(payload): Json<ReplacePlaybackQueue>,
+) -> ApiResult<PlaybackQueue> {
+    let queue = core_db::replace_playback_queue(state.pool(), &zone_id, payload).await?;
+    state.emit("playback.queue_changed", &queue);
+    Ok(Json(queue))
+}
+
+async fn add_zone_queue_items(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    Json(payload): Json<AddPlaybackQueueItems>,
+) -> ApiResult<PlaybackQueue> {
+    let queue = core_db::add_playback_queue_items(
+        state.pool(),
+        &zone_id,
+        payload.track_ids,
+        payload.position,
+    )
+    .await?;
+    state.emit("playback.queue_changed", &queue);
+    Ok(Json(queue))
+}
+
+async fn remove_zone_queue_item(
+    State(state): State<AppState>,
+    Path((zone_id, item_id)): Path<(String, i64)>,
+) -> ApiResult<PlaybackQueue> {
+    let queue = core_db::remove_playback_queue_item(state.pool(), &zone_id, item_id).await?;
+    state.emit("playback.queue_changed", &queue);
+    Ok(Json(queue))
+}
+
+async fn move_zone_queue_item(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    Json(payload): Json<MovePlaybackQueueItem>,
+) -> ApiResult<PlaybackQueue> {
+    let queue =
+        core_db::move_playback_queue_item(state.pool(), &zone_id, payload.from, payload.to).await?;
+    state.emit("playback.queue_changed", &queue);
+    Ok(Json(queue))
+}
+
+async fn update_zone_queue_mode(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    Json(payload): Json<PlaybackModeUpdate>,
+) -> ApiResult<PlaybackQueue> {
+    let queue = core_db::set_playback_mode(state.pool(), &zone_id, payload.mode).await?;
+    state.emit("playback.queue_changed", &queue);
+    Ok(Json(queue))
+}
+
+async fn next_zone_track(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+) -> ApiResult<PlaybackState> {
+    Ok(Json(play_queue_step(&state, &zone_id, false, false).await?))
+}
+
+async fn previous_zone_track(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+) -> ApiResult<PlaybackState> {
+    Ok(Json(play_queue_step(&state, &zone_id, true, false).await?))
+}
+
+async fn get_zone_volume(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+) -> ApiResult<ZoneVolume> {
+    Ok(Json(core_db::zone_volume(state.pool(), &zone_id).await?))
+}
+
+async fn update_zone_volume(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    Json(payload): Json<ZoneVolumeUpdate>,
+) -> ApiResult<ZoneVolume> {
+    let volume =
+        core_db::set_zone_volume(state.pool(), &zone_id, payload.volume, payload.muted).await?;
+    apply_zone_volume(&state, &volume).await?;
+    state.emit("zone.volume_changed", &volume);
+    Ok(Json(volume))
 }
 
 async fn settings(State(state): State<AppState>) -> ApiResult<CoreConfig> {
@@ -1388,16 +1573,85 @@ async fn remote_state_from_current(
 }
 
 async fn playback_state_for_zone(state: &AppState, zone_id: &str) -> Result<PlaybackState> {
-    if is_core_zone(zone_id) {
-        return Ok(state.inner.playback.state_for_zone(zone_id).await);
-    }
+    let mut playback = if is_core_zone(zone_id) {
+        state.inner.playback.state_for_zone(zone_id).await
+    } else {
+        state
+            .inner
+            .renderers
+            .state_for_output(zone_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?
+    };
+    playback.queue_revision = core_db::playback_queue(state.pool(), zone_id)
+        .await?
+        .revision;
+    Ok(playback)
+}
 
-    state
+async fn play_queue_step(
+    state: &AppState,
+    zone_id: &str,
+    previous: bool,
+    automatic: bool,
+) -> Result<PlaybackState> {
+    match step_playback_queue_and_emit(state, zone_id, previous, automatic).await? {
+        Some(track_id) => play_track_on_zone(state, zone_id, track_id, 0).await,
+        None => stop_zone_internal_with_reason(state, zone_id, "queue_completed", None).await,
+    }
+}
+
+async fn step_playback_queue_and_emit(
+    state: &AppState,
+    zone_id: &str,
+    previous: bool,
+    automatic: bool,
+) -> Result<Option<i64>> {
+    let track_id = core_db::step_playback_queue(state.pool(), zone_id, previous, automatic).await?;
+    let queue = core_db::playback_queue(state.pool(), zone_id).await?;
+    state.emit("playback.queue_changed", &queue);
+    Ok(track_id)
+}
+
+async fn apply_zone_volume(state: &AppState, volume: &ZoneVolume) -> Result<()> {
+    let effective_volume = if volume.muted { 0.0 } else { volume.volume };
+    if is_core_zone(&volume.zone_id) {
+        state
+            .inner
+            .playback
+            .set_volume_zone(&volume.zone_id, effective_volume)
+            .await;
+        return Ok(());
+    }
+    let renderer_id = state
         .inner
         .renderers
-        .state_for_output(zone_id)
+        .renderer_id_for_output(&volume.zone_id)
         .await
-        .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))
+        .ok_or_else(|| anyhow::anyhow!("playback zone {} is not registered", volume.zone_id))?;
+    let playback = state
+        .inner
+        .renderers
+        .state_for_output(&volume.zone_id)
+        .await;
+    state.emit(
+        "renderer.command",
+        json!({
+            "renderer_id": renderer_id,
+            "command": RendererCommandPayload {
+                command_id: Uuid::now_v7(),
+                target_output_id: volume.zone_id.clone(),
+                action: "volume".to_string(),
+                track_id: playback.as_ref().and_then(|state| state.track_id),
+                track_title: playback.and_then(|state| state.track_title),
+                stream_path: None,
+                position_ms: None,
+                volume: Some(volume.volume),
+                muted: Some(volume.muted),
+            }
+        }),
+    );
+    Ok(())
 }
 
 async fn expire_offline_renderer_playback(state: &AppState) {
@@ -1421,10 +1675,12 @@ async fn play_track_on_zone(
     position_ms: u64,
 ) -> Result<PlaybackState> {
     let previous = playback_state_for_zone(state, zone_id).await.ok();
+    let queue = core_db::set_playback_queue_current_track(state.pool(), zone_id, track_id).await?;
+    state.emit("playback.queue_changed", &queue);
     let detail = core_db::track_detail(state.pool(), track_id).await?;
     let track_title = detail.track.title.clone();
 
-    let playback = if is_core_zone(zone_id) {
+    let mut playback = if is_core_zone(zone_id) {
         let output_id = zone_id.starts_with("cpal:").then_some(zone_id);
         let playback = state
             .inner
@@ -1457,6 +1713,8 @@ async fn play_track_on_zone(
             track_title: Some(track_title.clone()),
             stream_path: Some(format!("/tracks/{track_id}/stream")),
             position_ms: Some(position_ms),
+            volume: None,
+            muted: None,
         };
         let playback = state
             .inner
@@ -1467,7 +1725,7 @@ async fn play_track_on_zone(
                 track_id: Some(detail.track.id),
                 track_title: Some(track_title),
                 position_ms,
-                queue_revision: 0,
+                queue_revision: queue.revision,
             })
             .await?;
         state.emit(
@@ -1476,6 +1734,9 @@ async fn play_track_on_zone(
         );
         playback
     };
+    playback.queue_revision = queue.revision;
+    let volume = core_db::zone_volume(state.pool(), zone_id).await?;
+    apply_zone_volume(state, &volume).await?;
 
     if let Some(previous) = previous.as_ref() {
         if previous.track_id.is_some() {
@@ -1516,6 +1777,8 @@ async fn resume_zone_internal(state: &AppState, zone_id: &str) -> Result<Playbac
                 .track_id
                 .map(|track_id| format!("/tracks/{track_id}/stream")),
             position_ms: Some(playback.position_ms),
+            volume: None,
+            muted: None,
         };
         state.emit(
             "renderer.command",
@@ -1555,6 +1818,8 @@ async fn pause_zone_internal(state: &AppState, zone_id: &str) -> Result<Playback
             track_title: playback.track_title.clone(),
             stream_path: None,
             position_ms: None,
+            volume: None,
+            muted: None,
         };
         state.emit(
             "renderer.command",
@@ -1610,6 +1875,8 @@ async fn stop_zone_internal_with_reason(
             track_title: None,
             stream_path: None,
             position_ms: None,
+            volume: None,
+            muted: None,
         };
         state.emit(
             "renderer.command",
@@ -1662,6 +1929,8 @@ async fn seek_zone_internal(
                 .track_id
                 .map(|track_id| format!("/tracks/{track_id}/stream")),
             position_ms: Some(position_ms),
+            volume: None,
+            muted: None,
         };
         state.emit(
             "renderer.command",

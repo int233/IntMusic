@@ -57,6 +57,11 @@ enum PlaybackCommand {
         position_ms: u64,
         response: oneshot::Sender<Result<Option<OutputSnapshot>>>,
     },
+    Volume {
+        zone_id: String,
+        volume: f32,
+        response: oneshot::Sender<bool>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +83,10 @@ impl PlaybackController {
 
     pub async fn state(&self) -> PlaybackState {
         self.state_for_zone("local").await
+    }
+
+    pub async fn cached_states(&self) -> Vec<PlaybackState> {
+        self.states.read().await.values().cloned().collect()
     }
 
     pub async fn state_for_zone(&self, zone_id: &str) -> PlaybackState {
@@ -212,6 +221,12 @@ impl PlaybackController {
         state.position_ms = snapshot.map_or(position_ms, |snapshot| snapshot.position_ms);
         Ok(state.clone())
     }
+
+    pub async fn set_volume_zone(&self, zone_id: &str, volume: f32) -> bool {
+        self.worker
+            .set_volume(zone_id, volume.clamp(0.0, 1.0))
+            .await
+    }
 }
 
 impl PlaybackWorker {
@@ -311,6 +326,21 @@ impl PlaybackWorker {
             .map_err(|_| anyhow::anyhow!("playback worker stopped before seek completed"))?
     }
 
+    async fn set_volume(&self, zone_id: &str, volume: f32) -> bool {
+        let (response, rx) = oneshot::channel();
+        if self
+            .send(PlaybackCommand::Volume {
+                zone_id: zone_id.to_string(),
+                volume,
+                response,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
     fn send(&self, command: PlaybackCommand) -> Result<()> {
         let tx = self
             .tx
@@ -365,6 +395,17 @@ fn playback_worker_loop(rx: mpsc::Receiver<PlaybackCommand>) {
             } => {
                 let result = seek_output(&mut outputs, &zone_id, position_ms);
                 let _ = response.send(result);
+            }
+            PlaybackCommand::Volume {
+                zone_id,
+                volume,
+                response,
+            } => {
+                let changed = outputs.get(&zone_id).is_some_and(|output| {
+                    output.sink.set_volume(volume);
+                    true
+                });
+                let _ = response.send(changed);
             }
         }
     }
