@@ -416,6 +416,7 @@ name = "core-api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio-engine",
  "axum",
  "chrono",
  "core-config",

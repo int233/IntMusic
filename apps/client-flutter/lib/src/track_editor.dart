@@ -26,6 +26,7 @@ class _TrackEditorDialogState extends State<_TrackEditorDialog> {
   late final String _initialLyricsSignature;
 
   int _section = 0;
+  int _lyricsEditorMode = 0;
   bool _saving = false;
   bool _restoreFileLyrics = false;
   String? _error;
@@ -656,122 +657,170 @@ class _TrackEditorDialogState extends State<_TrackEditorDialog> {
                     ),
                   ),
                   const SizedBox(height: 14),
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final controls = [
-                        SizedBox(
-                          width: 170,
-                          child: DropdownButtonFormField<String>(
-                            initialValue: _lyricsKind,
-                            decoration: InputDecoration(
-                              labelText: _tr(context, 'Format'),
-                            ),
-                            items: const [
-                              DropdownMenuItem(
-                                value: 'lrc',
-                                child: Text('LRC'),
-                              ),
-                              DropdownMenuItem(
-                                value: 'text',
-                                child: Text('Plain text'),
-                              ),
-                            ],
-                            onChanged: (value) => setState(() {
-                              _lyricsKind = value ?? 'text';
-                              _restoreFileLyrics = false;
-                            }),
-                          ),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SegmentedButton<int>(
+                      showSelectedIcon: false,
+                      segments: [
+                        ButtonSegment(
+                          value: 0,
+                          icon: const Icon(Icons.code_rounded),
+                          label: Text(_tr(context, 'Source text')),
                         ),
-                        SizedBox(
-                          width: 170,
-                          child: TextField(
-                            controller: _languageController,
-                            onChanged: (_) => _markLyricsEdited(),
-                            decoration: InputDecoration(
-                              labelText: _tr(context, 'Language'),
-                              hintText: 'zh-Hans / en / ja',
-                            ),
-                          ),
+                        ButtonSegment(
+                          value: 1,
+                          icon: const Icon(Icons.multiline_chart_rounded),
+                          label: Text(_tr(context, 'Line timeline')),
                         ),
-                        SizedBox(
-                          width: 170,
-                          child: TextField(
-                            controller: _offsetController,
-                            onChanged: (_) => _markLyricsEdited(),
-                            keyboardType: TextInputType.number,
-                            decoration: InputDecoration(
-                              labelText: _tr(context, 'Offset (ms)'),
-                            ),
-                          ),
+                        ButtonSegment(
+                          value: 2,
+                          icon: const Icon(Icons.text_fields_rounded),
+                          label: Text(_tr(context, 'Word timing')),
                         ),
-                      ];
-                      return Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: controls,
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 14),
-                  TextField(
-                    controller: _lyricsController,
-                    minLines: 12,
-                    maxLines: 24,
-                    onChanged: (_) => _markLyricsEdited(),
-                    style: const TextStyle(
-                      fontFamily: 'monospace',
-                      height: 1.45,
-                    ),
-                    decoration: InputDecoration(
-                      alignLabelWithHint: true,
-                      labelText: _tr(context, 'Original lyrics'),
-                      hintText: '[00:12.40]<v Singer>First line',
+                      ],
+                      selected: {_lyricsEditorMode},
+                      onSelectionChanged: (value) => setState(() {
+                        _lyricsEditorMode = value.first;
+                        if (_lyricsEditorMode > 0) {
+                          _lyricsKind = 'lrc';
+                          _restoreFileLyrics = false;
+                        }
+                      }),
                     ),
                   ),
                   const SizedBox(height: 14),
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final width = constraints.maxWidth < 700
-                          ? constraints.maxWidth
-                          : (constraints.maxWidth - 12) / 2;
-                      return Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: [
+                  if (_lyricsEditorMode == 0) ...[
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final controls = [
                           SizedBox(
-                            width: width,
-                            child: TextField(
-                              controller: _translationController,
-                              onChanged: (_) => _markLyricsEdited(),
-                              minLines: 6,
-                              maxLines: 14,
-                              style: const TextStyle(fontFamily: 'monospace'),
+                            width: 170,
+                            child: DropdownButtonFormField<String>(
+                              initialValue: _lyricsKind,
                               decoration: InputDecoration(
-                                alignLabelWithHint: true,
-                                labelText: _tr(context, 'Translation'),
-                                hintText: '[00:12.40]翻译',
+                                labelText: _tr(context, 'Format'),
+                              ),
+                              items: const [
+                                DropdownMenuItem(
+                                  value: 'lrc',
+                                  child: Text('LRC'),
+                                ),
+                                DropdownMenuItem(
+                                  value: 'text',
+                                  child: Text('Plain text'),
+                                ),
+                              ],
+                              onChanged: (value) => setState(() {
+                                _lyricsKind = value ?? 'text';
+                                _restoreFileLyrics = false;
+                              }),
+                            ),
+                          ),
+                          SizedBox(
+                            width: 170,
+                            child: TextField(
+                              controller: _languageController,
+                              onChanged: (_) => _markLyricsEdited(),
+                              decoration: InputDecoration(
+                                labelText: _tr(context, 'Language'),
+                                hintText: 'zh-Hans / en / ja',
                               ),
                             ),
                           ),
                           SizedBox(
-                            width: width,
+                            width: 170,
                             child: TextField(
-                              controller: _pronunciationController,
+                              controller: _offsetController,
                               onChanged: (_) => _markLyricsEdited(),
-                              minLines: 6,
-                              maxLines: 14,
-                              style: const TextStyle(fontFamily: 'monospace'),
+                              keyboardType: TextInputType.number,
                               decoration: InputDecoration(
-                                alignLabelWithHint: true,
-                                labelText: _tr(context, 'Pronunciation'),
-                                hintText: '[00:12.40]pin yin / romaji',
+                                labelText: _tr(context, 'Offset (ms)'),
                               ),
                             ),
                           ),
-                        ],
-                      );
-                    },
-                  ),
+                        ];
+                        return Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: controls,
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: _lyricsController,
+                      minLines: 12,
+                      maxLines: 24,
+                      onChanged: (_) => _markLyricsEdited(),
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        height: 1.45,
+                      ),
+                      decoration: InputDecoration(
+                        alignLabelWithHint: true,
+                        labelText: _tr(context, 'Original lyrics'),
+                        hintText: '[00:12.40]<v Singer>First line',
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final width = constraints.maxWidth < 700
+                            ? constraints.maxWidth
+                            : (constraints.maxWidth - 12) / 2;
+                        return Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: [
+                            SizedBox(
+                              width: width,
+                              child: TextField(
+                                controller: _translationController,
+                                onChanged: (_) => _markLyricsEdited(),
+                                minLines: 6,
+                                maxLines: 14,
+                                style: const TextStyle(fontFamily: 'monospace'),
+                                decoration: InputDecoration(
+                                  alignLabelWithHint: true,
+                                  labelText: _tr(context, 'Translation'),
+                                  hintText: '[00:12.40]翻译',
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: TextField(
+                                controller: _pronunciationController,
+                                onChanged: (_) => _markLyricsEdited(),
+                                minLines: 6,
+                                maxLines: 14,
+                                style: const TextStyle(fontFamily: 'monospace'),
+                                decoration: InputDecoration(
+                                  alignLabelWithHint: true,
+                                  labelText: _tr(context, 'Pronunciation'),
+                                  hintText: '[00:12.40]pin yin / romaji',
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ] else ...[
+                    SizedBox(
+                      height: 610,
+                      child: _LyricTimelineEditor(
+                        api: widget.api,
+                        trackId: widget.trackId,
+                        controller: _lyricsController,
+                        durationMs: _intValue(_track['duration_ms']) ?? 0,
+                        offsetMs:
+                            int.tryParse(_offsetController.text.trim()) ?? 0,
+                        wordMode: _lyricsEditorMode == 2,
+                        onChanged: _markLyricsEdited,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

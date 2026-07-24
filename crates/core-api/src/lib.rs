@@ -1,6 +1,7 @@
 mod renderers;
 
 use std::{
+    collections::HashMap,
     future::Future,
     io::{Cursor, SeekFrom},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -84,6 +85,7 @@ struct AppStateInner {
     bind_address: SocketAddr,
     discovery_service: Option<String>,
     musicbrainz_gate: tokio::sync::Mutex<tokio::time::Instant>,
+    waveform_cache: tokio::sync::RwLock<HashMap<String, Vec<f32>>>,
 }
 
 impl AppState {
@@ -112,6 +114,7 @@ impl AppState {
                 musicbrainz_gate: tokio::sync::Mutex::new(
                     tokio::time::Instant::now() - Duration::from_secs(1),
                 ),
+                waveform_cache: tokio::sync::RwLock::new(HashMap::new()),
             }),
         }
     }
@@ -367,6 +370,7 @@ pub fn build_router(state: AppState) -> Router {
             "/tracks/{track_id}/edit",
             get(track_edit_snapshot).post(update_track_metadata),
         )
+        .route("/tracks/{track_id}/waveform", get(track_waveform))
         .route("/tracks/{track_id}/favorite", post(update_track_favorite))
         .route("/tracks/{track_id}/lyrics", get(track_lyrics))
         .route("/tracks/{track_id}/stream", get(track_stream))
@@ -970,6 +974,48 @@ async fn update_track_metadata(
         }),
     );
     Ok(Json(snapshot))
+}
+
+#[derive(Debug, Deserialize)]
+struct WaveformQuery {
+    bins: Option<usize>,
+}
+
+async fn track_waveform(
+    State(state): State<AppState>,
+    Path(track_id): Path<i64>,
+    Query(query): Query<WaveformQuery>,
+) -> ApiResult<protocol::TrackWaveform> {
+    let detail = core_db::track_detail(state.pool(), track_id).await?;
+    let path = PathBuf::from(&detail.file_path);
+    let bins = query.bins.unwrap_or(768).clamp(64, 4096);
+    let cache_key = format!("{}\0{}\0{bins}", detail.file_path, detail.modified_at);
+    let cached = state
+        .inner
+        .waveform_cache
+        .read()
+        .await
+        .get(&cache_key)
+        .cloned();
+    let peaks = if let Some(peaks) = cached {
+        peaks
+    } else {
+        let peaks =
+            tokio::task::spawn_blocking(move || audio_engine::extract_waveform(&path, bins))
+                .await
+                .map_err(anyhow::Error::from)??;
+        let mut cache = state.inner.waveform_cache.write().await;
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(cache_key, peaks.clone());
+        peaks
+    };
+    Ok(Json(protocol::TrackWaveform {
+        track_id,
+        duration_ms: detail.track.duration_ms,
+        peaks,
+    }))
 }
 
 async fn track_lyrics(

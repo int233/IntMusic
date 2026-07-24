@@ -69,6 +69,12 @@ paths:
       responses:
         "200":
           description: Structured lyric payload.
+  /tracks/{track_id}/waveform:
+    get:
+      summary: Decode a track into normalized waveform peak bins for editing.
+      responses:
+        "200":
+          description: Waveform peaks and track duration.
   /search:
     get:
       summary: Search tracks, albums, and artists.

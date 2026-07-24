@@ -107,10 +107,7 @@ fn text_at(cues: &[LyricCue], start_ms: i64) -> Option<String> {
 
 fn timestamps_at_start(mut line: &str) -> Option<(Vec<i64>, &str)> {
     let mut values = Vec::new();
-    loop {
-        let Some(rest) = line.strip_prefix('[') else {
-            break;
-        };
+    while let Some(rest) = line.strip_prefix('[') {
         let Some(end) = rest.find(']') else {
             break;
         };

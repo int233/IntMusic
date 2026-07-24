@@ -1421,85 +1421,96 @@ class _LyricsViewState extends State<_LyricsView> {
     }
 
     final currentIndex = _currentLyricIndex(lines, widget.positionMs);
-    return ListView.builder(
-      controller: _controller,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      itemCount: lines.length,
-      itemBuilder: (context, index) {
-        final line = lines[index];
-        final isCurrent = index == currentIndex;
-        final distance = currentIndex < 0 ? 4 : (index - currentIndex).abs();
-        final opacity = isCurrent
-            ? 1.0
-            : (1 - distance * 0.11).clamp(0.42, 0.8);
-        return InkWell(
-          key: _lineKeys.putIfAbsent(index, () => GlobalKey()),
-          onTap: line.timeMs == null || widget.onSeek == null
-              ? null
-              : () => unawaited(widget.onSeek!(line.timeMs!)),
-          borderRadius: BorderRadius.circular(10),
-          child: AnimatedOpacity(
-            duration: const Duration(milliseconds: 220),
-            opacity: opacity,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
-              child: AnimatedDefaultTextStyle(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final topSafeSpace = max(84.0, constraints.maxHeight * 0.34);
+        final bottomSafeSpace = max(112.0, constraints.maxHeight * 0.44);
+        return ListView.builder(
+          controller: _controller,
+          padding: EdgeInsets.fromLTRB(16, topSafeSpace, 16, bottomSafeSpace),
+          itemCount: lines.length,
+          itemBuilder: (context, index) {
+            final line = lines[index];
+            final isCurrent = index == currentIndex;
+            final distance = currentIndex < 0
+                ? 4
+                : (index - currentIndex).abs();
+            final opacity = isCurrent
+                ? 1.0
+                : (1 - distance * 0.11).clamp(0.42, 0.8);
+            return InkWell(
+              key: _lineKeys.putIfAbsent(index, () => GlobalKey()),
+              onTap: line.timeMs == null || widget.onSeek == null
+                  ? null
+                  : () => unawaited(widget.onSeek!(line.timeMs!)),
+              borderRadius: BorderRadius.circular(10),
+              child: AnimatedOpacity(
                 duration: const Duration(milliseconds: 220),
-                curve: Curves.easeOutCubic,
-                style: TextStyle(
-                  height: 1.18,
-                  fontSize: isCurrent ? 27 : 21,
-                  color: isCurrent
-                      ? Theme.of(context).colorScheme.secondary
-                      : IntMusicTheme.of(context).textPrimary,
-                  fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w600,
-                  letterSpacing: -0.35,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (line.speaker != null) ...[
-                      Text(
-                        line.speaker!,
-                        style: TextStyle(
-                          color: IntMusicTheme.of(context).accent,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                    ],
-                    _timedLineText(line, isCurrent),
-                    if (line.pronunciation != null) ...[
-                      const SizedBox(height: 5),
-                      Text(
-                        line.pronunciation!,
-                        style: TextStyle(
-                          color: IntMusicTheme.of(context).textSecondary,
-                          fontSize: isCurrent ? 15 : 13,
-                          fontWeight: FontWeight.w500,
-                          letterSpacing: 0,
-                        ),
-                      ),
-                    ],
-                    if (line.translation != null) ...[
-                      const SizedBox(height: 5),
-                      Text(
-                        line.translation!,
-                        style: TextStyle(
-                          color: IntMusicTheme.of(context).textSecondary,
-                          fontSize: isCurrent ? 16 : 14,
-                          fontWeight: FontWeight.w500,
-                          letterSpacing: 0,
-                        ),
-                      ),
-                    ],
-                  ],
+                opacity: opacity,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 10,
+                    horizontal: 6,
+                  ),
+                  child: AnimatedDefaultTextStyle(
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    style: TextStyle(
+                      height: 1.18,
+                      fontSize: isCurrent ? 27 : 21,
+                      color: isCurrent
+                          ? Theme.of(context).colorScheme.secondary
+                          : IntMusicTheme.of(context).textPrimary,
+                      fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w600,
+                      letterSpacing: -0.35,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (line.speaker != null) ...[
+                          Text(
+                            line.speaker!,
+                            style: TextStyle(
+                              color: IntMusicTheme.of(context).accent,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                        ],
+                        _timedLineText(line, isCurrent),
+                        if (line.pronunciation != null) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            line.pronunciation!,
+                            style: TextStyle(
+                              color: IntMusicTheme.of(context).textSecondary,
+                              fontSize: isCurrent ? 15 : 13,
+                              fontWeight: FontWeight.w500,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                        ],
+                        if (line.translation != null) ...[
+                          const SizedBox(height: 5),
+                          Text(
+                            line.translation!,
+                            style: TextStyle(
+                              color: IntMusicTheme.of(context).textSecondary,
+                              fontSize: isCurrent ? 16 : 14,
+                              fontWeight: FontWeight.w500,
+                              letterSpacing: 0,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         );
       },
     );

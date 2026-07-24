@@ -28,6 +28,7 @@ part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
 part 'src/artist_editor.dart';
 part 'src/track_editor.dart';
+part 'src/lyric_timeline_editor.dart';
 part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
 part 'src/i18n.dart';

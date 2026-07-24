@@ -348,6 +348,13 @@ pub struct TrackEditSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackWaveform {
+    pub track_id: i64,
+    pub duration_ms: Option<i64>,
+    pub peaks: Vec<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanProblem {
     pub file_id: i64,
     pub path: String,
