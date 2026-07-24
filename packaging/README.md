@@ -179,6 +179,15 @@ Windows CI 使用 MSYS2 UCRT64 运行同一个脚本，并输出到：
 packaging\ffmpeg\windows-x64
 ```
 
+Windows 产物会静态链接 MinGW 运行时，并在 `DEPENDENCIES.txt` 中记录
+`ffmpeg.exe` 和 `ffprobe.exe` 的 PE 依赖。可以从普通 PowerShell 环境验证
+工具包不依赖 MSYS2：
+
+```powershell
+.\scripts\test-windows-ffmpeg-bundle.ps1 `
+  -Bundle packaging\ffmpeg\windows-x64
+```
+
 也可以通过 `INTMUSIC_FFMPEG_DIR` 指向已经验证的工具包。最终 Core 目录包含：
 
 ```text
@@ -189,6 +198,7 @@ core/
     bin/ffprobe
     LICENSE.LGPLv2.1.txt
     BUILD-CONFIG.txt
+    DEPENDENCIES.txt        # Windows
     NOTICE.txt
     source/ffmpeg-8.1.2.tar.xz
 ```

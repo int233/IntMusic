@@ -120,6 +120,7 @@ jobs:
             diffutils
             make
             mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-binutils
             nasm
             pkgconf
             tar
@@ -132,6 +133,12 @@ jobs:
             ./scripts/build-bundled-ffmpeg.sh \
               --output packaging/ffmpeg/windows-x64
           fi
+
+      - name: Verify bundled FFmpeg outside MSYS2
+        shell: pwsh
+        run: |
+          .\scripts\test-windows-ffmpeg-bundle.ps1 `
+            -Bundle packaging\ffmpeg\windows-x64
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y

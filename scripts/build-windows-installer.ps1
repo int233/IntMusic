@@ -79,14 +79,8 @@ try {
             -Destination $ffmpegDestination `
             -Recurse `
             -Force
-        & $ffmpegExe -hide_banner -version | Select-Object -First 1
-        if ($LASTEXITCODE -ne 0) {
-            throw "The bundled FFmpeg executable failed its version check."
-        }
-        & $ffprobeExe -hide_banner -version | Select-Object -First 1
-        if ($LASTEXITCODE -ne 0) {
-            throw "The bundled ffprobe executable failed its version check."
-        }
+        & (Join-Path $PSScriptRoot "test-windows-ffmpeg-bundle.ps1") `
+            -Bundle $ffmpegDestination
     }
     else {
         throw @"

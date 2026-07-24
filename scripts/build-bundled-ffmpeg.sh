@@ -101,6 +101,22 @@ CONFIGURE_FLAGS=(
   "--enable-protocol=file,pipe"
 )
 
+HOST_SYSTEM="$(uname -s)"
+IS_WINDOWS_BUILD=false
+case "$HOST_SYSTEM" in
+  MINGW*|MSYS*|CYGWIN*)
+    IS_WINDOWS_BUILD=true
+    # --enable-static controls FFmpeg's own libraries, but MinGW can still
+    # dynamically link its GCC and pthread runtimes. The bundle must also run
+    # from a plain PowerShell process where the MSYS2 bin directory is absent.
+    CONFIGURE_FLAGS+=(
+      "--disable-pthreads"
+      "--enable-w32threads"
+      "--extra-ldflags=-static -static-libgcc"
+    )
+    ;;
+esac
+
 pushd "$SOURCE_DIR" >/dev/null
 ./configure "${CONFIGURE_FLAGS[@]}"
 if command -v nproc >/dev/null 2>&1; then
@@ -123,6 +139,41 @@ else
 fi
 cp -f "$SOURCE_DIR/COPYING.LGPLv2.1" "$OUTPUT_DIR/LICENSE.LGPLv2.1.txt"
 cp -f "$SOURCE_ARCHIVE" "$OUTPUT_DIR/source/ffmpeg-${FFMPEG_VERSION}.tar.xz"
+
+if [[ "$IS_WINDOWS_BUILD" == true ]]; then
+  if ! command -v objdump >/dev/null 2>&1; then
+    echo "objdump is required to audit the Windows FFmpeg bundle." >&2
+    exit 1
+  fi
+
+  DEPENDENCY_REPORT="$OUTPUT_DIR/DEPENDENCIES.txt"
+  : > "$DEPENDENCY_REPORT"
+  for tool in ffmpeg.exe ffprobe.exe; do
+    tool_path="$OUTPUT_DIR/bin/$tool"
+    "$tool_path" -hide_banner -version >/dev/null
+
+    {
+      echo "$tool"
+      objdump -p "$tool_path" |
+        awk '$1 == "DLL" && $2 == "Name:" { print "  " $3 }'
+      echo
+    } >> "$DEPENDENCY_REPORT"
+
+    while IFS= read -r dependency; do
+      dependency_lower="$(printf '%s' "$dependency" | tr '[:upper:]' '[:lower:]')"
+      case "$dependency_lower" in
+        cyg*.dll|msys-*.dll|libgcc_s_*.dll|libstdc++-6.dll|libwinpthread-1.dll|libssp-0.dll|libiconv-2.dll|libintl-8.dll)
+          echo "$tool unexpectedly depends on the non-system runtime $dependency." >&2
+          echo "Windows FFmpeg must run without an MSYS2 installation." >&2
+          exit 1
+          ;;
+      esac
+    done < <(
+      objdump -p "$tool_path" |
+        awk '$1 == "DLL" && $2 == "Name:" { print $3 }'
+    )
+  done
+fi
 
 {
   echo "FFmpeg ${FFMPEG_VERSION}"
