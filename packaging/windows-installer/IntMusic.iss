@@ -42,8 +42,7 @@ Name: "addcoretopath"; Description: "Add IntMusic Core to the current user's PAT
 
 [Files]
 Source: "..\dist\windows\client\*"; DestDir: "{app}\client"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: client
-Source: "..\dist\windows\core\local-music-core.exe"; DestDir: "{app}\core"; Flags: ignoreversion; Components: core
-Source: "..\dist\windows\core\local-music-core-daemon.exe"; DestDir: "{app}\core"; Flags: ignoreversion; Components: core
+Source: "..\dist\windows\core\*"; DestDir: "{app}\core"; Flags: ignoreversion recursesubdirs createallsubdirs; Components: core
 Source: "Start-IntMusic.cmd"; DestDir: "{app}"; Flags: ignoreversion; Components: client and core
 Source: "Start-IntMusic.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: client and core
 Source: "Install-IntMusicCoreService.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: core

@@ -22,6 +22,90 @@ paths:
       responses:
         "200":
           description: Added root.
+  /client-library/manifests:
+    get:
+      summary: List device-owned library roots and their latest reconciliation state.
+      responses:
+        "200":
+          description: Client library root statuses.
+    post:
+      summary: Upload one batch of a device-owned folder manifest. A complete batch reconciles files not seen in the current scan as missing.
+      responses:
+        "200":
+          description: Accepted and missing file counts.
+  /client-library/devices/{device_id}/roots/{root_external_id}:
+    delete:
+      summary: Disable a device-owned root and mark all of its media replicas missing.
+      responses:
+        "200":
+          description: Root removed.
+  /client-sync/mutations:
+    post:
+      summary: Idempotently apply favorite changes and playback sessions captured by a Client while Core was unavailable.
+      responses:
+        "200":
+          description: Applied and previously acknowledged mutation IDs.
+  /distributions:
+    get:
+      summary: List durable music distribution jobs and their progress.
+      responses:
+        "200":
+          description: Distribution jobs.
+    post:
+      summary: Create a job that prepares and delivers selected tracks to a Client-owned library folder.
+      responses:
+        "200":
+          description: Created distribution job.
+  /distributions/{job_id}/cancel:
+    post:
+      summary: Cancel pending transcoding and delivery work for a distribution job.
+      responses:
+        "200":
+          description: Cancelled or already-terminal distribution job.
+  /distributions/tasks/next:
+    get:
+      summary: Lease the next prepared delivery task for a Client device.
+      responses:
+        "200":
+          description: A task assignment or null when no work is ready.
+  /distributions/tasks/{task_id}/progress:
+    post:
+      summary: Renew a delivery lease or report completion/failure.
+      responses:
+        "200":
+          description: Updated parent distribution job.
+  /distributions/tasks/{task_id}/content:
+    get:
+      summary: Stream the verified original or transcoded file assigned to a Client.
+      responses:
+        "200":
+          description: Full media content.
+        "206":
+          description: Partial media content for a resumable download.
+  /distributions/source-tasks/next:
+    get:
+      summary: Lease a source-upload task when selected media exists only on a Client.
+      responses:
+        "200":
+          description: A source assignment or null when this Client has nothing to relay.
+  /distributions/source-tasks/{task_id}/content:
+    put:
+      summary: Stream a Client-owned source replica into Core's verified relay cache.
+      responses:
+        "200":
+          description: Source accepted and queued for transcoding or destination delivery.
+  /distributions/source-tasks/{task_id}/progress:
+    post:
+      summary: Report a source-side failure so the upload can retry or terminate immediately.
+      responses:
+        "200":
+          description: Updated parent distribution job.
+  /transcoding/status:
+    get:
+      summary: Return bundled FFmpeg discovery, encoder capabilities, profiles, and cache status.
+      responses:
+        "200":
+          description: Current transcoding capabilities.
   /scan/start:
     post:
       summary: Start a full library scan.
@@ -75,6 +159,30 @@ paths:
       responses:
         "200":
           description: Waveform peaks and track duration.
+  /tracks/{track_id}/media:
+    get:
+      summary: Return the release-track identity, recording relationship, masters, encodings, and device replicas.
+      responses:
+        "200":
+          description: Normalized media profile. Different releases remain independent release tracks.
+  /tracks/{track_id}/recording/candidates:
+    get:
+      summary: Return metadata-based candidates that may use the same recording. This never links automatically.
+      responses:
+        "200":
+          description: Ranked recording-link candidates with confidence reasons.
+  /tracks/{track_id}/recording/link:
+    post:
+      summary: Confirm that this release track uses the same recording as another release track.
+      responses:
+        "200":
+          description: Updated media profile. Both release-track and album entries remain intact.
+  /tracks/{track_id}/recording/detach:
+    post:
+      summary: Give this release track a new independent recording identity.
+      responses:
+        "200":
+          description: Updated independent media profile.
   /search:
     get:
       summary: Search tracks, albums, and artists.

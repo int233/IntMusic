@@ -7,7 +7,7 @@ abstract class _RendererAudioPlayer {
 
   Future<void> stop();
 
-  Future<void> open(String uri);
+  Future<void> open(String uri, {bool localFile = false});
 
   Future<void> play();
 
@@ -18,6 +18,8 @@ abstract class _RendererAudioPlayer {
   Future<void> setVolume(double volume);
 
   Future<int?> currentPositionMs();
+
+  Future<int?> durationMs();
 
   Future<void> dispose();
 }
@@ -34,7 +36,8 @@ class _MediaKitRendererAudioPlayer implements _RendererAudioPlayer {
   Future<void> stop() => player.stop();
 
   @override
-  Future<void> open(String uri) => player.open(Media(uri));
+  Future<void> open(String uri, {bool localFile = false}) =>
+      player.open(Media(localFile ? Uri.file(uri).toString() : uri));
 
   @override
   Future<void> play() => player.play();
@@ -54,6 +57,9 @@ class _MediaKitRendererAudioPlayer implements _RendererAudioPlayer {
       player.state.position.inMilliseconds;
 
   @override
+  Future<int?> durationMs() async => player.state.duration.inMilliseconds;
+
+  @override
   Future<void> dispose() => player.dispose();
 }
 
@@ -69,7 +75,8 @@ class _MobileRendererAudioPlayer implements _RendererAudioPlayer {
   Future<void> stop() => player.stop();
 
   @override
-  Future<void> open(String uri) => player.play(ap.UrlSource(uri));
+  Future<void> open(String uri, {bool localFile = false}) =>
+      player.play(localFile ? ap.DeviceFileSource(uri) : ap.UrlSource(uri));
 
   @override
   Future<void> play() => player.resume();
@@ -87,6 +94,10 @@ class _MobileRendererAudioPlayer implements _RendererAudioPlayer {
   @override
   Future<int?> currentPositionMs() async =>
       (await player.getCurrentPosition())?.inMilliseconds;
+
+  @override
+  Future<int?> durationMs() async =>
+      (await player.getDuration())?.inMilliseconds;
 
   @override
   Future<void> dispose() => player.dispose();

@@ -1,17 +1,25 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     str::FromStr,
+    time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use protocol::{
     AlbumDetail, AlbumSummary, ArtistAsset, ArtistDetail, ArtistProfile, ArtistSummary,
-    ArtistVisual, ArtistVisualRegion, LibraryCounts, LibraryRoot, LyricPayload, NewPlaylist,
+    ArtistVisual, ArtistVisualRegion, AudioMasterSummary, CatalogRecordingSummary,
+    CatalogWorkSummary, ClientLibraryFileBinding, ClientLibraryManifestRequest,
+    ClientLibraryManifestResult, ClientLibraryRootStatus, ClientMutationBatchRequest,
+    ClientMutationBatchResult, ClientTrackManifest, CreateDistributionRequest,
+    DistributionContentSource, DistributionJobSummary, DistributionSourceTaskAssignment,
+    DistributionTaskAssignment, DistributionTaskProgress, DistributionTranscodeTask, LibraryCounts,
+    LibraryRoot, LyricPayload, MediaReplicaSummary, MediaVariantSummary, NewPlaylist,
     PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession, PlaybackStats,
-    PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation, ReplacePlaybackQueue,
-    ScanProblem, TrackDetail, TrackEditSnapshot, TrackFavoriteUpdate, TrackMetadataField,
+    PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation, RecordingLinkCandidate,
+    RelatedReleaseTrackSummary, ReleaseEditionSummary, ReplacePlaybackQueue, ScanProblem,
+    TrackDetail, TrackEditSnapshot, TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField,
     TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateArtistAsset, UpdateArtistProfile,
     UpdateArtistVisual, UpdatePlaylist, ZoneVolume,
 };
@@ -24,6 +32,7 @@ use sqlx::{
     QueryBuilder, Row, Sqlite, SqlitePool,
 };
 use tracing::warn;
+use uuid::Uuid;
 
 pub type DbPool = SqlitePool;
 
@@ -40,7 +49,8 @@ pub async fn connect(database_file: &Path) -> Result<DbPool> {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(30));
 
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -143,9 +153,12 @@ pub async fn add_library_root(pool: &DbPool, path: &Path) -> Result<LibraryRoot>
     let normalized = normalize_path(path);
     sqlx::query(
         r#"
-        INSERT INTO library_roots (path, enabled, created_at, updated_at)
-        VALUES (?1, 1, ?2, ?2)
-        ON CONFLICT(path) DO UPDATE SET enabled = 1, updated_at = excluded.updated_at
+        INSERT INTO library_roots (path, enabled, root_kind, created_at, updated_at)
+        VALUES (?1, 1, 'core', ?2, ?2)
+        ON CONFLICT(path) DO UPDATE SET
+            enabled = 1,
+            root_kind = 'core',
+            updated_at = excluded.updated_at
         "#,
     )
     .bind(&normalized)
@@ -168,7 +181,12 @@ pub async fn remove_library_root(pool: &DbPool, id: i64) -> Result<()> {
 
 pub async fn list_library_roots(pool: &DbPool) -> Result<Vec<LibraryRoot>> {
     let rows = sqlx::query(
-        "SELECT id, path, enabled, created_at, updated_at FROM library_roots ORDER BY path",
+        r#"
+        SELECT id, path, enabled, created_at, updated_at
+        FROM library_roots
+        WHERE root_kind = 'core'
+        ORDER BY path
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -178,7 +196,12 @@ pub async fn list_library_roots(pool: &DbPool) -> Result<Vec<LibraryRoot>> {
 
 pub async fn enabled_library_roots(pool: &DbPool) -> Result<Vec<LibraryRoot>> {
     let rows = sqlx::query(
-        "SELECT id, path, enabled, created_at, updated_at FROM library_roots WHERE enabled = 1 ORDER BY path",
+        r#"
+        SELECT id, path, enabled, created_at, updated_at
+        FROM library_roots
+        WHERE enabled = 1 AND root_kind = 'core'
+        ORDER BY path
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -188,7 +211,11 @@ pub async fn enabled_library_roots(pool: &DbPool) -> Result<Vec<LibraryRoot>> {
 
 async fn get_library_root_by_path(pool: &DbPool, path: &str) -> Result<LibraryRoot> {
     let row = sqlx::query(
-        "SELECT id, path, enabled, created_at, updated_at FROM library_roots WHERE path = ?1",
+        r#"
+        SELECT id, path, enabled, created_at, updated_at
+        FROM library_roots
+        WHERE path = ?1 AND root_kind = 'core'
+        "#,
     )
     .bind(path)
     .fetch_one(pool)
@@ -198,7 +225,7 @@ async fn get_library_root_by_path(pool: &DbPool, path: &str) -> Result<LibraryRo
 
 pub async fn library_counts(pool: &DbPool) -> Result<LibraryCounts> {
     Ok(LibraryCounts {
-        library_roots: count(pool, "library_roots", "enabled = 1").await?,
+        library_roots: count(pool, "library_roots", "enabled = 1 AND root_kind = 'core'").await?,
         files: count(pool, "files", "deleted_at IS NULL").await?,
         tracks: count(pool, "tracks", "1 = 1").await?,
         albums: count(pool, "albums", "1 = 1").await?,
@@ -337,7 +364,8 @@ pub async fn upsert_scanned_file(
                 &load_track_metadata_overrides(pool, track_id).await?,
             )?;
         }
-        upsert_track(pool, file_id, file.library_root_id, &effective).await?;
+        let track_id = upsert_track(pool, file_id, file.library_root_id, &effective).await?;
+        ensure_track_media_graph(pool, track_id, file_id, file, &effective).await?;
     } else {
         sqlx::query("DELETE FROM tracks WHERE file_id = ?1")
             .bind(file_id)
@@ -346,6 +374,2266 @@ pub async fn upsert_scanned_file(
     }
 
     Ok(file_id)
+}
+
+pub async fn upsert_client_library_manifest(
+    pool: &DbPool,
+    manifest: &ClientLibraryManifestRequest,
+) -> Result<ClientLibraryManifestResult> {
+    let device_id = manifest.device_id.trim();
+    let device_name = manifest.device_name.trim();
+    let root_external_id = manifest.root.external_id.trim();
+    let root_display_name = manifest.root.display_name.trim();
+    let scan_id = manifest.scan_id.trim();
+    if device_id.is_empty() || device_id.len() > 200 {
+        bail!("device_id must contain between 1 and 200 characters");
+    }
+    if device_name.is_empty() || device_name.len() > 300 {
+        bail!("device_name must contain between 1 and 300 characters");
+    }
+    if root_external_id.is_empty() || root_external_id.len() > 200 {
+        bail!("root.external_id must contain between 1 and 200 characters");
+    }
+    if root_display_name.is_empty() || root_display_name.len() > 500 {
+        bail!("root.display_name must contain between 1 and 500 characters");
+    }
+    if scan_id.is_empty() || scan_id.len() > 200 {
+        bail!("scan_id must contain between 1 and 200 characters");
+    }
+    if manifest.files.len() > 1_000 {
+        bail!("a client library manifest batch cannot exceed 1000 files");
+    }
+
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO devices (
+            id, name, platform, token_hash, created_at, last_seen_at
+        )
+        VALUES (?1, ?2, ?3, 'client-library-manifest', ?4, ?4)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            platform = COALESCE(excluded.platform, devices.platform),
+            last_seen_at = excluded.last_seen_at
+        "#,
+    )
+    .bind(device_id)
+    .bind(device_name)
+    .bind(&manifest.platform)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    let root_path = format!(
+        "intmusic-client://{}/{}",
+        stable_shadow_segment(device_id),
+        stable_shadow_segment(root_external_id)
+    );
+    sqlx::query(
+        r#"
+        INSERT INTO library_roots (
+            path, enabled, root_kind, owner_device_id, external_id,
+            display_name, path_hint, last_seen_at, created_at, updated_at
+        )
+        VALUES (?1, 1, 'client', ?2, ?3, ?4, ?5, ?6, ?6, ?6)
+        ON CONFLICT(root_kind, owner_device_id, external_id)
+        DO UPDATE SET
+            enabled = 1,
+            display_name = excluded.display_name,
+            path_hint = excluded.path_hint,
+            last_seen_at = excluded.last_seen_at,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&root_path)
+    .bind(device_id)
+    .bind(root_external_id)
+    .bind(root_display_name)
+    .bind(manifest.root.path_hint.as_deref().map(str::trim))
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    let root_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM library_roots
+        WHERE root_kind = 'client' AND owner_device_id = ?1 AND external_id = ?2
+        "#,
+    )
+    .bind(device_id)
+    .bind(root_external_id)
+    .fetch_one(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO client_library_sync_state (
+            device_id, root_external_id, scan_id, started_at,
+            completed_at, accepted_files, missing_files
+        )
+        VALUES (?1, ?2, ?3, ?4, NULL, 0, 0)
+        ON CONFLICT(device_id, root_external_id) DO UPDATE SET
+            scan_id = excluded.scan_id,
+            started_at = CASE
+                WHEN client_library_sync_state.scan_id = excluded.scan_id
+                THEN client_library_sync_state.started_at
+                ELSE excluded.started_at
+            END,
+            completed_at = CASE
+                WHEN client_library_sync_state.scan_id = excluded.scan_id
+                THEN client_library_sync_state.completed_at
+                ELSE NULL
+            END,
+            accepted_files = CASE
+                WHEN client_library_sync_state.scan_id = excluded.scan_id
+                THEN client_library_sync_state.accepted_files
+                ELSE 0
+            END,
+            missing_files = CASE
+                WHEN client_library_sync_state.scan_id = excluded.scan_id
+                THEN client_library_sync_state.missing_files
+                ELSE 0
+            END
+        "#,
+    )
+    .bind(device_id)
+    .bind(root_external_id)
+    .bind(scan_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    let mut accepted_files = 0_i64;
+    let mut bindings = Vec::with_capacity(manifest.files.len());
+    for item in &manifest.files {
+        let client_file_id = item.external_id.trim();
+        let relative_path = item.relative_path.trim().replace('\\', "/");
+        if client_file_id.is_empty() || client_file_id.len() > 1_000 {
+            bail!("file external_id must contain between 1 and 1000 characters");
+        }
+        if relative_path.is_empty() || relative_path.len() > 4_096 {
+            bail!("file relative_path must contain between 1 and 4096 characters");
+        }
+        let extension = item
+            .extension
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        if extension.is_empty() || extension.len() > 32 {
+            bail!("file extension must contain between 1 and 32 characters");
+        }
+        if item.size_bytes < 0 {
+            bail!("file size_bytes cannot be negative");
+        }
+        let shadow_path = format!(
+            "{}/{}",
+            root_path.trim_end_matches('/'),
+            stable_shadow_segment(client_file_id)
+        );
+        let existing_file_id: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM files WHERE path = ?1")
+                .bind(&shadow_path)
+                .fetch_optional(pool)
+                .await?;
+        let existing_track_id: Option<i64> = if let Some(file_id) = existing_file_id {
+            track_id_for_file(pool, file_id).await?
+        } else {
+            None
+        };
+        let matching_variant_id: Option<i64> = if existing_track_id.is_none() {
+            if let Some(content_hash) = item
+                .content_hash
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                sqlx::query_scalar(
+                    r#"
+                    SELECT variant.id
+                    FROM media_variants variant
+                    JOIN media_replicas replica ON replica.media_variant_id = variant.id
+                    JOIN files existing_file ON existing_file.id = replica.file_id
+                    WHERE variant.content_hash = ?1
+                      AND existing_file.size_bytes = ?2
+                      AND existing_file.deleted_at IS NULL
+                    ORDER BY replica.is_primary DESC, variant.id
+                    LIMIT 1
+                    "#,
+                )
+                .bind(content_hash)
+                .bind(item.size_bytes)
+                .fetch_optional(pool)
+                .await?
+            } else if let Some(quick_hash) = item
+                .quick_hash
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                sqlx::query_scalar(
+                    r#"
+                    SELECT variant.id
+                    FROM media_variants variant
+                    JOIN media_replicas replica ON replica.media_variant_id = variant.id
+                    JOIN files existing_file ON existing_file.id = replica.file_id
+                    WHERE variant.quick_hash = ?1
+                      AND existing_file.size_bytes = ?2
+                      AND existing_file.deleted_at IS NULL
+                    ORDER BY replica.is_primary DESC, variant.id
+                    LIMIT 1
+                    "#,
+                )
+                .bind(quick_hash)
+                .bind(item.size_bytes)
+                .fetch_optional(pool)
+                .await?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let metadata = client_track_manifest_to_ingest(&item.metadata, &relative_path);
+        let file = FileIngest {
+            library_root_id: root_id,
+            path: shadow_path,
+            relative_path,
+            extension,
+            size_bytes: item.size_bytes,
+            modified_at: item.modified_at.to_rfc3339(),
+            quick_hash: item.quick_hash.clone(),
+            scan_status: "ok".to_string(),
+            scan_message: None,
+            codec: item.codec.clone(),
+            sample_rate: item.sample_rate,
+            channels: item.channels,
+            duration_ms: item.duration_ms,
+            bitrate: item.bitrate,
+            bit_depth: item.bit_depth,
+        };
+        let creates_catalog_track = existing_track_id.is_some() || matching_variant_id.is_none();
+        let file_id =
+            upsert_scanned_file(pool, &file, creates_catalog_track.then_some(&metadata)).await?;
+        sqlx::query(
+            r#"
+            UPDATE files
+            SET client_file_id = ?1,
+                content_hash = ?2,
+                last_seen_scan_id = ?3,
+                availability_state = 'ready',
+                deleted_at = NULL,
+                updated_at = ?4
+            WHERE id = ?5
+            "#,
+        )
+        .bind(client_file_id)
+        .bind(&item.content_hash)
+        .bind(scan_id)
+        .bind(&now)
+        .bind(file_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE media_variants
+            SET content_hash = ?1, updated_at = ?2
+            WHERE id = (
+                SELECT media_variant_id
+                FROM media_replicas
+                WHERE file_id = ?3
+            )
+            "#,
+        )
+        .bind(&item.content_hash)
+        .bind(&now)
+        .bind(file_id)
+        .execute(pool)
+        .await?;
+        if let Some(media_variant_id) = matching_variant_id {
+            sqlx::query(
+                r#"
+                INSERT INTO media_replicas (
+                    media_variant_id, file_id, device_id, library_root_id,
+                    source_kind, availability_state, is_primary,
+                    last_verified_at, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, 'client', 'ready', 0, ?5, ?5, ?5)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    media_variant_id = excluded.media_variant_id,
+                    device_id = excluded.device_id,
+                    library_root_id = excluded.library_root_id,
+                    source_kind = excluded.source_kind,
+                    availability_state = excluded.availability_state,
+                    last_verified_at = excluded.last_verified_at,
+                    updated_at = excluded.updated_at
+                "#,
+            )
+            .bind(media_variant_id)
+            .bind(file_id)
+            .bind(device_id)
+            .bind(root_id)
+            .bind(&now)
+            .execute(pool)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE media_replicas
+                SET device_id = ?1,
+                    library_root_id = ?2,
+                    source_kind = 'client',
+                    availability_state = 'ready',
+                    last_verified_at = ?3,
+                    updated_at = ?3
+                WHERE file_id = ?4
+                "#,
+            )
+            .bind(device_id)
+            .bind(root_id)
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+        }
+        let binding_row = sqlx::query(
+            r#"
+            SELECT replica.media_variant_id, MIN(links.track_id) AS track_id
+            FROM media_replicas replica
+            JOIN release_track_media_variants relation
+              ON relation.media_variant_id = replica.media_variant_id
+            JOIN legacy_track_catalog_links links
+              ON links.release_track_id = relation.release_track_id
+            WHERE replica.file_id = ?1
+            GROUP BY replica.media_variant_id
+            "#,
+        )
+        .bind(file_id)
+        .fetch_one(pool)
+        .await?;
+        bindings.push(ClientLibraryFileBinding {
+            external_id: client_file_id.to_string(),
+            track_id: binding_row.try_get("track_id")?,
+            media_variant_id: binding_row.try_get("media_variant_id")?,
+        });
+        accepted_files += 1;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE client_library_sync_state
+        SET accepted_files = accepted_files + ?1
+        WHERE device_id = ?2 AND root_external_id = ?3 AND scan_id = ?4
+        "#,
+    )
+    .bind(accepted_files)
+    .bind(device_id)
+    .bind(root_external_id)
+    .bind(scan_id)
+    .execute(pool)
+    .await?;
+
+    let mut missing_files = 0_i64;
+    if manifest.complete {
+        let result = sqlx::query(
+            r#"
+            UPDATE files
+            SET availability_state = 'missing',
+                deleted_at = COALESCE(deleted_at, ?1),
+                updated_at = ?1
+            WHERE library_root_id = ?2
+              AND client_file_id IS NOT NULL
+              AND COALESCE(last_seen_scan_id, '') <> ?3
+              AND deleted_at IS NULL
+            "#,
+        )
+        .bind(&now)
+        .bind(root_id)
+        .bind(scan_id)
+        .execute(pool)
+        .await?;
+        missing_files = i64::try_from(result.rows_affected()).unwrap_or(i64::MAX);
+        sqlx::query(
+            r#"
+            UPDATE media_replicas
+            SET availability_state = 'missing', updated_at = ?1
+            WHERE library_root_id = ?2
+              AND file_id IN (
+                  SELECT id FROM files
+                  WHERE library_root_id = ?2
+                    AND COALESCE(last_seen_scan_id, '') <> ?3
+              )
+            "#,
+        )
+        .bind(&now)
+        .bind(root_id)
+        .bind(scan_id)
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE client_library_sync_state
+            SET completed_at = ?1, missing_files = ?2
+            WHERE device_id = ?3 AND root_external_id = ?4 AND scan_id = ?5
+            "#,
+        )
+        .bind(&now)
+        .bind(missing_files)
+        .bind(device_id)
+        .bind(root_external_id)
+        .bind(scan_id)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(ClientLibraryManifestResult {
+        root_id,
+        accepted_files,
+        missing_files,
+        complete: manifest.complete,
+        bindings,
+    })
+}
+
+pub async fn remove_client_library_root(
+    pool: &DbPool,
+    device_id: &str,
+    root_external_id: &str,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let root_id: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT id
+        FROM library_roots
+        WHERE root_kind = 'client' AND owner_device_id = ?1 AND external_id = ?2
+        "#,
+    )
+    .bind(device_id)
+    .bind(root_external_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(root_id) = root_id else {
+        return Ok(());
+    };
+    sqlx::query("UPDATE library_roots SET enabled = 0, updated_at = ?1 WHERE id = ?2")
+        .bind(&now)
+        .bind(root_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE files
+        SET availability_state = 'missing',
+            deleted_at = COALESCE(deleted_at, ?1),
+            updated_at = ?1
+        WHERE library_root_id = ?2
+        "#,
+    )
+    .bind(&now)
+    .bind(root_id)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE media_replicas
+        SET availability_state = 'missing', updated_at = ?1
+        WHERE library_root_id = ?2
+        "#,
+    )
+    .bind(&now)
+    .bind(root_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_client_library_roots(pool: &DbPool) -> Result<Vec<ClientLibraryRootStatus>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            root.id AS root_id,
+            root.external_id,
+            COALESCE(NULLIF(root.display_name, ''), root.external_id) AS display_name,
+            root.owner_device_id AS device_id,
+            device.name AS device_name,
+            device.platform,
+            root.path_hint,
+            root.enabled,
+            COUNT(file.id) AS file_count,
+            COALESCE(SUM(CASE
+                WHEN file.deleted_at IS NULL
+                 AND file.availability_state = 'ready'
+                THEN 1 ELSE 0 END), 0) AS ready_file_count,
+            sync.scan_id AS last_scan_id,
+            root.last_seen_at,
+            sync.completed_at
+        FROM library_roots root
+        JOIN devices device ON device.id = root.owner_device_id
+        LEFT JOIN files file ON file.library_root_id = root.id
+        LEFT JOIN client_library_sync_state sync
+          ON sync.device_id = root.owner_device_id
+         AND sync.root_external_id = root.external_id
+        WHERE root.root_kind = 'client'
+        GROUP BY root.id
+        ORDER BY device.name COLLATE NOCASE, display_name COLLATE NOCASE
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            let last_seen_at: Option<String> = row.try_get("last_seen_at")?;
+            let completed_at: Option<String> = row.try_get("completed_at")?;
+            Ok(ClientLibraryRootStatus {
+                root_id: row.try_get("root_id")?,
+                external_id: row.try_get("external_id")?,
+                display_name: row.try_get("display_name")?,
+                device_id: row.try_get("device_id")?,
+                device_name: row.try_get("device_name")?,
+                platform: row.try_get("platform")?,
+                path_hint: row.try_get("path_hint")?,
+                enabled: row.try_get::<i64, _>("enabled")? != 0,
+                file_count: row.try_get("file_count")?,
+                ready_file_count: row.try_get("ready_file_count")?,
+                last_scan_id: row.try_get("last_scan_id")?,
+                last_seen_at: last_seen_at.map(parse_datetime).transpose()?,
+                completed_at: completed_at.map(parse_datetime).transpose()?,
+            })
+        })
+        .collect()
+}
+
+pub async fn apply_client_mutations(
+    pool: &DbPool,
+    request: &ClientMutationBatchRequest,
+) -> Result<ClientMutationBatchResult> {
+    let device_id = request.device_id.trim();
+    let device_name = request.device_name.trim();
+    if device_id.is_empty() || device_id.len() > 200 {
+        bail!("device_id must contain between 1 and 200 characters");
+    }
+    if device_name.is_empty() || device_name.len() > 300 {
+        bail!("device_name must contain between 1 and 300 characters");
+    }
+    if request.mutations.len() > 500 {
+        bail!("a client mutation batch cannot exceed 500 operations");
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO devices (
+            id, name, platform, token_hash, created_at, last_seen_at
+        )
+        VALUES (?1, ?2, ?3, 'client-mutation-sync', ?4, ?4)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            platform = COALESCE(excluded.platform, devices.platform),
+            last_seen_at = excluded.last_seen_at
+        "#,
+    )
+    .bind(device_id)
+    .bind(device_name)
+    .bind(&request.platform)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut applied_ids = Vec::new();
+    let mut duplicate_ids = Vec::new();
+    for mutation in &request.mutations {
+        let mutation_id = mutation.id.trim();
+        if mutation_id.is_empty() || mutation_id.len() > 200 {
+            bail!("mutation id must contain between 1 and 200 characters");
+        }
+        let duplicate: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+            FROM client_mutation_receipts
+            WHERE device_id = ?1 AND mutation_id = ?2
+            "#,
+        )
+        .bind(device_id)
+        .bind(mutation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if duplicate.is_some() {
+            duplicate_ids.push(mutation_id.to_string());
+            continue;
+        }
+
+        let track_title: String = sqlx::query_scalar("SELECT title FROM tracks WHERE id = ?1")
+            .bind(mutation.track_id)
+            .fetch_one(&mut *tx)
+            .await
+            .with_context(|| {
+                format!(
+                    "offline mutation {} references unknown track {}",
+                    mutation_id, mutation.track_id
+                )
+            })?;
+        let occurred_at = mutation.occurred_at.to_rfc3339();
+        match mutation.kind.as_str() {
+            "favorite" => {
+                let favorite = mutation
+                    .payload
+                    .get("is_favorite")
+                    .and_then(Value::as_bool)
+                    .context("favorite mutation requires payload.is_favorite")?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO user_track_state (
+                        track_id, is_favorite, favorite_updated_at,
+                        created_at, updated_at
+                    )
+                    VALUES (?1, ?2, ?3, ?3, ?3)
+                    ON CONFLICT(track_id) DO UPDATE SET
+                        is_favorite = excluded.is_favorite,
+                        favorite_updated_at = excluded.favorite_updated_at,
+                        updated_at = excluded.updated_at
+                    WHERE user_track_state.favorite_updated_at IS NULL
+                       OR user_track_state.favorite_updated_at <= excluded.favorite_updated_at
+                    "#,
+                )
+                .bind(mutation.track_id)
+                .bind(if favorite { 1_i64 } else { 0_i64 })
+                .bind(&occurred_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+            "playback" => {
+                let started_at = mutation
+                    .payload
+                    .get("started_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&occurred_at);
+                let ended_at = mutation
+                    .payload
+                    .get("ended_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&occurred_at);
+                DateTime::parse_from_rfc3339(started_at)
+                    .context("playback mutation started_at must be RFC 3339")?;
+                DateTime::parse_from_rfc3339(ended_at)
+                    .context("playback mutation ended_at must be RFC 3339")?;
+                let start_position_ms = mutation
+                    .payload
+                    .get("start_position_ms")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+                    .max(0);
+                let end_position_ms = mutation
+                    .payload
+                    .get("end_position_ms")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(start_position_ms)
+                    .max(0);
+                let reason = mutation
+                    .payload
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("offline");
+                if reason.len() > 100 {
+                    bail!("playback mutation reason cannot exceed 100 characters");
+                }
+                let zone_id = format!("offline:{device_id}");
+                sqlx::query(
+                    r#"
+                    INSERT INTO playback_sessions (
+                        zone_id, track_id, track_title, started_at,
+                        start_position_ms, ended_at, end_position_ms,
+                        end_reason, played_ms, created_at, updated_at
+                    )
+                    VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                        MAX(?7 - ?5, 0), ?4, ?6
+                    )
+                    "#,
+                )
+                .bind(&zone_id)
+                .bind(mutation.track_id)
+                .bind(&track_title)
+                .bind(started_at)
+                .bind(start_position_ms)
+                .bind(ended_at)
+                .bind(end_position_ms)
+                .bind(reason)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO playback_events (
+                        zone_id, event_type, track_id, track_title,
+                        position_ms, reason, created_at
+                    )
+                    VALUES (?1, 'play_start', ?2, ?3, ?4, 'offline', ?5)
+                    "#,
+                )
+                .bind(&zone_id)
+                .bind(mutation.track_id)
+                .bind(&track_title)
+                .bind(start_position_ms)
+                .bind(started_at)
+                .execute(&mut *tx)
+                .await?;
+                sqlx::query(
+                    r#"
+                    INSERT INTO playback_events (
+                        zone_id, event_type, track_id, track_title,
+                        position_ms, reason, created_at
+                    )
+                    VALUES (?1, 'stop', ?2, ?3, ?4, ?5, ?6)
+                    "#,
+                )
+                .bind(&zone_id)
+                .bind(mutation.track_id)
+                .bind(&track_title)
+                .bind(end_position_ms)
+                .bind(reason)
+                .bind(ended_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+            kind => bail!("unsupported client mutation kind: {kind}"),
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO client_mutation_receipts (
+                device_id, mutation_id, mutation_kind, occurred_at, applied_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+        )
+        .bind(device_id)
+        .bind(mutation_id)
+        .bind(&mutation.kind)
+        .bind(&occurred_at)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+        applied_ids.push(mutation_id.to_string());
+    }
+    tx.commit().await?;
+    Ok(ClientMutationBatchResult {
+        applied_ids,
+        duplicate_ids,
+    })
+}
+
+pub async fn create_distribution_job(
+    pool: &DbPool,
+    request: &CreateDistributionRequest,
+) -> Result<DistributionJobSummary> {
+    let target_device_id = request.target_device_id.trim();
+    let target_root_external_id = request.target_root_external_id.trim();
+    if target_device_id.is_empty() || target_device_id.len() > 200 {
+        bail!("target_device_id must contain between 1 and 200 characters");
+    }
+    if target_root_external_id.is_empty() || target_root_external_id.len() > 300 {
+        bail!("target_root_external_id must contain between 1 and 300 characters");
+    }
+    let quality = request.quality.trim().to_ascii_lowercase();
+    let profile_extension = distribution_profile_extension(&quality)?;
+
+    let mut tx = pool.begin().await?;
+    let target_exists: Option<i64> = sqlx::query_scalar(
+        r#"
+        SELECT root.id
+        FROM library_roots root
+        WHERE root.root_kind = 'client'
+          AND root.owner_device_id = ?1
+          AND root.external_id = ?2
+          AND root.enabled = 1
+        "#,
+    )
+    .bind(target_device_id)
+    .bind(target_root_external_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if target_exists.is_none() {
+        bail!("the target Client library folder is not registered or is disabled");
+    }
+
+    let mut track_ids = request
+        .track_ids
+        .iter()
+        .copied()
+        .filter(|id| *id > 0)
+        .collect::<Vec<_>>();
+    for album_id in request.album_ids.iter().copied().filter(|id| *id > 0) {
+        track_ids.extend(
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT id
+                FROM tracks
+                WHERE album_id = ?1
+                ORDER BY COALESCE(disc_number, 1), COALESCE(track_number, 0), id
+                "#,
+            )
+            .bind(album_id)
+            .fetch_all(&mut *tx)
+            .await?,
+        );
+    }
+    for playlist_id in request.playlist_ids.iter().copied().filter(|id| *id > 0) {
+        track_ids.extend(
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                SELECT track_id
+                FROM playlist_items
+                WHERE playlist_id = ?1
+                ORDER BY position, id
+                "#,
+            )
+            .bind(playlist_id)
+            .fetch_all(&mut *tx)
+            .await?,
+        );
+    }
+    track_ids.sort_unstable();
+    track_ids.dedup();
+    if track_ids.is_empty() {
+        bail!("a distribution job must contain at least one track");
+    }
+    if track_ids.len() > 5_000 {
+        bail!("a distribution job cannot exceed 5000 tracks");
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let job_id = Uuid::now_v7().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO distribution_jobs (
+            id, target_device_id, target_root_external_id, quality,
+            state, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?5)
+        "#,
+    )
+    .bind(&job_id)
+    .bind(target_device_id)
+    .bind(target_root_external_id)
+    .bind(&quality)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut relative_paths = HashSet::new();
+    let mut total_bytes = 0_i64;
+    let mut completed_items = 0_i64;
+    for track_id in &track_ids {
+        let source = sqlx::query(
+            r#"
+            SELECT
+                variant.id AS media_variant_id,
+                file.id AS source_file_id,
+                file.path AS source_file_path,
+                file.extension,
+                file.size_bytes,
+                file.quick_hash,
+                replica.source_kind,
+                replica.device_id AS source_device_id,
+                root.external_id AS source_root_external_id,
+                file.relative_path AS source_relative_path,
+                track.title,
+                track.disc_number,
+                track.track_number,
+                album.title AS album_title,
+                album.album_artist_display,
+                (
+                    SELECT GROUP_CONCAT(artist.name, ', ')
+                    FROM track_artists track_artist
+                    JOIN artists artist ON artist.id = track_artist.artist_id
+                    WHERE track_artist.track_id = track.id
+                      AND track_artist.role = 'primary'
+                    ORDER BY track_artist.position
+                ) AS artist_display
+            FROM tracks track
+            JOIN legacy_track_catalog_links link ON link.track_id = track.id
+            JOIN release_track_media_variants relation
+              ON relation.release_track_id = link.release_track_id
+            JOIN media_variants variant ON variant.id = relation.media_variant_id
+            JOIN media_replicas replica ON replica.media_variant_id = variant.id
+            JOIN files file ON file.id = replica.file_id
+            JOIN library_roots root ON root.id = replica.library_root_id
+            LEFT JOIN albums album ON album.id = track.album_id
+            WHERE track.id = ?1
+              AND replica.availability_state = 'ready'
+              AND file.deleted_at IS NULL
+              AND file.availability_state = 'ready'
+            ORDER BY
+                CASE WHEN replica.source_kind = 'core' THEN 0 ELSE 1 END,
+                root.last_seen_at DESC,
+                relation.is_preferred DESC,
+                replica.is_primary DESC,
+                COALESCE(variant.bit_depth, 0) DESC,
+                COALESCE(variant.bitrate, 0) DESC,
+                file.id
+            LIMIT 1
+            "#,
+        )
+        .bind(track_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .with_context(|| format!("track {track_id} has no available media replica"))?;
+        let media_variant_id: i64 = source.try_get("media_variant_id")?;
+        let source_file_id: i64 = source.try_get("source_file_id")?;
+        let source_file_path: String = source.try_get("source_file_path")?;
+        let source_kind: String = source.try_get("source_kind")?;
+        let source_device_id: Option<String> = source.try_get("source_device_id")?;
+        let source_root_external_id: Option<String> = source.try_get("source_root_external_id")?;
+        let source_relative_path: String = source.try_get("source_relative_path")?;
+        let requires_source_upload = source_kind != "core";
+        if requires_source_upload
+            && (source_device_id.as_deref().is_none_or(str::is_empty)
+                || source_root_external_id.as_deref().is_none_or(str::is_empty))
+        {
+            bail!("track {track_id} has an invalid Client media replica");
+        }
+        let source_extension: String = source.try_get("extension")?;
+        let extension = profile_extension
+            .unwrap_or(source_extension.as_str())
+            .to_string();
+        let size_bytes: i64 = source.try_get("size_bytes")?;
+        let title: String = source.try_get("title")?;
+        let album_title: Option<String> = source.try_get("album_title")?;
+        let album_artist: Option<String> = source.try_get("album_artist_display")?;
+        let track_artist: Option<String> = source.try_get("artist_display")?;
+        let disc_number: Option<i64> = source.try_get("disc_number")?;
+        let track_number: Option<i64> = source.try_get("track_number")?;
+        let quick_hash: Option<String> = source.try_get("quick_hash")?;
+        let already_present: Option<i64> = if quality == "original" {
+            sqlx::query_scalar(
+                r#"
+                SELECT 1
+                FROM media_replicas
+                WHERE media_variant_id = ?1
+                  AND device_id = ?2
+                  AND availability_state = 'ready'
+                LIMIT 1
+                "#,
+            )
+            .bind(media_variant_id)
+            .bind(target_device_id)
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
+        let artist = track_artist
+            .as_deref()
+            .or(album_artist.as_deref())
+            .unwrap_or("Unknown Artist");
+        let album = album_title.as_deref().unwrap_or("Unknown Album");
+        let mut relative_path = distribution_relative_path(
+            artist,
+            album,
+            &title,
+            disc_number,
+            track_number,
+            &extension,
+        );
+        if !relative_paths.insert(relative_path.clone()) {
+            let path = Path::new(&relative_path);
+            let stem = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("track");
+            let parent = path.parent().unwrap_or_else(|| Path::new(""));
+            relative_path = parent
+                .join(format!("{stem} (track {track_id}).{extension}"))
+                .to_string_lossy()
+                .replace('\\', "/");
+            relative_paths.insert(relative_path.clone());
+        }
+        let item_state = if already_present.is_some() {
+            completed_items += 1;
+            "skipped"
+        } else if requires_source_upload {
+            "awaiting_source"
+        } else if quality == "original" {
+            total_bytes = total_bytes.saturating_add(size_bytes.max(0));
+            "queued"
+        } else {
+            "preparing"
+        };
+        let expected_size = if quality == "original" {
+            size_bytes.max(0)
+        } else {
+            0
+        };
+        let expected_hash = if quality == "original" {
+            quick_hash
+        } else {
+            None
+        };
+        let content_file_path = if quality == "original" && !requires_source_upload {
+            Some(source_file_path)
+        } else {
+            None
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO distribution_items (
+                id, job_id, track_id, media_variant_id, source_file_id,
+                relative_path, extension, expected_size_bytes,
+                expected_quick_hash, content_file_path, state,
+                source_device_id, source_root_external_id, source_relative_path,
+                created_at, updated_at, completed_at
+            )
+            VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14, ?15, ?15,
+                CASE WHEN ?11 = 'skipped' THEN ?15 ELSE NULL END
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(&job_id)
+        .bind(track_id)
+        .bind(media_variant_id)
+        .bind(source_file_id)
+        .bind(relative_path)
+        .bind(extension.to_ascii_lowercase())
+        .bind(expected_size)
+        .bind(expected_hash)
+        .bind(content_file_path)
+        .bind(item_state)
+        .bind(source_device_id)
+        .bind(source_root_external_id)
+        .bind(source_relative_path)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    sqlx::query(
+        r#"
+        UPDATE distribution_jobs
+        SET total_items = ?1,
+            completed_items = ?2,
+            total_bytes = ?3,
+            updated_at = ?4
+        WHERE id = ?5
+        "#,
+    )
+    .bind(track_ids.len() as i64)
+    .bind(completed_items)
+    .bind(total_bytes)
+    .bind(&now)
+    .bind(&job_id)
+    .execute(&mut *tx)
+    .await?;
+    refresh_distribution_job_totals(&mut tx, &job_id, &now).await?;
+    tx.commit().await?;
+    get_distribution_job(pool, &job_id).await
+}
+
+pub async fn list_distribution_jobs(
+    pool: &DbPool,
+    target_device_id: Option<&str>,
+    limit: u32,
+) -> Result<Vec<DistributionJobSummary>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            job.*,
+            device.name AS target_device_name,
+            COALESCE(NULLIF(root.display_name, ''), root.external_id)
+                AS target_root_name
+        FROM distribution_jobs job
+        JOIN devices device ON device.id = job.target_device_id
+        JOIN library_roots root
+          ON root.root_kind = 'client'
+         AND root.owner_device_id = job.target_device_id
+         AND root.external_id = job.target_root_external_id
+        WHERE (?1 IS NULL OR job.target_device_id = ?1)
+        ORDER BY job.created_at DESC
+        LIMIT ?2
+        "#,
+    )
+    .bind(target_device_id)
+    .bind(limit.clamp(1, 500))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(row_to_distribution_job).collect()
+}
+
+pub async fn get_distribution_job(pool: &DbPool, job_id: &str) -> Result<DistributionJobSummary> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            job.*,
+            device.name AS target_device_name,
+            COALESCE(NULLIF(root.display_name, ''), root.external_id)
+                AS target_root_name
+        FROM distribution_jobs job
+        JOIN devices device ON device.id = job.target_device_id
+        JOIN library_roots root
+          ON root.root_kind = 'client'
+         AND root.owner_device_id = job.target_device_id
+         AND root.external_id = job.target_root_external_id
+        WHERE job.id = ?1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await?;
+    row_to_distribution_job(row)
+}
+
+pub async fn claim_distribution_task(
+    pool: &DbPool,
+    device_id: &str,
+) -> Result<Option<DistributionTaskAssignment>> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() || device_id.len() > 200 {
+        bail!("device_id must contain between 1 and 200 characters");
+    }
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    let lease_text = (now + chrono::Duration::minutes(30)).to_rfc3339();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = CASE WHEN attempt_count >= 3 THEN 'failed' ELSE 'queued' END,
+            error = CASE
+                WHEN attempt_count >= 3 THEN 'delivery lease expired after 3 attempts'
+                ELSE error
+            END,
+            lease_expires_at = NULL,
+            updated_at = ?1
+        WHERE state = 'transferring'
+          AND lease_expires_at IS NOT NULL
+          AND lease_expires_at < ?1
+          AND job_id IN (
+              SELECT id FROM distribution_jobs WHERE target_device_id = ?2
+          )
+        "#,
+    )
+    .bind(&now_text)
+    .bind(device_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let candidate: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT item.id
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        WHERE job.target_device_id = ?1
+          AND job.state NOT IN ('cancelled', 'completed', 'completed_with_errors')
+          AND item.state = 'queued'
+        ORDER BY job.created_at, item.created_at
+        LIMIT 1
+        "#,
+    )
+    .bind(device_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(task_id) = candidate else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let claimed = sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = 'transferring',
+            attempt_count = attempt_count + 1,
+            claimed_at = ?1,
+            lease_expires_at = ?2,
+            error = NULL,
+            updated_at = ?1
+        WHERE id = ?3 AND state = 'queued'
+        "#,
+    )
+    .bind(&now_text)
+    .bind(&lease_text)
+    .bind(&task_id)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    sqlx::query(
+        r#"
+        UPDATE distribution_jobs
+        SET state = 'transferring', updated_at = ?1
+        WHERE id = (SELECT job_id FROM distribution_items WHERE id = ?2)
+          AND state = 'queued'
+        "#,
+    )
+    .bind(&now_text)
+    .bind(&task_id)
+    .execute(&mut *tx)
+    .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            item.id,
+            item.job_id,
+            item.track_id,
+            track.title,
+            album.title AS album_title,
+            (
+                SELECT GROUP_CONCAT(artist.name, ', ')
+                FROM track_artists track_artist
+                JOIN artists artist ON artist.id = track_artist.artist_id
+                WHERE track_artist.track_id = track.id
+                  AND track_artist.role = 'primary'
+                ORDER BY track_artist.position
+            ) AS artist_display,
+            job.target_root_external_id,
+            item.relative_path,
+            item.extension,
+            item.expected_size_bytes,
+            item.expected_quick_hash,
+            item.attempt_count
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        JOIN tracks track ON track.id = item.track_id
+        LEFT JOIN albums album ON album.id = track.album_id
+        WHERE item.id = ?1
+        "#,
+    )
+    .bind(&task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(DistributionTaskAssignment {
+        id: row.try_get("id")?,
+        job_id: row.try_get("job_id")?,
+        track_id: row.try_get("track_id")?,
+        title: row.try_get("title")?,
+        artist_display: row.try_get("artist_display")?,
+        album_title: row.try_get("album_title")?,
+        target_root_external_id: row.try_get("target_root_external_id")?,
+        relative_path: row.try_get("relative_path")?,
+        extension: row.try_get("extension")?,
+        expected_size_bytes: row.try_get("expected_size_bytes")?,
+        expected_quick_hash: row.try_get("expected_quick_hash")?,
+        attempt_count: row.try_get("attempt_count")?,
+        content_path: format!("/distributions/tasks/{task_id}/content"),
+    }))
+}
+
+pub async fn update_distribution_task(
+    pool: &DbPool,
+    task_id: &str,
+    progress: &DistributionTaskProgress,
+) -> Result<DistributionJobSummary> {
+    let state = progress.state.trim().to_ascii_lowercase();
+    if !matches!(state.as_str(), "progress" | "completed" | "failed") {
+        bail!("distribution task state must be progress, completed, or failed");
+    }
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    let lease_text = (now + chrono::Duration::minutes(30)).to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            item.job_id,
+            item.state,
+            item.attempt_count,
+            item.expected_size_bytes,
+            job.target_device_id
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        WHERE item.id = ?1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let job_id: String = row.try_get("job_id")?;
+    let target_device_id: String = row.try_get("target_device_id")?;
+    if target_device_id != progress.device_id.trim() {
+        bail!("this distribution task belongs to another Client");
+    }
+    let current_state: String = row.try_get("state")?;
+    if matches!(
+        current_state.as_str(),
+        "completed" | "skipped" | "cancelled"
+    ) {
+        tx.commit().await?;
+        return get_distribution_job(pool, &job_id).await;
+    }
+    let expected_size: i64 = row.try_get("expected_size_bytes")?;
+    let transferred = progress.transferred_bytes.clamp(0, expected_size.max(0));
+    match state.as_str() {
+        "progress" => {
+            sqlx::query(
+                r#"
+                UPDATE distribution_items
+                SET transferred_bytes = MAX(transferred_bytes, ?1),
+                    lease_expires_at = ?2,
+                    updated_at = ?3
+                WHERE id = ?4 AND state = 'transferring'
+                "#,
+            )
+            .bind(transferred)
+            .bind(lease_text)
+            .bind(&now_text)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        "completed" => {
+            if transferred != expected_size {
+                bail!(
+                    "completed distribution size {transferred} does not match expected size {expected_size}"
+                );
+            }
+            sqlx::query(
+                r#"
+                UPDATE distribution_items
+                SET state = 'completed',
+                    transferred_bytes = expected_size_bytes,
+                    lease_expires_at = NULL,
+                    error = NULL,
+                    completed_at = ?1,
+                    updated_at = ?1
+                WHERE id = ?2
+                "#,
+            )
+            .bind(&now_text)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        "failed" => {
+            let attempt_count: i64 = row.try_get("attempt_count")?;
+            let retry = progress.retryable && attempt_count < 3;
+            sqlx::query(
+                r#"
+                UPDATE distribution_items
+                SET state = ?1,
+                    transferred_bytes = ?2,
+                    lease_expires_at = NULL,
+                    error = ?3,
+                    completed_at = CASE WHEN ?1 = 'failed' THEN ?4 ELSE NULL END,
+                    updated_at = ?4
+                WHERE id = ?5
+                "#,
+            )
+            .bind(if retry { "queued" } else { "failed" })
+            .bind(transferred)
+            .bind(
+                progress
+                    .error
+                    .as_deref()
+                    .unwrap_or("Client delivery failed"),
+            )
+            .bind(&now_text)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        _ => unreachable!(),
+    }
+    refresh_distribution_job_totals(&mut tx, &job_id, &now_text).await?;
+    tx.commit().await?;
+    get_distribution_job(pool, &job_id).await
+}
+
+pub async fn distribution_content_source(
+    pool: &DbPool,
+    task_id: &str,
+    device_id: &str,
+) -> Result<DistributionContentSource> {
+    let row = sqlx::query(
+        r#"
+        SELECT COALESCE(item.content_file_path, file.path) AS path, item.extension
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        JOIN files file ON file.id = item.source_file_id
+        WHERE item.id = ?1
+          AND job.target_device_id = ?2
+          AND job.state <> 'cancelled'
+          AND item.state = 'transferring'
+          AND file.deleted_at IS NULL
+        "#,
+    )
+    .bind(task_id)
+    .bind(device_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(DistributionContentSource {
+        path: row.try_get("path")?,
+        extension: row.try_get("extension")?,
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributionSourceUploadExpectation {
+    pub expected_size_bytes: i64,
+    pub expected_quick_hash: Option<String>,
+    pub extension: String,
+}
+
+pub async fn claim_distribution_source_task(
+    pool: &DbPool,
+    device_id: &str,
+) -> Result<Option<DistributionSourceTaskAssignment>> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() || device_id.len() > 200 {
+        bail!("device_id must contain between 1 and 200 characters");
+    }
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    let lease_text = (now + chrono::Duration::minutes(30)).to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let expired_jobs = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT job_id
+        FROM distribution_items
+        WHERE source_device_id = ?1
+          AND state = 'source_uploading'
+          AND source_upload_lease_expires_at IS NOT NULL
+          AND source_upload_lease_expires_at < ?2
+        "#,
+    )
+    .bind(device_id)
+    .bind(&now_text)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = CASE
+                WHEN source_upload_attempt_count >= 3 THEN 'failed'
+                ELSE 'awaiting_source'
+            END,
+            error = CASE
+                WHEN source_upload_attempt_count >= 3
+                    THEN 'source upload lease expired after 3 attempts'
+                ELSE error
+            END,
+            source_upload_lease_expires_at = NULL,
+            updated_at = ?1,
+            completed_at = CASE
+                WHEN source_upload_attempt_count >= 3 THEN ?1
+                ELSE NULL
+            END
+        WHERE source_device_id = ?2
+          AND state = 'source_uploading'
+          AND source_upload_lease_expires_at IS NOT NULL
+          AND source_upload_lease_expires_at < ?1
+        "#,
+    )
+    .bind(&now_text)
+    .bind(device_id)
+    .execute(&mut *tx)
+    .await?;
+    for job_id in expired_jobs {
+        refresh_distribution_job_totals(&mut tx, &job_id, &now_text).await?;
+    }
+
+    let candidate: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT item.id
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        WHERE item.source_device_id = ?1
+          AND item.state = 'awaiting_source'
+          AND job.state NOT IN ('cancelled', 'completed', 'completed_with_errors')
+        ORDER BY job.created_at, item.created_at
+        LIMIT 1
+        "#,
+    )
+    .bind(device_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(task_id) = candidate else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let claimed = sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = 'source_uploading',
+            source_upload_attempt_count = source_upload_attempt_count + 1,
+            source_upload_claimed_at = ?1,
+            source_upload_lease_expires_at = ?2,
+            error = NULL,
+            updated_at = ?1
+        WHERE id = ?3
+          AND source_device_id = ?4
+          AND state = 'awaiting_source'
+        "#,
+    )
+    .bind(&now_text)
+    .bind(&lease_text)
+    .bind(&task_id)
+    .bind(device_id)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT
+            item.id,
+            item.job_id,
+            item.track_id,
+            track.title,
+            item.source_root_external_id,
+            item.source_relative_path,
+            file.size_bytes,
+            file.quick_hash,
+            item.source_upload_attempt_count
+        FROM distribution_items item
+        JOIN tracks track ON track.id = item.track_id
+        JOIN files file ON file.id = item.source_file_id
+        WHERE item.id = ?1
+        "#,
+    )
+    .bind(&task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(DistributionSourceTaskAssignment {
+        id: row.try_get("id")?,
+        job_id: row.try_get("job_id")?,
+        track_id: row.try_get("track_id")?,
+        title: row.try_get("title")?,
+        source_root_external_id: row.try_get("source_root_external_id")?,
+        source_relative_path: row.try_get("source_relative_path")?,
+        expected_size_bytes: row.try_get("size_bytes")?,
+        expected_quick_hash: row.try_get("quick_hash")?,
+        attempt_count: row.try_get("source_upload_attempt_count")?,
+        upload_path: format!("/distributions/source-tasks/{task_id}/content"),
+    }))
+}
+
+pub async fn distribution_source_upload_expectation(
+    pool: &DbPool,
+    task_id: &str,
+    device_id: &str,
+) -> Result<DistributionSourceUploadExpectation> {
+    let row = sqlx::query(
+        r#"
+        SELECT file.size_bytes, file.quick_hash, file.extension
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        JOIN files file ON file.id = item.source_file_id
+        WHERE item.id = ?1
+          AND item.source_device_id = ?2
+          AND item.state = 'source_uploading'
+          AND job.state <> 'cancelled'
+          AND file.deleted_at IS NULL
+          AND file.availability_state = 'ready'
+        "#,
+    )
+    .bind(task_id)
+    .bind(device_id.trim())
+    .fetch_one(pool)
+    .await?;
+    Ok(DistributionSourceUploadExpectation {
+        expected_size_bytes: row.try_get("size_bytes")?,
+        expected_quick_hash: row.try_get("quick_hash")?,
+        extension: row.try_get("extension")?,
+    })
+}
+
+pub async fn complete_distribution_source_task(
+    pool: &DbPool,
+    task_id: &str,
+    device_id: &str,
+    content_file_path: &Path,
+    actual_size_bytes: i64,
+    actual_quick_hash: &str,
+) -> Result<DistributionJobSummary> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            item.job_id,
+            item.source_device_id,
+            item.state,
+            file.size_bytes,
+            file.quick_hash,
+            job.quality
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        JOIN files file ON file.id = item.source_file_id
+        WHERE item.id = ?1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let job_id: String = row.try_get("job_id")?;
+    if row
+        .try_get::<Option<String>, _>("source_device_id")?
+        .as_deref()
+        != Some(device_id.trim())
+    {
+        bail!("this source task belongs to another Client");
+    }
+    if row.try_get::<String, _>("state")? != "source_uploading" {
+        bail!("the distribution source task is no longer active");
+    }
+    let expected_size: i64 = row.try_get("size_bytes")?;
+    if actual_size_bytes != expected_size {
+        bail!(
+            "uploaded source size {actual_size_bytes} does not match expected size {expected_size}"
+        );
+    }
+    let expected_hash: Option<String> = row.try_get("quick_hash")?;
+    if expected_hash
+        .as_deref()
+        .is_some_and(|expected| !expected.eq_ignore_ascii_case(actual_quick_hash))
+    {
+        bail!("uploaded source failed its content verification");
+    }
+    let quality: String = row.try_get("quality")?;
+    let next_state = if quality == "original" {
+        "queued"
+    } else {
+        "preparing"
+    };
+    let updated = sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = ?1,
+            content_file_path = ?2,
+            source_upload_lease_expires_at = NULL,
+            error = NULL,
+            updated_at = ?3
+        WHERE id = ?4 AND state = 'source_uploading'
+        "#,
+    )
+    .bind(next_state)
+    .bind(normalize_path(content_file_path))
+    .bind(&now)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        bail!("the distribution source task is no longer active");
+    }
+    refresh_distribution_job_totals(&mut tx, &job_id, &now).await?;
+    tx.commit().await?;
+    get_distribution_job(pool, &job_id).await
+}
+
+pub async fn fail_distribution_source_task(
+    pool: &DbPool,
+    task_id: &str,
+    device_id: &str,
+    retryable: bool,
+    error: &str,
+) -> Result<DistributionJobSummary> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT job_id, source_device_id, state, source_upload_attempt_count
+        FROM distribution_items
+        WHERE id = ?1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let job_id: String = row.try_get("job_id")?;
+    if row
+        .try_get::<Option<String>, _>("source_device_id")?
+        .as_deref()
+        != Some(device_id.trim())
+    {
+        bail!("this source task belongs to another Client");
+    }
+    if row.try_get::<String, _>("state")? != "source_uploading" {
+        tx.commit().await?;
+        return get_distribution_job(pool, &job_id).await;
+    }
+    let attempts: i64 = row.try_get("source_upload_attempt_count")?;
+    let should_retry = retryable && attempts < 3;
+    let message = error.chars().take(2_000).collect::<String>();
+    sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = ?1,
+            source_upload_lease_expires_at = NULL,
+            error = ?2,
+            completed_at = CASE WHEN ?1 = 'failed' THEN ?3 ELSE NULL END,
+            updated_at = ?3
+        WHERE id = ?4
+        "#,
+    )
+    .bind(if should_retry {
+        "awaiting_source"
+    } else {
+        "failed"
+    })
+    .bind(message)
+    .bind(&now)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+    refresh_distribution_job_totals(&mut tx, &job_id, &now).await?;
+    tx.commit().await?;
+    get_distribution_job(pool, &job_id).await
+}
+
+pub async fn claim_distribution_transcode_task(
+    pool: &DbPool,
+) -> Result<Option<DistributionTranscodeTask>> {
+    let now = Utc::now();
+    let now_text = now.to_rfc3339();
+    let lease_text = (now + chrono::Duration::hours(6)).to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let expired_jobs = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT job_id
+        FROM distribution_items
+        WHERE state = 'transcoding'
+          AND transcode_lease_expires_at IS NOT NULL
+          AND transcode_lease_expires_at < ?1
+        "#,
+    )
+    .bind(&now_text)
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = CASE
+                WHEN transcode_attempt_count >= 3 THEN 'failed'
+                ELSE 'preparing'
+            END,
+            error = CASE
+                WHEN transcode_attempt_count >= 3
+                    THEN 'transcoding lease expired after 3 attempts'
+                ELSE error
+            END,
+            transcode_lease_expires_at = NULL,
+            updated_at = ?1,
+            completed_at = CASE
+                WHEN transcode_attempt_count >= 3 THEN ?1
+                ELSE NULL
+            END
+        WHERE state = 'transcoding'
+          AND transcode_lease_expires_at IS NOT NULL
+          AND transcode_lease_expires_at < ?1
+        "#,
+    )
+    .bind(&now_text)
+    .execute(&mut *tx)
+    .await?;
+    for job_id in expired_jobs {
+        refresh_distribution_job_totals(&mut tx, &job_id, &now_text).await?;
+    }
+
+    let candidate: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT item.id
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        WHERE item.state = 'preparing'
+          AND job.state NOT IN ('cancelled', 'completed', 'completed_with_errors')
+        ORDER BY job.created_at, item.created_at
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(task_id) = candidate else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let claimed = sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = 'transcoding',
+            transcode_attempt_count = transcode_attempt_count + 1,
+            transcode_claimed_at = ?1,
+            transcode_lease_expires_at = ?2,
+            error = NULL,
+            updated_at = ?1
+        WHERE id = ?3 AND state = 'preparing'
+        "#,
+    )
+    .bind(&now_text)
+    .bind(&lease_text)
+    .bind(&task_id)
+    .execute(&mut *tx)
+    .await?;
+    if claimed.rows_affected() == 0 {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        r#"
+        SELECT
+            item.id,
+            item.job_id,
+            job.quality,
+            COALESCE(item.content_file_path, file.path) AS source_path,
+            file.size_bytes,
+            file.modified_at,
+            file.quick_hash
+        FROM distribution_items item
+        JOIN distribution_jobs job ON job.id = item.job_id
+        JOIN files file ON file.id = item.source_file_id
+        WHERE item.id = ?1
+          AND file.deleted_at IS NULL
+          AND file.availability_state = 'ready'
+        "#,
+    )
+    .bind(&task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let quick_hash: Option<String> = row.try_get("quick_hash")?;
+    let source_signature = quick_hash
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("quick:{value}"))
+        .unwrap_or_else(|| {
+            format!(
+                "file:{}:{}:{}",
+                row.try_get::<i64, _>("size_bytes").unwrap_or_default(),
+                row.try_get::<String, _>("modified_at").unwrap_or_default(),
+                row.try_get::<String, _>("source_path").unwrap_or_default()
+            )
+        });
+    let task = DistributionTranscodeTask {
+        id: row.try_get("id")?,
+        job_id: row.try_get("job_id")?,
+        quality: row.try_get("quality")?,
+        source_path: row.try_get("source_path")?,
+        source_signature,
+    };
+    tx.commit().await?;
+    Ok(Some(task))
+}
+
+pub async fn complete_distribution_transcode_task(
+    pool: &DbPool,
+    task_id: &str,
+    content_file_path: &Path,
+    extension: &str,
+    expected_size_bytes: i64,
+    expected_quick_hash: &str,
+) -> Result<DistributionJobSummary> {
+    if expected_size_bytes <= 0 {
+        bail!("a transcoded file must not be empty");
+    }
+    let extension = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
+    if extension.is_empty() || !extension.chars().all(|value| value.is_ascii_alphanumeric()) {
+        bail!("invalid transcoded file extension");
+    }
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let job_id: String = sqlx::query_scalar("SELECT job_id FROM distribution_items WHERE id = ?1")
+        .bind(task_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = 'queued',
+            content_file_path = ?1,
+            extension = ?2,
+            expected_size_bytes = ?3,
+            expected_quick_hash = ?4,
+            transferred_bytes = 0,
+            transcode_lease_expires_at = NULL,
+            error = NULL,
+            updated_at = ?5
+        WHERE id = ?6 AND state = 'transcoding'
+        "#,
+    )
+    .bind(normalize_path(content_file_path))
+    .bind(extension)
+    .bind(expected_size_bytes)
+    .bind(expected_quick_hash)
+    .bind(&now)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        bail!("the distribution transcode task is no longer active");
+    }
+    refresh_distribution_job_totals(&mut tx, &job_id, &now).await?;
+    tx.commit().await?;
+    get_distribution_job(pool, &job_id).await
+}
+
+pub async fn active_distribution_content_paths(pool: &DbPool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT content_file_path
+        FROM distribution_items
+        WHERE content_file_path IS NOT NULL
+          AND state IN ('preparing', 'transcoding', 'queued', 'transferring')
+        "#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn distribution_content_paths_for_job(
+    pool: &DbPool,
+    job_id: &str,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT content_file_path
+        FROM distribution_items
+        WHERE job_id = ?1 AND content_file_path IS NOT NULL
+        "#,
+    )
+    .bind(job_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+pub async fn fail_distribution_transcode_task(
+    pool: &DbPool,
+    task_id: &str,
+    retryable: bool,
+    error: &str,
+) -> Result<DistributionJobSummary> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        r#"
+        SELECT job_id, state, transcode_attempt_count
+        FROM distribution_items
+        WHERE id = ?1
+        "#,
+    )
+    .bind(task_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let job_id: String = row.try_get("job_id")?;
+    let state: String = row.try_get("state")?;
+    if state != "transcoding" {
+        tx.commit().await?;
+        return get_distribution_job(pool, &job_id).await;
+    }
+    let attempts: i64 = row.try_get("transcode_attempt_count")?;
+    let should_retry = retryable && attempts < 3;
+    let message = error.chars().take(2_000).collect::<String>();
+    sqlx::query(
+        r#"
+        UPDATE distribution_items
+        SET state = ?1,
+            transcode_lease_expires_at = NULL,
+            error = ?2,
+            completed_at = CASE WHEN ?1 = 'failed' THEN ?3 ELSE NULL END,
+            updated_at = ?3
+        WHERE id = ?4
+        "#,
+    )
+    .bind(if should_retry { "preparing" } else { "failed" })
+    .bind(message)
+    .bind(&now)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+    refresh_distribution_job_totals(&mut tx, &job_id, &now).await?;
+    tx.commit().await?;
+    get_distribution_job(pool, &job_id).await
+}
+
+pub async fn cancel_distribution_job(
+    pool: &DbPool,
+    job_id: &str,
+) -> Result<DistributionJobSummary> {
+    let now = Utc::now().to_rfc3339();
+    let mut tx = pool.begin().await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE distribution_jobs
+        SET state = 'cancelled', updated_at = ?1, completed_at = ?1
+        WHERE id = ?2
+          AND state NOT IN ('completed', 'completed_with_errors', 'cancelled')
+        "#,
+    )
+    .bind(&now)
+    .bind(job_id)
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() > 0 {
+        sqlx::query(
+            r#"
+            UPDATE distribution_items
+            SET state = 'cancelled',
+                lease_expires_at = NULL,
+                source_upload_lease_expires_at = NULL,
+                transcode_lease_expires_at = NULL,
+                updated_at = ?1
+            WHERE job_id = ?2
+              AND state IN (
+                  'awaiting_source', 'source_uploading',
+                  'preparing', 'transcoding', 'queued', 'transferring'
+              )
+            "#,
+        )
+        .bind(&now)
+        .bind(job_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    get_distribution_job(pool, job_id).await
+}
+
+async fn refresh_distribution_job_totals(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    job_id: &str,
+    now: &str,
+) -> Result<()> {
+    let totals = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*) AS total_items,
+            COALESCE(SUM(CASE WHEN state IN ('completed', 'skipped') THEN 1 ELSE 0 END), 0)
+                AS completed_items,
+            COALESCE(SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END), 0)
+                AS failed_items,
+            COALESCE(SUM(CASE
+                WHEN state = 'skipped' THEN 0
+                WHEN state = 'completed' THEN expected_size_bytes
+                ELSE MIN(transferred_bytes, expected_size_bytes)
+            END), 0) AS transferred_bytes,
+            COALESCE(SUM(CASE
+                WHEN state = 'skipped' THEN 0
+                ELSE expected_size_bytes
+            END), 0) AS total_bytes,
+            COALESCE(SUM(CASE WHEN state IN ('preparing', 'transcoding') THEN 1 ELSE 0 END), 0)
+                AS preparing_items,
+            COALESCE(SUM(CASE WHEN state IN ('awaiting_source', 'source_uploading') THEN 1 ELSE 0 END), 0)
+                AS source_items,
+            COALESCE(SUM(CASE WHEN state = 'transferring' THEN 1 ELSE 0 END), 0)
+                AS transferring_items,
+            MAX(CASE WHEN state = 'failed' THEN error ELSE NULL END) AS error
+        FROM distribution_items
+        WHERE job_id = ?1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let total_items: i64 = totals.try_get("total_items")?;
+    let completed_items: i64 = totals.try_get("completed_items")?;
+    let failed_items: i64 = totals.try_get("failed_items")?;
+    let terminal = completed_items + failed_items >= total_items;
+    let state = if terminal && failed_items > 0 {
+        "completed_with_errors"
+    } else if terminal {
+        "completed"
+    } else if totals.try_get::<i64, _>("transferring_items")? > 0 {
+        "transferring"
+    } else if totals.try_get::<i64, _>("preparing_items")? > 0 {
+        "preparing"
+    } else if totals.try_get::<i64, _>("source_items")? > 0 {
+        "awaiting_source"
+    } else {
+        "queued"
+    };
+    sqlx::query(
+        r#"
+        UPDATE distribution_jobs
+        SET state = ?1,
+            completed_items = ?2,
+            failed_items = ?3,
+            transferred_bytes = ?4,
+            total_bytes = ?5,
+            error = ?6,
+            updated_at = ?7,
+            completed_at = CASE WHEN ?8 THEN ?7 ELSE NULL END
+        WHERE id = ?9 AND state <> 'cancelled'
+        "#,
+    )
+    .bind(state)
+    .bind(completed_items)
+    .bind(failed_items)
+    .bind(totals.try_get::<i64, _>("transferred_bytes")?)
+    .bind(totals.try_get::<i64, _>("total_bytes")?)
+    .bind(totals.try_get::<Option<String>, _>("error")?)
+    .bind(now)
+    .bind(terminal)
+    .bind(job_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn row_to_distribution_job(row: sqlx::sqlite::SqliteRow) -> Result<DistributionJobSummary> {
+    let created_at: String = row.try_get("created_at")?;
+    let updated_at: String = row.try_get("updated_at")?;
+    let completed_at: Option<String> = row.try_get("completed_at")?;
+    Ok(DistributionJobSummary {
+        id: row.try_get("id")?,
+        target_device_id: row.try_get("target_device_id")?,
+        target_device_name: row.try_get("target_device_name")?,
+        target_root_external_id: row.try_get("target_root_external_id")?,
+        target_root_name: row.try_get("target_root_name")?,
+        quality: row.try_get("quality")?,
+        state: row.try_get("state")?,
+        total_items: row.try_get("total_items")?,
+        completed_items: row.try_get("completed_items")?,
+        failed_items: row.try_get("failed_items")?,
+        total_bytes: row.try_get("total_bytes")?,
+        transferred_bytes: row.try_get("transferred_bytes")?,
+        error: row.try_get("error")?,
+        created_at: parse_datetime(created_at)?,
+        updated_at: parse_datetime(updated_at)?,
+        completed_at: completed_at.map(parse_datetime).transpose()?,
+    })
+}
+
+fn distribution_profile_extension(quality: &str) -> Result<Option<&'static str>> {
+    match quality {
+        "original" => Ok(None),
+        "flac" | "lossless" => Ok(Some("flac")),
+        "aac-256" | "high" | "aac-160" | "balanced" | "aac-96" | "data-saver" => Ok(Some("m4a")),
+        "opus-160" | "opus-96" => Ok(Some("opus")),
+        _ => bail!("unknown distribution quality profile {quality}"),
+    }
+}
+
+fn distribution_relative_path(
+    artist: &str,
+    album: &str,
+    title: &str,
+    disc_number: Option<i64>,
+    track_number: Option<i64>,
+    extension: &str,
+) -> String {
+    let artist = safe_distribution_path_component(artist, "Unknown Artist");
+    let album = safe_distribution_path_component(album, "Unknown Album");
+    let title = safe_distribution_path_component(title, "Unknown Track");
+    let extension = extension
+        .chars()
+        .filter(|value| value.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let extension = if extension.is_empty() {
+        "audio".to_string()
+    } else {
+        extension
+    };
+    let prefix = match (disc_number, track_number) {
+        (Some(disc), Some(track)) if disc > 1 => format!("{disc}-{track:02}"),
+        (_, Some(track)) => format!("{track:02}"),
+        _ => "00".to_string(),
+    };
+    format!("{artist}/{album}/{prefix} - {title}.{extension}")
+}
+
+fn safe_distribution_path_component(value: &str, fallback: &str) -> String {
+    let mut safe = value
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    safe = safe.trim().trim_matches('.').trim().to_string();
+    if safe.is_empty() {
+        safe = fallback.to_string();
+    }
+    if safe.chars().count() > 120 {
+        safe = safe.chars().take(120).collect();
+    }
+    let reserved = safe
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if matches!(
+        reserved.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        safe.insert(0, '_');
+    }
+    safe
+}
+
+fn client_track_manifest_to_ingest(
+    metadata: &ClientTrackManifest,
+    relative_path: &str,
+) -> TrackIngest {
+    let fallback_title = Path::new(relative_path)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Unknown track")
+        .to_string();
+    TrackIngest {
+        title: if metadata.title.trim().is_empty() {
+            fallback_title
+        } else {
+            metadata.title.trim().to_string()
+        },
+        sort_title: metadata.sort_title.clone(),
+        subtitle: metadata.subtitle.clone(),
+        album: metadata.album.clone(),
+        track_artists: metadata.track_artists.clone(),
+        album_artists: metadata.album_artists.clone(),
+        composers: metadata.composers.clone(),
+        lyricists: metadata.lyricists.clone(),
+        genres: metadata.genres.clone(),
+        disc_number: metadata.disc_number,
+        disc_total: metadata.disc_total,
+        track_number: metadata.track_number,
+        track_total: metadata.track_total,
+        duration_ms: metadata.duration_ms,
+        date: metadata.date.clone(),
+        year: metadata.year,
+        bpm: metadata.bpm,
+        comment: metadata.comment.clone(),
+        lyrics: metadata.lyrics.clone(),
+        lyrics_kind: metadata.lyrics_kind.clone(),
+        tag_rating: metadata.tag_rating,
+        tag_rating_scale: metadata.tag_rating_scale,
+    }
+}
+
+fn stable_shadow_segment(value: &str) -> String {
+    format!("{:x}", Sha384::digest(value.as_bytes()))
 }
 
 const TRACK_METADATA_FIELDS: &[(&str, &str, &str, &str)] = &[
@@ -779,6 +3067,426 @@ async fn upsert_track(
 
     rebuild_track_search_row(pool, track_id).await?;
     Ok(track_id)
+}
+
+async fn ensure_track_media_graph(
+    pool: &DbPool,
+    track_id: i64,
+    file_id: i64,
+    file: &FileIngest,
+    track: &TrackIngest,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    let release_id = ensure_release_edition_for_track(pool, track_id, &now).await?;
+    let existing = sqlx::query(
+        r#"
+        SELECT
+            links.release_track_id,
+            links.match_kind,
+            rt.recording_id,
+            recording.work_id,
+            (
+                SELECT master.id
+                FROM release_track_media_variants relation
+                JOIN media_variants variant ON variant.id = relation.media_variant_id
+                JOIN audio_masters master ON master.id = variant.audio_master_id
+                WHERE relation.release_track_id = rt.id
+                ORDER BY relation.is_preferred DESC, variant.id
+                LIMIT 1
+            ) AS audio_master_id,
+            (
+                SELECT replica.media_variant_id
+                FROM media_replicas replica
+                WHERE replica.file_id = ?2
+                LIMIT 1
+            ) AS media_variant_id
+        FROM legacy_track_catalog_links links
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        WHERE links.track_id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let recording_kind = inferred_recording_kind(track.subtitle.as_deref());
+    let mastering_kind = inferred_mastering_kind(track.subtitle.as_deref());
+    let master_label = track
+        .subtitle
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Library source");
+
+    if let Some(existing) = existing {
+        let release_track_id: i64 = existing.try_get("release_track_id")?;
+        let match_kind: String = existing.try_get("match_kind")?;
+        let recording_id: i64 = existing.try_get("recording_id")?;
+        let work_id: i64 = existing.try_get("work_id")?;
+        let audio_master_id: Option<i64> = existing.try_get("audio_master_id")?;
+        let media_variant_id: Option<i64> = existing.try_get("media_variant_id")?;
+
+        // A file-seeded recording belongs to this release track, so tag edits may
+        // update it. Once several releases are explicitly linked to a confirmed
+        // recording, rescanning one release must not rewrite their shared identity.
+        if match_kind != "confirmed_recording" {
+            sqlx::query(
+                "UPDATE catalog_works SET title = ?1, normalized_title = ?2, updated_at = ?3 WHERE id = ?4",
+            )
+            .bind(&track.title)
+            .bind(normalize_text(&track.title))
+            .bind(&now)
+            .bind(work_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE catalog_recordings
+                SET title = ?1, version_title = ?2, recording_kind = ?3,
+                    duration_ms = ?4, updated_at = ?5
+                WHERE id = ?6
+                "#,
+            )
+            .bind(&track.title)
+            .bind(&track.subtitle)
+            .bind(recording_kind)
+            .bind(track.duration_ms)
+            .bind(&now)
+            .bind(recording_id)
+            .execute(pool)
+            .await?;
+        }
+        sqlx::query(
+            r#"
+            UPDATE release_tracks
+            SET release_id = ?1, title = ?2, disc_number = ?3,
+                track_number = ?4, duration_ms = ?5, updated_at = ?6
+            WHERE id = ?7
+            "#,
+        )
+        .bind(release_id)
+        .bind(&track.title)
+        .bind(track.disc_number)
+        .bind(track.track_number)
+        .bind(track.duration_ms)
+        .bind(&now)
+        .bind(release_track_id)
+        .execute(pool)
+        .await?;
+        if let Some(audio_master_id) = audio_master_id {
+            sqlx::query(
+                r#"
+                UPDATE audio_masters
+                SET label = ?1, mastering_kind = ?2, release_year = ?3, updated_at = ?4
+                WHERE id = ?5
+                "#,
+            )
+            .bind(master_label)
+            .bind(mastering_kind)
+            .bind(track.year)
+            .bind(&now)
+            .bind(audio_master_id)
+            .execute(pool)
+            .await?;
+        }
+        if let Some(media_variant_id) = media_variant_id {
+            update_media_variant(pool, media_variant_id, file, track.duration_ms, &now).await?;
+            sqlx::query(
+                r#"
+                UPDATE media_replicas
+                SET library_root_id = ?1, availability_state = 'ready',
+                    last_verified_at = ?2, updated_at = ?2
+                WHERE file_id = ?3
+                "#,
+            )
+            .bind(file.library_root_id)
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+        }
+        return Ok(());
+    }
+
+    let work_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO catalog_works (
+            global_id, title, normalized_title, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?4)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&track.title)
+    .bind(normalize_text(&track.title))
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    let recording_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO catalog_recordings (
+            global_id, work_id, title, version_title, recording_kind,
+            duration_ms, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(work_id)
+    .bind(&track.title)
+    .bind(&track.subtitle)
+    .bind(recording_kind)
+    .bind(track.duration_ms)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    let release_track_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO release_tracks (
+            global_id, release_id, recording_id, title, disc_number,
+            track_number, duration_ms, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(release_id)
+    .bind(recording_id)
+    .bind(&track.title)
+    .bind(track.disc_number)
+    .bind(track.track_number)
+    .bind(track.duration_ms)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO legacy_track_catalog_links (
+            track_id, release_track_id, match_kind, match_confidence,
+            created_at, updated_at
+        )
+        VALUES (?1, ?2, 'file_seeded', 1.0, ?3, ?3)
+        "#,
+    )
+    .bind(track_id)
+    .bind(release_track_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+
+    let audio_master_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO audio_masters (
+            global_id, recording_id, label, mastering_kind, release_year,
+            created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(recording_id)
+    .bind(master_label)
+    .bind(mastering_kind)
+    .bind(track.year)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    let media_variant_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO media_variants (
+            global_id, audio_master_id, variant_key, codec, container,
+            bitrate, sample_rate, bit_depth, channels, duration_ms,
+            quick_hash, created_at, updated_at
+        )
+        VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12
+        )
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(audio_master_id)
+    .bind(format!("file:{file_id}"))
+    .bind(&file.codec)
+    .bind(&file.extension)
+    .bind(file.bitrate)
+    .bind(file.sample_rate)
+    .bind(file.bit_depth)
+    .bind(file.channels)
+    .bind(file.duration_ms.or(track.duration_ms))
+    .bind(&file.quick_hash)
+    .bind(&now)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO release_track_media_variants (
+            release_track_id, media_variant_id, relation_kind, is_preferred, created_at
+        )
+        VALUES (?1, ?2, 'exact', 1, ?3)
+        "#,
+    )
+    .bind(release_track_id)
+    .bind(media_variant_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO media_replicas (
+            media_variant_id, file_id, library_root_id, source_kind,
+            availability_state, is_primary, last_verified_at, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, 'core', 'ready', 1, ?4, ?4, ?4)
+        "#,
+    )
+    .bind(media_variant_id)
+    .bind(file_id)
+    .bind(file.library_root_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn ensure_release_edition_for_track(
+    pool: &DbPool,
+    track_id: i64,
+    now: &str,
+) -> Result<Option<i64>> {
+    let album = sqlx::query(
+        r#"
+        SELECT al.id, al.title
+        FROM tracks t
+        JOIN albums al ON al.id = t.album_id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(album) = album else {
+        return Ok(None);
+    };
+    let album_id: i64 = album.try_get("id")?;
+    let title: String = album.try_get("title")?;
+    sqlx::query(
+        r#"
+        INSERT INTO release_editions (
+            global_id, album_id, edition_title, edition_kind, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, 'album', ?4, ?4)
+        ON CONFLICT(album_id) DO UPDATE SET
+            edition_title = excluded.edition_title,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(album_id)
+    .bind(title)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(Some(
+        sqlx::query_scalar("SELECT id FROM release_editions WHERE album_id = ?1")
+            .bind(album_id)
+            .fetch_one(pool)
+            .await?,
+    ))
+}
+
+async fn update_media_variant(
+    pool: &DbPool,
+    media_variant_id: i64,
+    file: &FileIngest,
+    track_duration_ms: Option<i64>,
+    now: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE media_variants
+        SET codec = ?1, container = ?2, bitrate = ?3, sample_rate = ?4,
+            bit_depth = ?5, channels = ?6, duration_ms = ?7,
+            quick_hash = ?8, updated_at = ?9
+        WHERE id = ?10
+        "#,
+    )
+    .bind(&file.codec)
+    .bind(&file.extension)
+    .bind(file.bitrate)
+    .bind(file.sample_rate)
+    .bind(file.bit_depth)
+    .bind(file.channels)
+    .bind(file.duration_ms.or(track_duration_ms))
+    .bind(&file.quick_hash)
+    .bind(now)
+    .bind(media_variant_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn file_ingest_by_id(pool: &DbPool, file_id: i64) -> Result<FileIngest> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            library_root_id, path, relative_path, extension, size_bytes,
+            modified_at, quick_hash, scan_status, scan_message, codec,
+            sample_rate, channels, duration_ms, bitrate, bit_depth
+        FROM files
+        WHERE id = ?1
+        "#,
+    )
+    .bind(file_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(FileIngest {
+        library_root_id: row.try_get("library_root_id")?,
+        path: row.try_get("path")?,
+        relative_path: row.try_get("relative_path")?,
+        extension: row.try_get("extension")?,
+        size_bytes: row.try_get("size_bytes")?,
+        modified_at: row.try_get("modified_at")?,
+        quick_hash: row.try_get("quick_hash")?,
+        scan_status: row.try_get("scan_status")?,
+        scan_message: row.try_get("scan_message")?,
+        codec: row.try_get("codec")?,
+        sample_rate: row.try_get("sample_rate")?,
+        channels: row.try_get("channels")?,
+        duration_ms: row.try_get("duration_ms")?,
+        bitrate: row.try_get("bitrate")?,
+        bit_depth: row.try_get("bit_depth")?,
+    })
+}
+
+fn inferred_recording_kind(subtitle: Option<&str>) -> &'static str {
+    let subtitle = subtitle.unwrap_or_default().to_ascii_lowercase();
+    if subtitle.contains("live") || subtitle.contains("现场") {
+        "live"
+    } else if subtitle.contains("acoustic") || subtitle.contains("不插电") {
+        "acoustic"
+    } else if subtitle.contains("demo") {
+        "demo"
+    } else {
+        "studio"
+    }
+}
+
+fn inferred_mastering_kind(subtitle: Option<&str>) -> &'static str {
+    let subtitle = subtitle.unwrap_or_default().to_ascii_lowercase();
+    if subtitle.contains("remaster") || subtitle.contains("重制") {
+        "remaster"
+    } else if subtitle.contains("remix") {
+        "remix"
+    } else {
+        "unknown"
+    }
 }
 
 async fn upsert_artist(pool: &DbPool, name: &str) -> Result<i64> {
@@ -2087,6 +4795,566 @@ pub async fn album_detail(pool: &DbPool, album_id: i64) -> Result<AlbumDetail> {
     })
 }
 
+pub async fn track_media_profile(
+    pool: &DbPool,
+    track_id: i64,
+) -> Result<Option<TrackMediaProfile>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            rt.id AS release_track_id,
+            work.id AS work_id,
+            work.global_id AS work_global_id,
+            work.title AS work_title,
+            work.disambiguation AS work_disambiguation,
+            recording.id AS recording_id,
+            recording.global_id AS recording_global_id,
+            recording.title AS recording_title,
+            recording.version_title AS recording_version_title,
+            recording.recording_kind,
+            recording.duration_ms AS recording_duration_ms,
+            release.id AS release_id,
+            release.global_id AS release_global_id,
+            release.album_id AS release_album_id,
+            album.title AS release_title,
+            release.edition_title AS release_edition_title,
+            release.edition_kind AS release_edition_kind,
+            album.date AS release_date,
+            album.year AS release_year
+        FROM legacy_track_catalog_links links
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        JOIN catalog_works work ON work.id = recording.work_id
+        LEFT JOIN release_editions release ON release.id = rt.release_id
+        LEFT JOIN albums album ON album.id = release.album_id
+        WHERE links.track_id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let release_track_id: i64 = row.try_get("release_track_id")?;
+    let recording_id: i64 = row.try_get("recording_id")?;
+    let work = CatalogWorkSummary {
+        id: row.try_get("work_id")?,
+        global_id: row.try_get("work_global_id")?,
+        title: row.try_get("work_title")?,
+        disambiguation: row.try_get("work_disambiguation")?,
+    };
+    let recording = CatalogRecordingSummary {
+        id: recording_id,
+        global_id: row.try_get("recording_global_id")?,
+        title: row.try_get("recording_title")?,
+        version_title: row.try_get("recording_version_title")?,
+        recording_kind: row.try_get("recording_kind")?,
+        duration_ms: row.try_get("recording_duration_ms")?,
+    };
+    let release = release_edition_from_row(&row)?;
+
+    let variant_rows = sqlx::query(
+        r#"
+        SELECT
+            variant.id,
+            variant.global_id,
+            relation.relation_kind,
+            relation.is_preferred,
+            variant.codec,
+            variant.container,
+            variant.bitrate,
+            variant.sample_rate,
+            variant.bit_depth,
+            variant.channels,
+            variant.duration_ms,
+            variant.content_hash,
+            master.id AS master_id,
+            master.global_id AS master_global_id,
+            master.label AS master_label,
+            master.mastering_kind,
+            master.release_year AS master_release_year
+        FROM release_track_media_variants relation
+        JOIN media_variants variant ON variant.id = relation.media_variant_id
+        JOIN audio_masters master ON master.id = variant.audio_master_id
+        WHERE relation.release_track_id = ?1
+        ORDER BY relation.is_preferred DESC,
+                 COALESCE(variant.bit_depth, 0) DESC,
+                 COALESCE(variant.sample_rate, 0) DESC,
+                 COALESCE(variant.bitrate, 0) DESC,
+                 variant.id
+        "#,
+    )
+    .bind(release_track_id)
+    .fetch_all(pool)
+    .await?;
+    let mut variants = Vec::with_capacity(variant_rows.len());
+    for variant_row in variant_rows {
+        let variant_id: i64 = variant_row.try_get("id")?;
+        let replica_rows = sqlx::query(
+            r#"
+            SELECT
+                replica.id,
+                replica.file_id,
+                replica.device_id,
+                COALESCE(device.name, 'Core local') AS device_name,
+                replica.source_kind,
+                CASE
+                    WHEN file.deleted_at IS NOT NULL THEN 'missing'
+                    ELSE replica.availability_state
+                END AS availability_state,
+                replica.is_primary,
+                file.relative_path,
+                root.external_id AS root_external_id,
+                file.client_file_id,
+                replica.last_verified_at
+            FROM media_replicas replica
+            LEFT JOIN devices device ON device.id = replica.device_id
+            LEFT JOIN files file ON file.id = replica.file_id
+            LEFT JOIN library_roots root ON root.id = replica.library_root_id
+            WHERE replica.media_variant_id = ?1
+            ORDER BY replica.is_primary DESC, device_name, replica.id
+            "#,
+        )
+        .bind(variant_id)
+        .fetch_all(pool)
+        .await?;
+        let replicas = replica_rows
+            .into_iter()
+            .map(|replica_row| {
+                let last_verified_at: Option<String> = replica_row.try_get("last_verified_at")?;
+                Ok(MediaReplicaSummary {
+                    id: replica_row.try_get("id")?,
+                    file_id: replica_row.try_get("file_id")?,
+                    device_id: replica_row.try_get("device_id")?,
+                    device_name: replica_row.try_get("device_name")?,
+                    source_kind: replica_row.try_get("source_kind")?,
+                    availability_state: replica_row.try_get("availability_state")?,
+                    is_primary: replica_row.try_get::<i64, _>("is_primary")? != 0,
+                    relative_path: replica_row.try_get("relative_path")?,
+                    root_external_id: replica_row.try_get("root_external_id")?,
+                    client_file_id: replica_row.try_get("client_file_id")?,
+                    last_verified_at: last_verified_at.map(parse_datetime).transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        variants.push(MediaVariantSummary {
+            id: variant_id,
+            global_id: variant_row.try_get("global_id")?,
+            relation_kind: variant_row.try_get("relation_kind")?,
+            is_preferred: variant_row.try_get::<i64, _>("is_preferred")? != 0,
+            codec: variant_row.try_get("codec")?,
+            container: variant_row.try_get("container")?,
+            bitrate: variant_row.try_get("bitrate")?,
+            sample_rate: variant_row.try_get("sample_rate")?,
+            bit_depth: variant_row.try_get("bit_depth")?,
+            channels: variant_row.try_get("channels")?,
+            duration_ms: variant_row.try_get("duration_ms")?,
+            content_hash: variant_row.try_get("content_hash")?,
+            master: AudioMasterSummary {
+                id: variant_row.try_get("master_id")?,
+                global_id: variant_row.try_get("master_global_id")?,
+                label: variant_row.try_get("master_label")?,
+                mastering_kind: variant_row.try_get("mastering_kind")?,
+                release_year: variant_row.try_get("master_release_year")?,
+            },
+            replicas,
+        });
+    }
+
+    let related_rows = sqlx::query(
+        r#"
+        SELECT
+            rt.id AS related_release_track_id,
+            MIN(links.track_id) AS legacy_track_id,
+            rt.title,
+            rt.disc_number,
+            rt.track_number,
+            release.id AS release_id,
+            release.global_id AS release_global_id,
+            release.album_id AS release_album_id,
+            album.title AS release_title,
+            release.edition_title AS release_edition_title,
+            release.edition_kind AS release_edition_kind,
+            album.date AS release_date,
+            album.year AS release_year
+        FROM release_tracks rt
+        LEFT JOIN legacy_track_catalog_links links ON links.release_track_id = rt.id
+        LEFT JOIN release_editions release ON release.id = rt.release_id
+        LEFT JOIN albums album ON album.id = release.album_id
+        WHERE rt.recording_id = ?1
+        GROUP BY rt.id
+        ORDER BY COALESCE(album.year, 0), COALESCE(album.title, ''), rt.disc_number, rt.track_number
+        "#,
+    )
+    .bind(recording_id)
+    .fetch_all(pool)
+    .await?;
+    let related_release_tracks = related_rows
+        .into_iter()
+        .map(|related_row| {
+            let related_release_track_id: i64 = related_row.try_get("related_release_track_id")?;
+            Ok(RelatedReleaseTrackSummary {
+                release_track_id: related_release_track_id,
+                legacy_track_id: related_row.try_get("legacy_track_id")?,
+                release: release_edition_from_row(&related_row)?,
+                title: related_row.try_get("title")?,
+                disc_number: related_row.try_get("disc_number")?,
+                track_number: related_row.try_get("track_number")?,
+                is_current: related_release_track_id == release_track_id,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(TrackMediaProfile {
+        release_track_id,
+        work,
+        recording,
+        release,
+        variants,
+        related_release_tracks,
+    }))
+}
+
+pub async fn recording_link_candidates(
+    pool: &DbPool,
+    track_id: i64,
+    limit: u32,
+) -> Result<Vec<RecordingLinkCandidate>> {
+    let target = sqlx::query(
+        r#"
+        SELECT
+            t.title,
+            t.duration_ms,
+            rt.recording_id,
+            recording.recording_kind,
+            COALESCE(GROUP_CONCAT(artist.name, char(31)), '') AS artists
+        FROM tracks t
+        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists artist ON artist.id = ta.artist_id
+        WHERE t.id = ?1
+        GROUP BY t.id
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await?;
+    let target_title: String = target.try_get("title")?;
+    let target_duration: Option<i64> = target.try_get("duration_ms")?;
+    let target_recording_id: i64 = target.try_get("recording_id")?;
+    let target_recording_kind: String = target.try_get("recording_kind")?;
+    let target_artists = normalized_artist_names(&target.try_get::<String, _>("artists")?);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            t.id AS track_id,
+            rt.id AS release_track_id,
+            rt.recording_id,
+            recording.recording_kind,
+            t.title,
+            t.duration_ms,
+            t.album_id,
+            album.title AS album_title,
+            album.year,
+            t.disc_number,
+            t.track_number,
+            COALESCE(GROUP_CONCAT(artist.name, char(31)), '') AS artists,
+            COALESCE(GROUP_CONCAT(DISTINCT artist.name), NULL) AS artist_display
+        FROM tracks t
+        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        LEFT JOIN albums album ON album.id = t.album_id
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists artist ON artist.id = ta.artist_id
+        WHERE t.id <> ?1
+          AND lower(trim(t.title)) = lower(trim(?2))
+          AND (
+              ?3 IS NULL
+              OR t.duration_ms IS NULL
+              OR ABS(t.duration_ms - ?3) <= 15000
+          )
+        GROUP BY t.id
+        LIMIT 250
+        "#,
+    )
+    .bind(track_id)
+    .bind(&target_title)
+    .bind(target_duration)
+    .fetch_all(pool)
+    .await?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let recording_id: i64 = row.try_get("recording_id")?;
+        let duration_ms: Option<i64> = row.try_get("duration_ms")?;
+        let recording_kind: String = row.try_get("recording_kind")?;
+        let artists = normalized_artist_names(&row.try_get::<String, _>("artists")?);
+        let mut confidence = 0.45_f32;
+        let mut reasons = vec!["same_title".to_string()];
+        if !target_artists.is_empty()
+            && target_artists.iter().any(|artist| artists.contains(artist))
+        {
+            confidence += 0.25;
+            reasons.push("same_primary_artist".to_string());
+        }
+        if let (Some(target_duration), Some(duration_ms)) = (target_duration, duration_ms) {
+            let difference = (target_duration - duration_ms).abs();
+            if difference <= 1_000 {
+                confidence += 0.2;
+                reasons.push("duration_within_1s".to_string());
+            } else if difference <= 3_000 {
+                confidence += 0.15;
+                reasons.push("duration_within_3s".to_string());
+            } else if difference <= 10_000 {
+                confidence += 0.08;
+                reasons.push("duration_within_10s".to_string());
+            }
+        }
+        if recording_kind == target_recording_kind {
+            confidence += 0.1;
+            reasons.push("same_recording_kind".to_string());
+        }
+        let already_linked = recording_id == target_recording_id;
+        if already_linked {
+            confidence = 1.0;
+            reasons.push("already_linked".to_string());
+        }
+        if confidence < 0.55 {
+            continue;
+        }
+        candidates.push(RecordingLinkCandidate {
+            track_id: row.try_get("track_id")?,
+            release_track_id: row.try_get("release_track_id")?,
+            recording_id,
+            title: row.try_get("title")?,
+            artist_display: row.try_get("artist_display")?,
+            album_id: row.try_get("album_id")?,
+            album_title: row.try_get("album_title")?,
+            year: row.try_get("year")?,
+            disc_number: row.try_get("disc_number")?,
+            track_number: row.try_get("track_number")?,
+            duration_ms,
+            already_linked,
+            confidence: confidence.min(1.0),
+            reasons,
+        });
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .already_linked
+            .cmp(&left.already_linked)
+            .then_with(|| {
+                right
+                    .confidence
+                    .partial_cmp(&left.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.album_title.cmp(&right.album_title))
+            .then_with(|| left.track_id.cmp(&right.track_id))
+    });
+    candidates.truncate(limit.clamp(1, 100) as usize);
+    Ok(candidates)
+}
+
+fn normalized_artist_names(value: &str) -> Vec<String> {
+    let mut names = value
+        .split('\u{1f}')
+        .map(normalize_text)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub async fn link_track_to_recording(
+    pool: &DbPool,
+    track_id: i64,
+    source_track_id: i64,
+) -> Result<TrackMediaProfile> {
+    if track_id == source_track_id {
+        bail!("a release track cannot be linked to itself");
+    }
+    let mut transaction = pool.begin().await?;
+    let source_recording_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT rt.recording_id
+        FROM legacy_track_catalog_links links
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        WHERE links.track_id = ?1
+        "#,
+    )
+    .bind(source_track_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let target_release_track_id: i64 = sqlx::query_scalar(
+        "SELECT release_track_id FROM legacy_track_catalog_links WHERE track_id = ?1",
+    )
+    .bind(track_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("UPDATE release_tracks SET recording_id = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(source_recording_id)
+        .bind(&now)
+        .bind(target_release_track_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE audio_masters
+        SET recording_id = ?1, updated_at = ?2
+        WHERE id IN (
+            SELECT variant.audio_master_id
+            FROM release_track_media_variants relation
+            JOIN media_variants variant ON variant.id = relation.media_variant_id
+            WHERE relation.release_track_id = ?3
+        )
+        "#,
+    )
+    .bind(source_recording_id)
+    .bind(&now)
+    .bind(target_release_track_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE legacy_track_catalog_links
+        SET match_kind = 'confirmed_recording', match_confidence = 1.0, updated_at = ?1
+        WHERE track_id = ?2
+        "#,
+    )
+    .bind(&now)
+    .bind(track_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    track_media_profile(pool, track_id)
+        .await?
+        .context("track media profile is missing after recording link")
+}
+
+pub async fn detach_track_recording(pool: &DbPool, track_id: i64) -> Result<TrackMediaProfile> {
+    let mut transaction = pool.begin().await?;
+    let identity = sqlx::query(
+        r#"
+        SELECT
+            links.release_track_id,
+            t.title,
+            t.subtitle,
+            t.duration_ms
+        FROM tracks t
+        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let release_track_id: i64 = identity.try_get("release_track_id")?;
+    let title: String = identity.try_get("title")?;
+    let subtitle: Option<String> = identity.try_get("subtitle")?;
+    let duration_ms: Option<i64> = identity.try_get("duration_ms")?;
+    let now = Utc::now().to_rfc3339();
+    let work_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO catalog_works (
+            global_id, title, normalized_title, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?4)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&title)
+    .bind(normalize_text(&title))
+    .bind(&now)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let recording_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO catalog_recordings (
+            global_id, work_id, title, version_title, recording_kind,
+            duration_ms, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(work_id)
+    .bind(&title)
+    .bind(&subtitle)
+    .bind(inferred_recording_kind(subtitle.as_deref()))
+    .bind(duration_ms)
+    .bind(&now)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE release_tracks SET recording_id = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(recording_id)
+        .bind(&now)
+        .bind(release_track_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE audio_masters
+        SET recording_id = ?1, updated_at = ?2
+        WHERE id IN (
+            SELECT variant.audio_master_id
+            FROM release_track_media_variants relation
+            JOIN media_variants variant ON variant.id = relation.media_variant_id
+            WHERE relation.release_track_id = ?3
+        )
+        "#,
+    )
+    .bind(recording_id)
+    .bind(&now)
+    .bind(release_track_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE legacy_track_catalog_links
+        SET match_kind = 'detached', match_confidence = 1.0, updated_at = ?1
+        WHERE track_id = ?2
+        "#,
+    )
+    .bind(&now)
+    .bind(track_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    track_media_profile(pool, track_id)
+        .await?
+        .context("track media profile is missing after recording detach")
+}
+
+fn release_edition_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Option<ReleaseEditionSummary>> {
+    let id: Option<i64> = row.try_get("release_id")?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    Ok(Some(ReleaseEditionSummary {
+        id,
+        global_id: row.try_get("release_global_id")?,
+        album_id: row.try_get("release_album_id")?,
+        title: row.try_get("release_title")?,
+        edition_title: row.try_get("release_edition_title")?,
+        edition_kind: row.try_get("release_edition_kind")?,
+        date: row.try_get("release_date")?,
+        year: row.try_get("release_year")?,
+    }))
+}
+
 pub async fn track_detail(pool: &DbPool, track_id: i64) -> Result<TrackDetail> {
     let track_row = sqlx::query(track_select_sql("WHERE t.id = ?1 GROUP BY t.id").as_str())
         .bind(track_id)
@@ -2166,6 +5434,7 @@ pub async fn track_detail(pool: &DbPool, track_id: i64) -> Result<TrackDetail> {
         composers,
         lyricists,
         lyrics,
+        media: track_media_profile(pool, track_id).await?,
     })
 }
 
@@ -2468,7 +5737,9 @@ pub async fn update_track_metadata(
             .execute(pool)
             .await?;
     }
-    upsert_track(pool, file_id, library_root_id, &effective).await?;
+    let refreshed_track_id = upsert_track(pool, file_id, library_root_id, &effective).await?;
+    let stored_file = file_ingest_by_id(pool, file_id).await?;
+    ensure_track_media_graph(pool, refreshed_track_id, file_id, &stored_file, &effective).await?;
 
     if let Some(lyrics) = &update.lyrics {
         let kind = if lyrics.kind.trim().is_empty() {
@@ -4069,6 +7340,130 @@ mod tests {
         let _ = tokio::fs::remove_file(path.with_extension("sqlite-wal")).await;
     }
 
+    async fn ingest_test_track(pool: &DbPool, filename: &str, album: &str, title: &str) -> i64 {
+        let now = Utc::now().to_rfc3339();
+        let file = FileIngest {
+            library_root_id: 1,
+            path: format!("/music/{filename}"),
+            relative_path: filename.to_string(),
+            extension: "flac".to_string(),
+            size_bytes: 10_000,
+            modified_at: now,
+            quick_hash: Some(format!("quick-{filename}")),
+            scan_status: "ok".to_string(),
+            scan_message: None,
+            codec: Some("flac".to_string()),
+            sample_rate: Some(96_000),
+            channels: Some(2),
+            duration_ms: Some(240_000),
+            bitrate: Some(2_400_000),
+            bit_depth: Some(24),
+        };
+        let metadata = TrackIngest {
+            title: title.to_string(),
+            album: Some(album.to_string()),
+            track_artists: vec!["Artist".to_string()],
+            album_artists: vec!["Artist".to_string()],
+            disc_number: Some(1),
+            track_number: Some(1),
+            duration_ms: Some(240_000),
+            year: Some(2020),
+            ..Default::default()
+        };
+        let file_id = upsert_scanned_file(pool, &file, Some(&metadata))
+            .await
+            .expect("ingest track");
+        track_id_for_file(pool, file_id)
+            .await
+            .expect("find track")
+            .expect("track exists")
+    }
+
+    #[tokio::test]
+    async fn release_tracks_remain_in_each_album_when_recordings_are_related() {
+        let (pool, path) = test_pool().await;
+        let original_track_id =
+            ingest_test_track(&pool, "original.flac", "Original Album", "Shared Song").await;
+        let compilation_track_id =
+            ingest_test_track(&pool, "compilation.flac", "Compilation", "Shared Song").await;
+
+        let original = track_media_profile(&pool, original_track_id)
+            .await
+            .expect("load original media")
+            .expect("original media exists");
+        let compilation = track_media_profile(&pool, compilation_track_id)
+            .await
+            .expect("load compilation media")
+            .expect("compilation media exists");
+        assert_ne!(original.release_track_id, compilation.release_track_id);
+        assert_ne!(original.recording.id, compilation.recording.id);
+        assert_eq!(original.variants.len(), 1);
+        assert_eq!(original.variants[0].replicas.len(), 1);
+        assert_eq!(original.variants[0].replicas[0].device_name, "Core local");
+
+        let candidates = recording_link_candidates(&pool, compilation_track_id, 10)
+            .await
+            .expect("load candidates");
+        let original_candidate = candidates
+            .iter()
+            .find(|candidate| candidate.track_id == original_track_id)
+            .expect("original is a candidate");
+        assert!(original_candidate.confidence >= 0.9);
+        assert!(!original_candidate.already_linked);
+
+        // Confirming that both release tracks use the same recording changes only
+        // their relationship; neither album row nor either release-track slot is
+        // removed.
+        let linked = link_track_to_recording(&pool, compilation_track_id, original_track_id)
+            .await
+            .expect("relate recording");
+        assert_eq!(linked.recording.id, original.recording.id);
+        assert_eq!(linked.related_release_tracks.len(), 2);
+
+        let related = track_media_profile(&pool, original_track_id)
+            .await
+            .expect("reload related media")
+            .expect("related media exists");
+        assert_eq!(related.related_release_tracks.len(), 2);
+
+        let original_album =
+            album_detail(&pool, original.release.expect("release").album_id.unwrap())
+                .await
+                .expect("original album");
+        let compilation_album = album_detail(
+            &pool,
+            compilation.release.expect("release").album_id.unwrap(),
+        )
+        .await
+        .expect("compilation album");
+        assert_eq!(original_album.tracks.len(), 1);
+        assert_eq!(compilation_album.tracks.len(), 1);
+        assert_eq!(original_album.tracks[0].id, original_track_id);
+        assert_eq!(compilation_album.tracks[0].id, compilation_track_id);
+
+        // A confirmed relationship remains shared after rescanning either file.
+        ingest_test_track(&pool, "compilation.flac", "Compilation", "Shared Song").await;
+        let rescanned = track_media_profile(&pool, compilation_track_id)
+            .await
+            .expect("load rescanned media")
+            .expect("rescanned media exists");
+        assert_eq!(rescanned.recording.id, original.recording.id);
+        assert_eq!(rescanned.related_release_tracks.len(), 2);
+
+        let detached = detach_track_recording(&pool, compilation_track_id)
+            .await
+            .expect("detach recording");
+        assert_ne!(detached.recording.id, original.recording.id);
+        assert_eq!(detached.related_release_tracks.len(), 1);
+        let original_after_detach = track_media_profile(&pool, original_track_id)
+            .await
+            .expect("reload original")
+            .expect("original exists");
+        assert_eq!(original_after_detach.related_release_tracks.len(), 1);
+
+        close_test_pool(pool, path).await;
+    }
+
     #[tokio::test]
     async fn queue_mutations_keep_current_track_and_revision() {
         let (pool, path) = test_pool().await;
@@ -4447,6 +7842,402 @@ mod tests {
         assert_eq!(
             restored_lyrics.detail.lyrics.as_ref().unwrap().source,
             "file"
+        );
+
+        close_test_pool(pool, path).await;
+    }
+
+    #[tokio::test]
+    async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
+        let (pool, path) = test_pool().await;
+        let make_manifest =
+            |device_id: &str, root_id: &str, scan_id: &str, complete: bool, include_file: bool| {
+                ClientLibraryManifestRequest {
+                    device_id: device_id.to_string(),
+                    device_name: format!("{device_id} player"),
+                    platform: Some("test".to_string()),
+                    root: protocol::ClientLibraryRootManifest {
+                        external_id: root_id.to_string(),
+                        display_name: format!("{device_id} music"),
+                        path_hint: Some(format!("/{device_id}/music")),
+                    },
+                    scan_id: scan_id.to_string(),
+                    complete,
+                    files: if include_file {
+                        vec![protocol::ClientLibraryFileManifest {
+                            external_id: "album/01-song.flac".to_string(),
+                            relative_path: "album/01-song.flac".to_string(),
+                            extension: "flac".to_string(),
+                            size_bytes: 4_096,
+                            modified_at: Utc::now(),
+                            quick_hash: Some("same-sampled-content".to_string()),
+                            content_hash: None,
+                            codec: Some("flac".to_string()),
+                            sample_rate: Some(96_000),
+                            channels: Some(2),
+                            duration_ms: Some(180_000),
+                            bitrate: Some(2_400_000),
+                            bit_depth: Some(24),
+                            metadata: ClientTrackManifest {
+                                title: "Song".to_string(),
+                                album: Some("Album".to_string()),
+                                track_artists: vec!["Artist".to_string()],
+                                album_artists: vec!["Artist".to_string()],
+                                track_number: Some(1),
+                                duration_ms: Some(180_000),
+                                ..Default::default()
+                            },
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                }
+            };
+
+        let first = upsert_client_library_manifest(
+            &pool,
+            &make_manifest("dev-a", "root-a", "a1", true, true),
+        )
+        .await
+        .expect("upload first client manifest");
+        assert_eq!(first.accepted_files, 1);
+        assert_eq!(first.missing_files, 0);
+        assert_eq!(first.bindings.len(), 1);
+
+        let tracks_after_first = list_tracks(&pool, 100, 0).await.expect("list tracks");
+        assert_eq!(tracks_after_first.len(), 4);
+        let client_track_id = tracks_after_first
+            .iter()
+            .find(|track| track.title == "Song")
+            .expect("client track")
+            .id;
+        assert_eq!(first.bindings[0].track_id, client_track_id);
+
+        upsert_client_library_manifest(&pool, &make_manifest("dev-b", "root-b", "b0", true, false))
+            .await
+            .expect("register empty destination client root");
+        let relayed_distribution = create_distribution_job(
+            &pool,
+            &protocol::CreateDistributionRequest {
+                target_device_id: "dev-b".to_string(),
+                target_root_external_id: "root-b".to_string(),
+                quality: "original".to_string(),
+                track_ids: vec![client_track_id],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create Client-sourced distribution");
+        assert_eq!(relayed_distribution.state, "awaiting_source");
+        assert!(claim_distribution_source_task(&pool, "dev-b")
+            .await
+            .expect("query wrong source client")
+            .is_none());
+        let source_task = claim_distribution_source_task(&pool, "dev-a")
+            .await
+            .expect("claim source upload")
+            .expect("Client source task");
+        assert_eq!(source_task.track_id, client_track_id);
+        assert_eq!(source_task.source_root_external_id, "root-a");
+        assert_eq!(source_task.source_relative_path, "album/01-song.flac");
+        assert_eq!(source_task.expected_size_bytes, 4_096);
+        let relayed = complete_distribution_source_task(
+            &pool,
+            &source_task.id,
+            "dev-a",
+            Path::new("/cache/client-source.flac"),
+            4_096,
+            "same-sampled-content",
+        )
+        .await
+        .expect("complete Client source upload");
+        assert_eq!(relayed.state, "queued");
+        let relayed_delivery = claim_distribution_task(&pool, "dev-b")
+            .await
+            .expect("claim relayed delivery")
+            .expect("relayed destination task");
+        let relayed_source = distribution_content_source(&pool, &relayed_delivery.id, "dev-b")
+            .await
+            .expect("relayed content source");
+        assert_eq!(relayed_source.path, "/cache/client-source.flac");
+        update_distribution_task(
+            &pool,
+            &relayed_delivery.id,
+            &protocol::DistributionTaskProgress {
+                device_id: "dev-b".to_string(),
+                state: "completed".to_string(),
+                transferred_bytes: 4_096,
+                retryable: false,
+                error: None,
+            },
+        )
+        .await
+        .expect("complete relayed delivery");
+
+        upsert_scanned_file(
+            &pool,
+            &FileIngest {
+                library_root_id: 1,
+                path: "/music/1.flac".to_string(),
+                relative_path: "1.flac".to_string(),
+                extension: "flac".to_string(),
+                size_bytes: 1024,
+                modified_at: Utc::now().to_rfc3339(),
+                quick_hash: Some("core-track-1".to_string()),
+                scan_status: "ready".to_string(),
+                scan_message: None,
+                codec: Some("flac".to_string()),
+                sample_rate: Some(48_000),
+                channels: Some(2),
+                duration_ms: Some(180_000),
+                bitrate: Some(1_000_000),
+                bit_depth: Some(24),
+            },
+            Some(&TrackIngest {
+                title: "Track 1".to_string(),
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("normalize Core source track");
+        let distribution = create_distribution_job(
+            &pool,
+            &protocol::CreateDistributionRequest {
+                target_device_id: "dev-a".to_string(),
+                target_root_external_id: "root-a".to_string(),
+                quality: "original".to_string(),
+                track_ids: vec![1],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create distribution");
+        assert_eq!(distribution.total_items, 1);
+        assert_eq!(distribution.state, "queued");
+        let task = claim_distribution_task(&pool, "dev-a")
+            .await
+            .expect("claim distribution")
+            .expect("pending distribution task");
+        assert_eq!(task.track_id, 1);
+        assert!(task.relative_path.ends_with(".flac"));
+        let source = distribution_content_source(&pool, &task.id, "dev-a")
+            .await
+            .expect("distribution source");
+        assert_eq!(source.extension, "flac");
+        let completed = update_distribution_task(
+            &pool,
+            &task.id,
+            &protocol::DistributionTaskProgress {
+                device_id: "dev-a".to_string(),
+                state: "completed".to_string(),
+                transferred_bytes: task.expected_size_bytes,
+                retryable: false,
+                error: None,
+            },
+        )
+        .await
+        .expect("complete distribution");
+        assert_eq!(completed.state, "completed");
+        assert_eq!(completed.completed_items, 1);
+        assert!(claim_distribution_task(&pool, "dev-a")
+            .await
+            .expect("claim after completion")
+            .is_none());
+        let transcoded_distribution = create_distribution_job(
+            &pool,
+            &protocol::CreateDistributionRequest {
+                target_device_id: "dev-a".to_string(),
+                target_root_external_id: "root-a".to_string(),
+                quality: "aac-256".to_string(),
+                track_ids: vec![1],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create transcoded distribution");
+        assert_eq!(transcoded_distribution.state, "preparing");
+        assert_eq!(transcoded_distribution.total_bytes, 0);
+        let transcode_task = claim_distribution_transcode_task(&pool)
+            .await
+            .expect("claim transcode")
+            .expect("pending transcode");
+        assert_eq!(transcode_task.quality, "aac-256");
+        let prepared = complete_distribution_transcode_task(
+            &pool,
+            &transcode_task.id,
+            Path::new("/cache/transcoded.m4a"),
+            "m4a",
+            512,
+            "transcoded-hash",
+        )
+        .await
+        .expect("complete transcode");
+        assert_eq!(prepared.state, "queued");
+        assert_eq!(prepared.total_bytes, 512);
+        let delivery = claim_distribution_task(&pool, "dev-a")
+            .await
+            .expect("claim transcoded delivery")
+            .expect("transcoded delivery");
+        assert_eq!(delivery.extension, "m4a");
+        assert_eq!(delivery.expected_size_bytes, 512);
+        assert_eq!(
+            delivery.expected_quick_hash.as_deref(),
+            Some("transcoded-hash")
+        );
+        let failed_distribution = create_distribution_job(
+            &pool,
+            &protocol::CreateDistributionRequest {
+                target_device_id: "dev-a".to_string(),
+                target_root_external_id: "root-a".to_string(),
+                quality: "aac-96".to_string(),
+                track_ids: vec![1],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create failing transcode distribution");
+        let failed_task = claim_distribution_transcode_task(&pool)
+            .await
+            .expect("claim failing transcode")
+            .expect("failing transcode task");
+        let failed = fail_distribution_transcode_task(
+            &pool,
+            &failed_task.id,
+            false,
+            "test transcode failure",
+        )
+        .await
+        .expect("record terminal transcode failure");
+        assert_eq!(failed.id, failed_distribution.id);
+        assert_eq!(failed.state, "completed_with_errors");
+        assert_eq!(failed.failed_items, 1);
+        assert_eq!(failed.error.as_deref(), Some("test transcode failure"));
+        assert!(create_distribution_job(
+            &pool,
+            &protocol::CreateDistributionRequest {
+                target_device_id: "dev-a".to_string(),
+                target_root_external_id: "root-a".to_string(),
+                quality: "arbitrary-shell-arguments".to_string(),
+                track_ids: vec![1],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("unknown transcoding profile must fail")
+        .to_string()
+        .contains("unknown distribution quality profile"));
+
+        let mutation_request = protocol::ClientMutationBatchRequest {
+            device_id: "dev-a".to_string(),
+            device_name: "Device A".to_string(),
+            platform: Some("test".to_string()),
+            mutations: vec![
+                protocol::ClientMutation {
+                    id: "favorite-1".to_string(),
+                    kind: "favorite".to_string(),
+                    track_id: client_track_id,
+                    occurred_at: Utc::now(),
+                    payload: serde_json::json!({"is_favorite": true}),
+                },
+                protocol::ClientMutation {
+                    id: "playback-1".to_string(),
+                    kind: "playback".to_string(),
+                    track_id: client_track_id,
+                    occurred_at: Utc::now(),
+                    payload: serde_json::json!({
+                        "started_at": Utc::now().to_rfc3339(),
+                        "ended_at": Utc::now().to_rfc3339(),
+                        "start_position_ms": 0,
+                        "end_position_ms": 120_000,
+                        "reason": "completed"
+                    }),
+                },
+            ],
+        };
+        let applied = apply_client_mutations(&pool, &mutation_request)
+            .await
+            .expect("apply offline mutations");
+        assert_eq!(applied.applied_ids.len(), 2);
+        let duplicate = apply_client_mutations(&pool, &mutation_request)
+            .await
+            .expect("reapply offline mutations");
+        assert_eq!(duplicate.duplicate_ids.len(), 2);
+        assert!(
+            track_detail(&pool, client_track_id)
+                .await
+                .expect("favorite detail")
+                .track
+                .is_favorite
+        );
+        assert_eq!(
+            list_playback_sessions(&pool, 20, 0, None, None)
+                .await
+                .expect("offline playback sessions")
+                .into_iter()
+                .filter(|session| session.track_id == client_track_id)
+                .count(),
+            1,
+            "idempotent replay must create exactly one playback session"
+        );
+
+        upsert_client_library_manifest(&pool, &make_manifest("dev-b", "root-b", "b1", true, true))
+            .await
+            .expect("upload exact copy from second client");
+        let tracks_after_second = list_tracks(&pool, 100, 0).await.expect("list tracks");
+        assert_eq!(
+            tracks_after_second.len(),
+            4,
+            "an exact copy must add a replica, not a duplicate catalog track"
+        );
+        let media = track_media_profile(&pool, client_track_id)
+            .await
+            .expect("load media")
+            .expect("media profile");
+        assert_eq!(media.variants.len(), 1);
+        assert_eq!(media.variants[0].replicas.len(), 2);
+        assert!(media.variants[0]
+            .replicas
+            .iter()
+            .any(|replica| replica.device_id.as_deref() == Some("dev-a")
+                && replica.root_external_id.as_deref() == Some("root-a")));
+        assert!(media.variants[0]
+            .replicas
+            .iter()
+            .any(|replica| replica.device_id.as_deref() == Some("dev-b")
+                && replica.root_external_id.as_deref() == Some("root-b")));
+
+        let reconciled = upsert_client_library_manifest(
+            &pool,
+            &make_manifest("dev-a", "root-a", "a2", true, false),
+        )
+        .await
+        .expect("reconcile removed file");
+        assert_eq!(reconciled.missing_files, 1);
+        let media = track_media_profile(&pool, client_track_id)
+            .await
+            .expect("load reconciled media")
+            .expect("media profile");
+        assert!(media.variants[0].replicas.iter().any(|replica| {
+            replica.device_id.as_deref() == Some("dev-a") && replica.availability_state == "missing"
+        }));
+        assert!(media.variants[0].replicas.iter().any(|replica| {
+            replica.device_id.as_deref() == Some("dev-b") && replica.availability_state == "ready"
+        }));
+
+        remove_client_library_root(&pool, "dev-b", "root-b")
+            .await
+            .expect("remove second client root");
+        let statuses = list_client_library_roots(&pool)
+            .await
+            .expect("list client roots");
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(
+            list_library_roots(&pool)
+                .await
+                .expect("list core roots")
+                .len(),
+            1,
+            "client-owned roots must not leak into Core scan settings"
         );
 
         close_test_pool(pool, path).await;

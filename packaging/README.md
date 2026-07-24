@@ -8,10 +8,10 @@
 
 - Android 客户端：Flutter APK，必要时也生成 AAB。
 - Windows 客户端：Flutter Windows release 目录压缩包。
-- Windows Core：`local-music-core.exe` 和 `local-music-core-daemon.exe` 压缩包。
+- Windows Core：Core 可执行文件和内置 FFmpeg/ffprobe 的压缩包。
 - Windows 安装程序：Inno Setup 生成的 `IntMusic-Windows-Setup.exe`。
 - macOS 客户端：Flutter macOS `IntMusic.app` 压缩包。
-- macOS Core：`local-music-core` 命令行二进制。
+- macOS/Linux Core：Core、内置 FFmpeg/ffprobe、许可证和对应源码归档。
 
 统一归档目录为：
 
@@ -51,6 +51,7 @@ Flutter 桌面构建受宿主系统限制：
 默认会构建：
 
 - `cargo build --release -p core-cli`
+- LGPL-only FFmpeg 和 ffprobe
 - `flutter build apk --release`
 - `flutter build appbundle --release`
 - `flutter build macos --release`
@@ -60,6 +61,7 @@ Flutter 桌面构建受宿主系统限制：
 ```bash
 ./scripts/build-release-artifacts.sh --skip-android
 ./scripts/build-release-artifacts.sh --skip-android-aab
+./scripts/build-release-artifacts.sh --skip-bundled-ffmpeg
 ./scripts/build-release-artifacts.sh --release-id IntMusic-1.0.0-20260707
 ./scripts/build-release-artifacts.sh --output /tmp/IntMusic-release
 ```
@@ -160,6 +162,39 @@ macOS 客户端连接局域网 Core 需要 App Sandbox 出站网络权限。项�
 
 Windows 安装器逻辑仍由 `scripts/build-windows-installer.ps1` 维护；统一发布脚本只负责调用它并收集产物。
 
+## 内置 FFmpeg
+
+Core 通过独立的 FFmpeg/ffprobe 进程完成分发转码，Flutter Client 不携带转码器。构建脚本固定使用 FFmpeg 8.1.2 源码及其 SHA-256，并使用不含 `--enable-gpl`、不含 `--enable-nonfree` 的配置进行编译。
+
+Unix/macOS 可以单独准备工具包：
+
+```bash
+./scripts/build-bundled-ffmpeg.sh \
+  --output "packaging/ffmpeg/macos-$(uname -m)"
+```
+
+Windows CI 使用 MSYS2 UCRT64 运行同一个脚本，并输出到：
+
+```text
+packaging\ffmpeg\windows-x64
+```
+
+也可以通过 `INTMUSIC_FFMPEG_DIR` 指向已经验证的工具包。最终 Core 目录包含：
+
+```text
+core/
+  local-music-core
+  tools/ffmpeg/
+    bin/ffmpeg
+    bin/ffprobe
+    LICENSE.LGPLv2.1.txt
+    BUILD-CONFIG.txt
+    NOTICE.txt
+    source/ffmpeg-8.1.2.tar.xz
+```
+
+安装后的 Core 优先查找自身旁边的 `tools/ffmpeg/bin`，不依赖服务账户的 `PATH`。发布包包含对应源码归档和构建配置；下载页和应用“关于/转码引擎”区域也应保留 FFmpeg LGPL 声明。
+
 ## Android 签名注意
 
 当前 Android `release` build type 仍使用 debug signing config，适合内部测试安装，不适合作为正式商店分发包。
@@ -193,8 +228,8 @@ Windows 安装器逻辑仍由 `scripts/build-windows-installer.ps1` 维护；统
 
 `Build` workflow 会在 `push`、`pull_request` 和手动 `workflow_dispatch` 时运行：
 
-- Ubuntu：构建 Rust Core CLI 和 Flutter Linux 客户端，并上传 `intmusic-ubuntu` artifact。
-- Windows：构建 Rust Core、Flutter Windows 客户端和 Inno Setup 安装器，并上传 `intmusic-windows` artifact。
-- macOS：构建 Rust Core CLI 和 Flutter macOS 客户端 zip，并上传 `intmusic-macos` artifact。
+- Ubuntu：构建带 FFmpeg 的 Rust Core 和 Flutter Linux 客户端，并上传 `intmusic-ubuntu` artifact。
+- Windows：构建带 FFmpeg 的 Rust Core、Flutter Windows 客户端和 Inno Setup 安装器，并上传 `intmusic-windows` artifact。
+- macOS：构建带 FFmpeg 的 Rust Core 和 Flutter macOS 客户端 zip，并上传 `intmusic-macos` artifact。
 
 CI 中的 macOS 编译不会做 Developer ID 签名或 Apple 公证，因为这需要证书和 Apple 凭据。正式发布时仍建议在受控 macOS runner 或本地机器上运行带 `--sign-macos` 和 `--notarize-macos` 的发布脚本。

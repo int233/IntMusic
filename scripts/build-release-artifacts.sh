@@ -8,6 +8,7 @@ CLIENT_DIR="$REPO_ROOT/apps/client-flutter"
 BUILD_ANDROID=1
 BUILD_ANDROID_AAB=1
 BUILD_CORE=1
+BUNDLE_FFMPEG=1
 HOST_OS="$(uname -s)"
 BUILD_LINUX=0
 BUILD_MACOS=0
@@ -35,6 +36,7 @@ Options:
   --skip-android             Do not build Android artifacts.
   --skip-android-aab         Build Android APK only.
   --skip-core                Do not build the host Core CLI binary.
+  --skip-bundled-ffmpeg      Package Core without the bundled FFmpeg tools.
   --skip-linux               Do not build the Linux Flutter app.
   --skip-macos               Do not build the macOS Flutter app.
   --sign-macos IDENTITY      Re-sign IntMusic.app with a Developer ID Application identity.
@@ -45,6 +47,7 @@ Options:
 Environment:
   MACOS_CODESIGN_IDENTITY          Default value for --sign-macos.
   APPLE_NOTARY_KEYCHAIN_PROFILE    Default value for --notary-profile.
+  INTMUSIC_FFMPEG_DIR              Reuse a prepared FFmpeg bundle instead of building it.
 EOF
 }
 
@@ -68,6 +71,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-core)
       BUILD_CORE=0
+      shift
+      ;;
+    --skip-bundled-ffmpeg)
+      BUNDLE_FFMPEG=0
       shift
       ;;
     --skip-linux)
@@ -266,11 +273,43 @@ if [[ "$BUILD_CORE" -eq 1 ]]; then
     core_dir="$core_target"
     mkdir -p "$OUTPUT_ROOT/$core_dir"
   fi
-  copy_artifact \
-    "$REPO_ROOT/target/release/local-music-core" \
-    "$OUTPUT_ROOT/$core_dir/local-music-core-$core_target" \
-    "core-cli" \
+  core_stage="$(mktemp -d "${TMPDIR:-/tmp}/intmusic-core-stage.XXXXXX")"
+  mkdir -p "$core_stage/core"
+  cp -f "$REPO_ROOT/target/release/local-music-core" "$core_stage/core/local-music-core"
+  chmod 755 "$core_stage/core/local-music-core"
+  if [[ "$BUNDLE_FFMPEG" -eq 1 ]]; then
+    ffmpeg_bundle="${INTMUSIC_FFMPEG_DIR:-$REPO_ROOT/packaging/ffmpeg/$core_target}"
+    if [[ ! -x "$ffmpeg_bundle/bin/ffmpeg" || ! -x "$ffmpeg_bundle/bin/ffprobe" ]]; then
+      "$REPO_ROOT/scripts/build-bundled-ffmpeg.sh" --output "$ffmpeg_bundle"
+    fi
+    mkdir -p "$core_stage/core/tools/ffmpeg"
+    cp -R "$ffmpeg_bundle/." "$core_stage/core/tools/ffmpeg/"
+    "$core_stage/core/tools/ffmpeg/bin/ffmpeg" -hide_banner -version | sed -n '1p'
+    "$core_stage/core/tools/ffmpeg/bin/ffprobe" -hide_banner -version | sed -n '1p'
+  fi
+  if [[ "$HOST_OS" == "Darwin" && -n "$SIGN_MACOS_IDENTITY" ]]; then
+    if [[ "$BUNDLE_FFMPEG" -eq 1 ]]; then
+      codesign --force --timestamp --options runtime \
+        --sign "$SIGN_MACOS_IDENTITY" \
+        "$core_stage/core/tools/ffmpeg/bin/ffmpeg"
+      codesign --force --timestamp --options runtime \
+        --sign "$SIGN_MACOS_IDENTITY" \
+        "$core_stage/core/tools/ffmpeg/bin/ffprobe"
+    fi
+    codesign --force --timestamp --options runtime \
+      --sign "$SIGN_MACOS_IDENTITY" \
+      "$core_stage/core/local-music-core"
+  fi
+  core_zip="$OUTPUT_ROOT/$core_dir/IntMusic-Core-${version_safe}-${core_target}.zip"
+  zip_directory_contents \
+    "$core_stage/core" \
+    "$core_zip" \
+    "core-bundle-zip" \
     "$core_target"
+  rm -rf -- "$core_stage"
+  if [[ "$NOTARIZE_MACOS" -eq 1 && "$HOST_OS" == "Darwin" ]]; then
+    xcrun notarytool submit "$core_zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  fi
 fi
 
 if [[ "$BUILD_ANDROID" -eq 1 ]]; then

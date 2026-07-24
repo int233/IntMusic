@@ -95,6 +95,7 @@ target/
 apps/client-flutter/build/
 apps/client-flutter/.dart_tool/
 packaging/dist/
+packaging/ffmpeg/
 
 *.flac
 !tests/audio-fixtures/**/*.flac

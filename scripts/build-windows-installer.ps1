@@ -1,6 +1,7 @@
 param(
     [switch]$SkipInstaller,
-    [switch]$InstallInnoSetup
+    [switch]$InstallInnoSetup,
+    [string]$FfmpegBundle
 )
 
 $ErrorActionPreference = "Stop"
@@ -58,6 +59,43 @@ try {
     Copy-Item -Path (Join-Path $clientRelease "*") -Destination $clientDist -Recurse -Force
     Copy-Item -LiteralPath $coreCliRelease -Destination $coreDist -Force
     Copy-Item -LiteralPath $coreDaemonRelease -Destination $coreDist -Force
+
+    if (-not $FfmpegBundle) {
+        $FfmpegBundle = $env:INTMUSIC_FFMPEG_DIR
+    }
+    if (-not $FfmpegBundle) {
+        $FfmpegBundle = Join-Path $repoRoot "packaging\ffmpeg\windows-x64"
+    }
+    if (Test-Path -LiteralPath $FfmpegBundle -PathType Container) {
+        $ffmpegExe = Join-Path $FfmpegBundle "bin\ffmpeg.exe"
+        $ffprobeExe = Join-Path $FfmpegBundle "bin\ffprobe.exe"
+        if (-not (Test-Path -LiteralPath $ffmpegExe) -or
+            -not (Test-Path -LiteralPath $ffprobeExe)) {
+            throw "The FFmpeg bundle is missing bin\ffmpeg.exe or bin\ffprobe.exe: $FfmpegBundle"
+        }
+        $ffmpegDestination = Join-Path $coreDist "tools\ffmpeg"
+        New-Item -ItemType Directory -Force -Path $ffmpegDestination | Out-Null
+        Copy-Item -Path (Join-Path $FfmpegBundle "*") `
+            -Destination $ffmpegDestination `
+            -Recurse `
+            -Force
+        & $ffmpegExe -hide_banner -version | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0) {
+            throw "The bundled FFmpeg executable failed its version check."
+        }
+        & $ffprobeExe -hide_banner -version | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0) {
+            throw "The bundled ffprobe executable failed its version check."
+        }
+    }
+    else {
+        throw @"
+The bundled FFmpeg directory was not found: $FfmpegBundle
+Build the pinned LGPL bundle from an MSYS2 UCRT64 shell with:
+  ./scripts/build-bundled-ffmpeg.sh --output packaging/ffmpeg/windows-x64
+or pass -FfmpegBundle with an already validated bundle.
+"@
+    }
 
     Write-Host "Windows staging directory:"
     Write-Host "  $distRoot"

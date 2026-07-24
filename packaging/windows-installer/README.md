@@ -4,8 +4,24 @@
 
 ## 构建安装器
 
+先在 MSYS2 UCRT64 shell 中构建固定版本、LGPL-only 的 FFmpeg 工具包：
+
+```bash
+./scripts/build-bundled-ffmpeg.sh \
+  --output packaging/ffmpeg/windows-x64
+```
+
+GitHub Actions 会自动完成这一步；本地打包不会在缺少工具包时静默生成一个没有转码能力的 Core。
+
 ```powershell
 .\scripts\build-windows-installer.ps1
+```
+
+如工具包位于其他目录，可明确指定：
+
+```powershell
+.\scripts\build-windows-installer.ps1 `
+  -FfmpegBundle C:\path\to\ffmpeg-bundle
 ```
 
 如果当前机器没有安装 Inno Setup，脚本仍会生成 staging 目录：
@@ -15,6 +31,8 @@ packaging\dist\windows\
   client\IntMusic.exe
   core\local-music-core.exe
   core\local-music-core-daemon.exe
+  core\tools\ffmpeg\bin\ffmpeg.exe
+  core\tools\ffmpeg\bin\ffprobe.exe
 ```
 
 安装 Inno Setup 6 或 7 后，重新运行同一个脚本即可生成安装器：
@@ -66,6 +84,15 @@ Core 服务信息：
 ```text
 C:\Program Files\IntMusic\core\local-music-core-daemon.exe
 ```
+
+内置转码工具：
+
+```text
+C:\Program Files\IntMusic\core\tools\ffmpeg\bin\ffmpeg.exe
+C:\Program Files\IntMusic\core\tools\ffmpeg\bin\ffprobe.exe
+```
+
+Core 服务从安装目录自动发现这两个程序，因此不依赖系统或服务账户的 `PATH`。
 
 服务数据目录：
 

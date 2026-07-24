@@ -96,6 +96,10 @@ IntMusic Core Discovery  UDP 5353
 
 推荐在客户端 `Settings -> Music folders` 中添加音乐文件夹并点击重新扫描。注意：这里填写的是 Core 所在机器能访问到的路径。
 
+每台 Client 也可以在设置中的“此设备上的音乐”添加自己的文件夹。文件不会上传到 Core；Client 只提交元数据、版本参数、相对路径和内容指纹，Core 将它们汇总到统一目录并记录每个副本所在设备。Client 与 Core 断开时会使用本地快照和本地副本播放，收藏与历史先进入本地 outbox，重新连接后幂等同步。
+
+“分发到设备”支持单曲、专辑、歌手、歌单和歌曲页自由多选，并可选择原始质量、FLAC 或 AAC 码率。若源文件只存在于另一台 Client，Core 会协调源 Client 流式上传到局域网中继缓存，完成校验和可选转码后再交给目标 Client；任务完成或取消后清理中继源文件。
+
 也可以使用命令行：
 
 ```powershell
@@ -181,7 +185,7 @@ Windows 主机：
 - Playback 页是统一播放中心，负责当前歌曲控制、seek、歌曲详情、歌词滚动、zone 选择、暂停、恢复、停止、移动到指定设备、同播到所有在线设备。
 - 切换播放设备调用 `/api/v1/zones/{zone_id}/transfer`。
 - 同时在多个设备播放调用 `/api/v1/zones/play-many`。
-- 远端客户端通过 WebSocket 接收 Core 下发的 play、pause、stop、seek 命令，再从 `/api/v1/tracks/{track_id}/stream` 拉取音频流本地播放。
+- 远端客户端通过 WebSocket 接收 Core 下发的 play、pause、stop、seek 命令；若本机有同一媒体副本则直接播放本地文件，否则从 `/api/v1/tracks/{track_id}/stream` 拉取 Core 音频流。
 
 ## 验证
 

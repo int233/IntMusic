@@ -191,4 +191,156 @@ class _IntMusicPlatform {
       // Desktop-only operation.
     }
   }
+
+  Future<({String path, String? token})> persistFolderAccess(
+    String path,
+  ) async {
+    if (!Platform.isMacOS) {
+      return (path: path, token: null);
+    }
+    try {
+      final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'createSecurityScopedBookmark',
+        <String, dynamic>{'path': path},
+      );
+      return (
+        path: result?['path']?.toString() ?? path,
+        token: result?['bookmark']?.toString(),
+      );
+    } catch (_) {
+      return (path: path, token: null);
+    }
+  }
+
+  Future<({String path, String? token})> restoreFolderAccess(
+    String path,
+    String? token,
+  ) async {
+    if ((!Platform.isMacOS && !Platform.isAndroid) ||
+        token == null ||
+        token.isEmpty) {
+      return (path: path, token: token);
+    }
+    try {
+      if (Platform.isAndroid) {
+        final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+          'restoreClientLibraryFolder',
+          <String, dynamic>{'path': path, 'bookmark': token},
+        );
+        return (
+          path: result?['path']?.toString() ?? path,
+          token: result?['bookmark']?.toString() ?? token,
+        );
+      }
+      final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'resolveSecurityScopedBookmark',
+        <String, dynamic>{'path': path, 'bookmark': token},
+      );
+      return (
+        path: result?['path']?.toString() ?? path,
+        token: result?['bookmark']?.toString() ?? token,
+      );
+    } catch (_) {
+      return (path: path, token: token);
+    }
+  }
+
+  Future<({String path, String token, String displayName})?>
+  selectClientLibraryFolder() async {
+    if (!Platform.isAndroid) {
+      return null;
+    }
+    final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'selectClientLibraryFolder',
+    );
+    final path = result?['path']?.toString();
+    final token = result?['bookmark']?.toString();
+    if (path == null ||
+        path.trim().isEmpty ||
+        token == null ||
+        token.trim().isEmpty) {
+      return null;
+    }
+    return (
+      path: path,
+      token: token,
+      displayName:
+          result?['displayName']?.toString() ?? _localRootDisplayName(path),
+    );
+  }
+
+  Future<_DistributionDownloadResult> downloadDistributionTask({
+    required String apiUrl,
+    required String taskId,
+    required String? rootToken,
+    required String relativePath,
+    required int expectedSize,
+    required String? expectedQuickHash,
+  }) async {
+    if (!Platform.isAndroid) {
+      throw UnsupportedError(
+        'Native distribution download is only used on Android',
+      );
+    }
+    if (rootToken == null || rootToken.isEmpty) {
+      throw const FileSystemException(
+        'The Android destination folder permission is missing',
+      );
+    }
+    final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'downloadDistributionTask',
+      <String, dynamic>{
+        'apiUrl': apiUrl,
+        'taskId': taskId,
+        'bookmark': rootToken,
+        'relativePath': relativePath,
+        'expectedSize': expectedSize,
+        'expectedQuickHash': expectedQuickHash,
+      },
+    );
+    final bytes = _intValue(result?['bytes']);
+    final quickHash = result?['quickHash']?.toString();
+    if (bytes == null || quickHash == null || quickHash.isEmpty) {
+      throw const FileSystemException(
+        'Android did not return a verified distribution result',
+      );
+    }
+    return _DistributionDownloadResult(bytes: bytes, quickHash: quickHash);
+  }
+
+  Future<int> uploadDistributionSource({
+    required String apiUrl,
+    required String taskId,
+    required String? rootToken,
+    required String relativePath,
+    required int expectedSize,
+  }) async {
+    if (!Platform.isAndroid) {
+      throw UnsupportedError(
+        'Native distribution upload is only used on Android',
+      );
+    }
+    if (rootToken == null || rootToken.isEmpty) {
+      throw const FileSystemException(
+        'The Android source folder permission is missing',
+      );
+    }
+    final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+      'uploadDistributionSource',
+      <String, dynamic>{
+        'apiUrl': apiUrl,
+        'taskId': taskId,
+        'bookmark': rootToken,
+        'relativePath': relativePath,
+        'expectedSize': expectedSize,
+      },
+    );
+    final bytes = _intValue(result?['bytes']);
+    if (bytes == null || bytes != expectedSize) {
+      throw const FileSystemException(
+        'Android did not upload the expected source size',
+      );
+    }
+    return bytes;
+  }
 }

@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:crypto/crypto.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +13,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:multicast_dns/multicast_dns.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'src/app_theme.dart';
@@ -31,6 +33,9 @@ part 'src/track_editor.dart';
 part 'src/lyric_timeline_editor.dart';
 part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
+part 'src/client_library.dart';
+part 'src/offline_library.dart';
+part 'src/distribution.dart';
 part 'src/i18n.dart';
 part 'src/platform_integration.dart';
 part 'src/renderer_audio.dart';
@@ -46,6 +51,7 @@ const _prefsRecentSearchesKey = 'intmusic.search.recent';
 const _prefsPinCurrentClientRegionKey =
     'intmusic.playback_regions.pin_current_client';
 const _prefsRegionSortKey = 'intmusic.playback_regions.sort';
+const _prefsClientLibraryRootsKey = 'intmusic.client_library.roots';
 final CacheManager _artworkCacheManager = CacheManager(
   Config(
     'intmusicArtworkCache',
@@ -117,6 +123,9 @@ class _CoreDashboardState extends State<CoreDashboard>
   Timer? _rendererHeartbeat;
   Timer? _rendererPositionReporter;
   Timer? _zoneRefreshTimer;
+  Timer? _offlineReconnectTimer;
+  Timer? _distributionTimer;
+  int _zoneRefreshFailures = 0;
   Timer? _searchDebounce;
   WebSocket? _eventSocket;
   String? _eventSocketBaseUrl;
@@ -152,6 +161,17 @@ class _CoreDashboardState extends State<CoreDashboard>
   List<dynamic> _zones = const [];
   List<dynamic> _playlists = const [];
   List<dynamic> _libraryRoots = const [];
+  List<_ClientLibraryRoot> _clientLibraryRoots = const [];
+  List<dynamic> _clientLibraryStatuses = const [];
+  List<dynamic> _distributionJobs = const [];
+  Map<String, dynamic>? _transcodingStatus;
+  final Set<String> _clientLibrarySyncingRootIds = <String>{};
+  final Set<String> _distributionDirtyRootIds = <String>{};
+  bool _distributionWorkerBusy = false;
+  _OfflineLibrarySnapshot _offlineLibrary = _OfflineLibrarySnapshot();
+  bool _offlineMode = false;
+  DateTime? _offlinePlaybackStartedAt;
+  int _offlinePlaybackStartPositionMs = 0;
   List<dynamic> _playbackHistory = const [];
   Map<String, dynamic>? _favoriteSettings;
   Map<String, dynamic>? _metadataSettings;
@@ -202,6 +222,8 @@ class _CoreDashboardState extends State<CoreDashboard>
     _rendererHeartbeat?.cancel();
     _rendererPositionReporter?.cancel();
     _zoneRefreshTimer?.cancel();
+    _offlineReconnectTimer?.cancel();
+    _distributionTimer?.cancel();
     _searchDebounce?.cancel();
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
@@ -237,7 +259,13 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _refreshAll() async {
-    await _run<void>(() => _refreshAllInner(allowDiscovery: true));
+    final connected = await _run<bool>(() async {
+      await _refreshAllInner(allowDiscovery: true);
+      return true;
+    });
+    if (connected != true && _offlineLibrary.copies.isNotEmpty) {
+      await _activateOfflineMode();
+    }
   }
 
   Future<void> _initializeAndRefresh() async {
@@ -305,6 +333,27 @@ class _CoreDashboardState extends State<CoreDashboard>
       final zoneRegionSort = _zoneRegionSortFromPreference(
         preferences.getString(_prefsRegionSortKey),
       );
+      var clientLibraryRoots = _decodeClientLibraryRoots(
+        preferences.getString(_prefsClientLibraryRootsKey),
+      );
+      clientLibraryRoots = await Future.wait(
+        clientLibraryRoots.map((root) async {
+          final access = await _IntMusicPlatform.instance.restoreFolderAccess(
+            root.path,
+            root.accessToken,
+          );
+          return root.copyWith(path: access.path, accessToken: access.token);
+        }),
+      );
+      await preferences.setString(
+        _prefsClientLibraryRootsKey,
+        jsonEncode(
+          clientLibraryRoots
+              .map((root) => root.toJson())
+              .toList(growable: false),
+        ),
+      );
+      final offlineLibrary = await _OfflineLibraryStore.load();
       if (!mounted) {
         return;
       }
@@ -321,6 +370,8 @@ class _CoreDashboardState extends State<CoreDashboard>
         _playlistViewMode = playlistViewMode;
         _pinCurrentClientRegion = pinCurrentClientRegion;
         _zoneRegionSort = zoneRegionSort;
+        _clientLibraryRoots = clientLibraryRoots;
+        _offlineLibrary = offlineLibrary;
         _recentSearches = recentSearches.take(10).toList(growable: false);
         _clientAliasController.text = savedClientAlias?.isNotEmpty == true
             ? savedClientAlias!
@@ -600,6 +651,94 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  Future<void> _activateOfflineMode() async {
+    if (_offlineMode) return;
+    _rendererHeartbeat?.cancel();
+    _rendererPositionReporter?.cancel();
+    _zoneRefreshTimer?.cancel();
+    _distributionTimer?.cancel();
+    await _eventSocket?.close();
+    _eventSocket = null;
+    final tracks = _offlineTrackSummaries(_offlineLibrary);
+    final stoppedPlayback = <String, dynamic>{
+      'zone_id': _clientOutputId,
+      'state': 'stopped',
+      'track_id': null,
+      'track_title': null,
+      'position_ms': 0,
+      'queue_revision': 0,
+    };
+    if (!mounted) return;
+    setState(() {
+      _offlineMode = true;
+      _rendererStatus = 'Offline local playback';
+      _error = null;
+      _tracks = tracks;
+      _albums = _offlineAlbumSummaries(_offlineLibrary);
+      _artists = _offlineArtistSummaries(_offlineLibrary);
+      _playlists = const [];
+      _outputs = <dynamic>[
+        <String, dynamic>{
+          'id': _clientOutputId,
+          'name': _clientAlias(),
+          'node_name': _clientAlias(),
+          'is_online': true,
+          'is_default': true,
+        },
+      ];
+      _zones = <dynamic>[
+        <String, dynamic>{
+          'id': _clientOutputId,
+          'name': _clientAlias(),
+          'state': 'stopped',
+          'track_id': null,
+          'track_title': null,
+          'position_ms': 0,
+          'volume': 1.0,
+          'muted': false,
+          'is_online': true,
+        },
+      ];
+      _selectedZoneId = _clientOutputId;
+      _selectedZoneLabel = _tr(context, 'Offline · This device');
+      _playback = _withPlaybackTimestamp(stoppedPlayback);
+      _playbackQueue = <String, dynamic>{
+        'zone_id': _clientOutputId,
+        'revision': 0,
+        'mode': _playbackMode.nameForApi,
+        'current_index': null,
+        'items': const <dynamic>[],
+      };
+      _status = <String, dynamic>{
+        ...?_status,
+        'name': 'IntMusic Offline',
+        'display_name': _tr(context, 'Offline library'),
+        'version': _status?['version']?.toString() ?? 'local',
+        'api_version': 'offline',
+        'server_id': _offlineLibrary.serverId ?? 'offline',
+        'database_path': '-',
+        'counts': <String, dynamic>{
+          'library_roots': _clientLibraryRoots.length,
+          'files': tracks.length,
+          'tracks': tracks.length,
+          'albums': _albums.length,
+          'artists': _artists.length,
+          'scan_problems': 0,
+        },
+      };
+      _favoriteSettings ??= <String, dynamic>{
+        'treat_max_rating_as_favorite': true,
+        'write_rating_on_favorite': false,
+      };
+    });
+    _offlineReconnectTimer?.cancel();
+    _offlineReconnectTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      if (!_loading && _offlineMode) {
+        unawaited(_refreshAll());
+      }
+    });
+  }
+
   Future<bool> _applyDiscoveredCoreUrl() async {
     _rendererStatus = 'Discovering core';
     final cores = await _discoverIntMusicCores(
@@ -626,9 +765,6 @@ class _CoreDashboardState extends State<CoreDashboard>
     );
     _rendererRegisteredCoreUrl = coreUrl;
     await _connectEventStream();
-    _startRendererHeartbeat();
-    _startRendererPositionReporter();
-    _startZoneRefresh();
     final results = await Future.wait([
       _loadPagedList('/albums'),
       _loadPagedList('/artists'),
@@ -643,6 +779,10 @@ class _CoreDashboardState extends State<CoreDashboard>
       _api.getJson('/settings/favorites'),
       _api.getJson('/settings/metadata'),
       _api.getJson('/library/roots'),
+      _api.getJson('/client-library/manifests'),
+      _api
+          .getJson('/transcoding/status')
+          .catchError((_) => const <String, dynamic>{}),
     ]);
     _status = status;
     _albums = results[0] as List<dynamic>;
@@ -662,10 +802,89 @@ class _CoreDashboardState extends State<CoreDashboard>
     _favoriteSettings = _asMap(results[10]);
     _metadataSettings = _asMap(results[11]);
     _libraryRoots = results[12] as List<dynamic>;
+    _clientLibraryStatuses = results[13] as List<dynamic>;
+    _transcodingStatus = _asMap(results[14]);
+    if (_offlineMode) {
+      await _finishOfflinePlayback('reconnected');
+      await (await _playerForOutput(_clientOutputId)).stop();
+    }
+    _offlineMode = false;
+    _offlineReconnectTimer?.cancel();
+    _startRendererHeartbeat();
+    _startRendererPositionReporter();
+    _startZoneRefresh();
+    _startDistributionWorker();
+    unawaited(_refreshDistributionJobs());
+    _offlineLibrary.serverId = status['server_id']?.toString();
+    final flushedOfflineMutations = await _flushOfflineMutations();
+    if (flushedOfflineMutations) {
+      final refreshed = await Future.wait([
+        _loadPagedList('/tracks'),
+        _api.getJson('/playback/stats?top_limit=20'),
+        _api.getJson('/playback/history?limit=100'),
+      ]);
+      _tracks = refreshed[0] as List<dynamic>;
+      _playbackStats = _asMap(refreshed[1]);
+      _playbackHistory = refreshed[2] as List<dynamic>;
+    }
+    final onlineTracks = <int, Map<String, dynamic>>{
+      for (final value in _tracks.whereType<Map>())
+        if (_intValue(value['id']) != null)
+          _intValue(value['id'])!: value.cast<String, dynamic>(),
+    };
+    for (final entry in _offlineLibrary.copies.entries.toList(
+      growable: false,
+    )) {
+      final online = onlineTracks[entry.value.trackId];
+      if (online == null) continue;
+      _offlineLibrary.copies[entry.key] = entry.value.copyWith(
+        isFavorite: online['is_favorite'] == true,
+        playCount: _intValue(online['play_count']) ?? entry.value.playCount,
+      );
+    }
+    await _OfflineLibraryStore.save(_offlineLibrary);
     _keepSelectedZoneValid();
     _syncPlaybackFromSelectedZone();
     await _refreshPlaybackQueue();
     _scheduleActiveTrackDetailLoad(_playback);
+  }
+
+  Future<bool> _flushOfflineMutations() async {
+    if (_offlineLibrary.outbox.isEmpty) return false;
+    var flushedAny = false;
+    while (_offlineLibrary.outbox.isNotEmpty) {
+      final batch = _offlineLibrary.outbox.take(100).toList(growable: false);
+      final result = _asMap(
+        await _api.postJson('/client-sync/mutations', <String, dynamic>{
+          'device_id': _clientId,
+          'device_name': _clientAlias(),
+          'platform': Platform.operatingSystem,
+          'mutations': batch
+              .map((mutation) => mutation.toJson())
+              .toList(growable: false),
+        }),
+      );
+      final acknowledged = <String>{
+        for (final value
+            in ((result['applied_ids'] as List?) ?? const <dynamic>[]))
+          value.toString(),
+        for (final value
+            in ((result['duplicate_ids'] as List?) ?? const <dynamic>[]))
+          value.toString(),
+      };
+      if (acknowledged.isEmpty) {
+        break;
+      }
+      _offlineLibrary.outbox.removeWhere(
+        (mutation) => acknowledged.contains(mutation.id),
+      );
+      flushedAny = true;
+      await _OfflineLibraryStore.save(_offlineLibrary);
+      if (acknowledged.length < batch.length) {
+        break;
+      }
+    }
+    return flushedAny;
   }
 
   Future<List<dynamic>> _loadPagedList(
@@ -862,9 +1081,584 @@ class _CoreDashboardState extends State<CoreDashboard>
     });
   }
 
+  void _startDistributionWorker() {
+    _distributionTimer?.cancel();
+    _distributionTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      unawaited(_pollDistributionTasks());
+    });
+    unawaited(_pollDistributionTasks());
+  }
+
+  Future<void> _refreshDistributionJobs() async {
+    try {
+      final jobs =
+          await _api.getJson('/distributions?limit=100') as List<dynamic>;
+      if (mounted) {
+        setState(() => _distributionJobs = jobs);
+      } else {
+        _distributionJobs = jobs;
+      }
+    } catch (_) {
+      // Distribution is additive; older Core versions can still be controlled.
+    }
+  }
+
+  Future<void> _distributeTracks(List<int> trackIds) async {
+    final uniqueTrackIds = trackIds.where((id) => id > 0).toSet().toList()
+      ..sort();
+    if (uniqueTrackIds.isEmpty || !mounted) {
+      return;
+    }
+    if (_offlineMode) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _tr(context, 'Connect to Core before distributing music'),
+          ),
+        ),
+      );
+      return;
+    }
+    final targets = _clientLibraryStatuses
+        .whereType<Map>()
+        .map((value) => value.cast<String, dynamic>())
+        .where(
+          (value) =>
+              value['enabled'] != false &&
+              value['device_id'] != null &&
+              value['external_id'] != null,
+        )
+        .toList(growable: false);
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _tr(
+              context,
+              'Add and sync a Client music folder before distributing music',
+            ),
+          ),
+        ),
+      );
+      return;
+    }
+    String targetKey(Map<String, dynamic> target) =>
+        '${target['device_id']}\u0000${target['external_id']}';
+    final currentTarget = targets
+        .where((target) => target['device_id']?.toString() == _clientId)
+        .firstOrNull;
+    var selectedTarget = targetKey(currentTarget ?? targets.first);
+    final rawProfiles =
+        (_transcodingStatus?['profiles'] as List?)?.whereType<Map>().toList() ??
+        const <Map>[];
+    final profiles = rawProfiles
+        .map((value) => value.cast<String, dynamic>())
+        .where((profile) => profile['available'] == true)
+        .toList();
+    if (!profiles.any((profile) => profile['id'] == 'original')) {
+      profiles.insert(0, <String, dynamic>{
+        'id': 'original',
+        'label': 'Original',
+        'codec': 'source',
+        'container': 'source',
+        'lossless': false,
+        'available': true,
+      });
+    }
+    var selectedQuality = profiles.first['id']?.toString() ?? 'original';
+    final selection = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final selectedProfile = profiles
+              .where((profile) => profile['id']?.toString() == selectedQuality)
+              .firstOrNull;
+          return AlertDialog(
+            title: Text(_tr(context, 'Distribute music')),
+            content: SizedBox(
+              width: 520,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    uniqueTrackIds.length == 1
+                        ? _tr(context, 'Send one track to a Client library')
+                        : '${_tr(context, 'Send')} '
+                              '${uniqueTrackIds.length} '
+                              '${_tr(context, 'tracks to a Client library')}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: IntMusicTheme.of(context).textSecondary,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedTarget,
+                    decoration: InputDecoration(
+                      labelText: _tr(context, 'Destination'),
+                      prefixIcon: const Icon(Icons.devices_outlined),
+                    ),
+                    items: [
+                      for (final target in targets)
+                        DropdownMenuItem(
+                          value: targetKey(target),
+                          child: Text(
+                            _joinParts([
+                              target['device_name'],
+                              target['display_name'],
+                              target['platform'],
+                            ]),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setDialogState(() => selectedTarget = value);
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedQuality,
+                    decoration: InputDecoration(
+                      labelText: _tr(context, 'Quality'),
+                      prefixIcon: const Icon(Icons.high_quality_outlined),
+                    ),
+                    items: [
+                      for (final profile in profiles)
+                        DropdownMenuItem(
+                          value: profile['id']?.toString(),
+                          child: Text(
+                            _tr(
+                              context,
+                              profile['label']?.toString() ??
+                                  profile['id']?.toString() ??
+                                  'Original',
+                            ),
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setDialogState(() => selectedQuality = value);
+                      }
+                    },
+                  ),
+                  if (selectedProfile != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _distributionProfileDescription(selectedProfile),
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: IntMusicTheme.of(context).textSecondary,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: Text(_tr(context, 'Cancel')),
+              ),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(dialogContext, {
+                  'target': selectedTarget,
+                  'quality': selectedQuality,
+                }),
+                icon: const Icon(Icons.send_outlined),
+                label: Text(_tr(context, 'Send')),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (selection == null || !mounted) {
+      return;
+    }
+    final selected = targets
+        .where((target) => targetKey(target) == selection['target'])
+        .firstOrNull;
+    if (selected == null) {
+      return;
+    }
+    try {
+      await _api.postJson('/distributions', <String, dynamic>{
+        'target_device_id': selected['device_id']?.toString(),
+        'target_root_external_id': selected['external_id']?.toString(),
+        'quality': selection['quality'] ?? 'original',
+        'track_ids': uniqueTrackIds,
+        'album_ids': const <int>[],
+        'playlist_ids': const <int>[],
+      });
+      await _refreshDistributionJobs();
+      unawaited(_pollDistributionTasks());
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${_tr(context, 'Distribution created')} · '
+            '${selected['device_name']} / ${selected['display_name']}',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${_tr(context, 'Distribution failed')}: $error'),
+        ),
+      );
+    }
+  }
+
+  String _distributionProfileDescription(Map<String, dynamic> profile) {
+    if (profile['id'] == 'original') {
+      return _tr(
+        context,
+        'Copies the existing file without changing its codec or quality.',
+      );
+    }
+    final bitrate = _intValue(profile['bitrate_kbps']);
+    return _joinParts([
+      profile['codec']?.toString().toUpperCase(),
+      profile['container']?.toString().toUpperCase(),
+      bitrate == null ? null : '$bitrate kbps',
+      profile['lossless'] == true ? _tr(context, 'Lossless') : null,
+    ]);
+  }
+
+  Future<void> _cancelDistributionJob(String jobId) async {
+    try {
+      await _api.postJson(
+        '/distributions/${Uri.encodeComponent(jobId)}/cancel',
+        const <String, dynamic>{},
+      );
+      await _refreshDistributionJobs();
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_tr(context, 'Cancel failed')}: $error')),
+      );
+    }
+  }
+
+  Future<void> _pollDistributionTasks() async {
+    if (_distributionWorkerBusy || _offlineMode) {
+      return;
+    }
+    _distributionWorkerBusy = true;
+    var runAgain = false;
+    try {
+      final sourceValue = await _api.getJson(
+        '/distributions/source-tasks/next'
+        '?device_id=${Uri.encodeQueryComponent(_clientId)}',
+      );
+      if (sourceValue is Map) {
+        await _executeDistributionSourceTask(
+          sourceValue.cast<String, dynamic>(),
+        );
+        runAgain = true;
+        return;
+      }
+      final value = await _api.getJson(
+        '/distributions/tasks/next'
+        '?device_id=${Uri.encodeQueryComponent(_clientId)}',
+      );
+      if (value is Map) {
+        await _executeDistributionTask(value.cast<String, dynamic>());
+        runAgain = true;
+      } else if (_distributionDirtyRootIds.isNotEmpty) {
+        final dirtyRoots = _distributionDirtyRootIds.toList(growable: false);
+        _distributionDirtyRootIds.clear();
+        for (final rootId in dirtyRoots) {
+          await _syncClientLibraryRoot(rootId, refreshAfter: false);
+        }
+        await _refreshDistributionJobs();
+      }
+    } catch (_) {
+      // A transient Core failure is retried by the next worker tick.
+    } finally {
+      _distributionWorkerBusy = false;
+      if (runAgain) {
+        unawaited(_pollDistributionTasks());
+      }
+    }
+  }
+
+  Future<void> _executeDistributionSourceTask(Map<String, dynamic> task) async {
+    final taskId = task['id']?.toString();
+    final rootId = task['source_root_external_id']?.toString();
+    final relativePath = task['source_relative_path']?.toString();
+    final uploadPath = task['upload_path']?.toString();
+    final expectedSize = _intValue(task['expected_size_bytes']);
+    if (taskId == null ||
+        rootId == null ||
+        relativePath == null ||
+        uploadPath == null ||
+        expectedSize == null ||
+        expectedSize < 0) {
+      return;
+    }
+    final root = _clientLibraryRoots
+        .where((candidate) => candidate.externalId == rootId)
+        .firstOrNull;
+    final sourcePath = root == null
+        ? null
+        : _distributionTargetPath(root, relativePath);
+    if (root == null || sourcePath == null) {
+      await _reportDistributionSourceFailure(
+        taskId,
+        'The source folder is no longer configured on this Client.',
+        retryable: false,
+      );
+      return;
+    }
+
+    try {
+      if (mounted) {
+        setState(
+          () => _rendererStatus =
+              'Sending ${task['title']?.toString() ?? relativePath}',
+        );
+      }
+      final uploadUrl = _api.apiUrl(
+        '$uploadPath?device_id=${Uri.encodeQueryComponent(_clientId)}',
+      );
+      final uploaded = Platform.isAndroid
+          ? await _IntMusicPlatform.instance.uploadDistributionSource(
+              apiUrl: uploadUrl,
+              taskId: taskId,
+              rootToken: root.accessToken,
+              relativePath: relativePath,
+              expectedSize: expectedSize,
+            )
+          : await _uploadDistributionSourceFile(
+              uploadUrl: uploadUrl,
+              sourcePath: sourcePath,
+              expectedSize: expectedSize,
+            );
+      if (uploaded != expectedSize) {
+        throw FileSystemException(
+          'Uploaded source size does not match the catalog.',
+          sourcePath,
+        );
+      }
+      if (mounted) {
+        setState(() => _rendererStatus = 'Source item sent');
+      }
+      await _refreshDistributionJobs();
+    } catch (error) {
+      await _reportDistributionSourceFailure(
+        taskId,
+        error.toString(),
+        retryable: true,
+      );
+    }
+  }
+
+  Future<int> _uploadDistributionSourceFile({
+    required String uploadUrl,
+    required String sourcePath,
+    required int expectedSize,
+  }) async {
+    final source = File(sourcePath);
+    final actualSize = await source.length();
+    if (actualSize != expectedSize) {
+      throw FileSystemException(
+        'The local source changed after its last library sync.',
+        sourcePath,
+      );
+    }
+    final client = HttpClient();
+    try {
+      final request = await client.putUrl(Uri.parse(uploadUrl));
+      request.contentLength = expectedSize;
+      request.headers.contentType = ContentType.binary;
+      await request.addStream(source.openRead());
+      final response = await request.close();
+      final responseText = await utf8.decoder.bind(response).join();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          responseText.isEmpty
+              ? 'Core rejected the source upload (${response.statusCode}).'
+              : responseText,
+          uri: Uri.parse(uploadUrl),
+        );
+      }
+      return actualSize;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _reportDistributionSourceFailure(
+    String taskId,
+    String error, {
+    required bool retryable,
+  }) async {
+    try {
+      await _api.postJson(
+        '/distributions/source-tasks/${Uri.encodeComponent(taskId)}/progress',
+        <String, dynamic>{
+          'device_id': _clientId,
+          'state': 'failed',
+          'transferred_bytes': 0,
+          'retryable': retryable,
+          'error': error,
+        },
+      );
+    } catch (_) {
+      // The source lease recovers the task if the failure report is lost.
+    }
+    if (mounted) {
+      setState(() => _rendererStatus = 'Source distribution failed: $error');
+    }
+    await _refreshDistributionJobs();
+  }
+
+  Future<void> _executeDistributionTask(Map<String, dynamic> task) async {
+    final taskId = task['id']?.toString();
+    final rootId = task['target_root_external_id']?.toString();
+    final relativePath = task['relative_path']?.toString();
+    final contentPath = task['content_path']?.toString();
+    final expectedSize = _intValue(task['expected_size_bytes']);
+    if (taskId == null ||
+        rootId == null ||
+        relativePath == null ||
+        contentPath == null ||
+        expectedSize == null ||
+        expectedSize < 0) {
+      return;
+    }
+    final root = _clientLibraryRoots
+        .where((candidate) => candidate.externalId == rootId)
+        .firstOrNull;
+    if (root == null) {
+      await _reportDistributionFailure(
+        taskId,
+        0,
+        'The target folder is no longer configured on this Client.',
+        retryable: false,
+      );
+      return;
+    }
+    final targetPath = _distributionTargetPath(root, relativePath);
+    if (targetPath == null) {
+      await _reportDistributionFailure(
+        taskId,
+        0,
+        'Core returned an unsafe distribution path.',
+        retryable: false,
+      );
+      return;
+    }
+
+    var transferred = 0;
+    try {
+      if (mounted) {
+        setState(
+          () => _rendererStatus =
+              'Receiving ${task['title']?.toString() ?? relativePath}',
+        );
+      }
+      Future<void> reportProgress(int bytes) async {
+        transferred = bytes;
+        try {
+          await _api.postJson(
+            '/distributions/tasks/${Uri.encodeComponent(taskId)}/progress',
+            <String, dynamic>{
+              'device_id': _clientId,
+              'state': 'progress',
+              'transferred_bytes': bytes,
+              'retryable': true,
+              'error': null,
+            },
+          );
+        } catch (_) {
+          // Completion or the durable lease will reconcile missed heartbeats.
+        }
+      }
+
+      final result = Platform.isAndroid
+          ? await _IntMusicPlatform.instance.downloadDistributionTask(
+              apiUrl: _api.apiUrl(
+                '$contentPath?device_id=${Uri.encodeQueryComponent(_clientId)}',
+              ),
+              taskId: taskId,
+              rootToken: root.accessToken,
+              relativePath: relativePath,
+              expectedSize: expectedSize,
+              expectedQuickHash: task['expected_quick_hash']?.toString(),
+            )
+          : await _downloadDistributionFile(
+              api: _api,
+              contentPath: contentPath,
+              deviceId: _clientId,
+              taskId: taskId,
+              targetPath: targetPath,
+              expectedSize: expectedSize,
+              expectedQuickHash: task['expected_quick_hash']?.toString(),
+              onProgress: reportProgress,
+            );
+      transferred = result.bytes;
+      await _api.postJson(
+        '/distributions/tasks/${Uri.encodeComponent(taskId)}/progress',
+        <String, dynamic>{
+          'device_id': _clientId,
+          'state': 'completed',
+          'transferred_bytes': result.bytes,
+          'retryable': false,
+          'error': null,
+        },
+      );
+      _distributionDirtyRootIds.add(rootId);
+      if (mounted) {
+        setState(() => _rendererStatus = 'Distribution item completed');
+      }
+      await _refreshDistributionJobs();
+    } catch (error) {
+      await _reportDistributionFailure(
+        taskId,
+        transferred,
+        error.toString(),
+        retryable: true,
+      );
+    }
+  }
+
+  Future<void> _reportDistributionFailure(
+    String taskId,
+    int transferred,
+    String error, {
+    required bool retryable,
+  }) async {
+    try {
+      await _api.postJson(
+        '/distributions/tasks/${Uri.encodeComponent(taskId)}/progress',
+        <String, dynamic>{
+          'device_id': _clientId,
+          'state': 'failed',
+          'transferred_bytes': transferred,
+          'retryable': retryable,
+          'error': error,
+        },
+      );
+    } catch (_) {
+      // The Core lease recovers tasks when an error report cannot be delivered.
+    }
+    if (mounted) {
+      setState(() => _rendererStatus = 'Distribution failed: $error');
+    }
+    await _refreshDistributionJobs();
+  }
+
   Future<void> _refreshZonesSilently() async {
     try {
       final zones = await _api.getJson('/zones') as List<dynamic>;
+      _zoneRefreshFailures = 0;
       if (!mounted) {
         return;
       }
@@ -874,7 +1668,12 @@ class _CoreDashboardState extends State<CoreDashboard>
         _syncPlaybackFromSelectedZone();
       });
     } catch (_) {
-      // The main refresh path owns visible connection errors.
+      _zoneRefreshFailures += 1;
+      if (!_offlineMode &&
+          _zoneRefreshFailures >= 3 &&
+          _offlineLibrary.copies.isNotEmpty) {
+        await _activateOfflineMode();
+      }
     }
   }
 
@@ -977,6 +1776,11 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _handleOutputComplete(String outputId) async {
+    if (_offlineMode && outputId == _clientOutputId) {
+      await _finishOfflinePlayback('completed');
+      await _playNextOfflineTrack(completed: true);
+      return;
+    }
     await _reportRendererState('stopped', outputId: outputId);
   }
 
@@ -1020,6 +1824,240 @@ class _CoreDashboardState extends State<CoreDashboard>
     setState(() => _applyLibrarySettingsPayload(result));
   }
 
+  Future<void> _addClientLibraryRoot() async {
+    try {
+      final addFolderLabel = _tr(context, 'Add folder');
+      final androidSelection = Platform.isAndroid
+          ? await _IntMusicPlatform.instance.selectClientLibraryFolder()
+          : null;
+      final path = Platform.isAndroid
+          ? androidSelection?.path
+          : await getDirectoryPath(confirmButtonText: addFolderLabel);
+      if (!mounted || path == null || path.trim().isEmpty) {
+        return;
+      }
+      final access = Platform.isAndroid
+          ? (path: path, token: androidSelection!.token as String?)
+          : await _IntMusicPlatform.instance.persistFolderAccess(path);
+      final normalizedPath = _normalizeLocalRootPath(access.path);
+      final existing = _clientLibraryRoots
+          .where((root) => root.path == normalizedPath)
+          .firstOrNull;
+      if (existing != null) {
+        await _syncClientLibraryRoot(existing.externalId);
+        return;
+      }
+      final root = _ClientLibraryRoot(
+        externalId: _newClientLibraryRootId(),
+        path: normalizedPath,
+        displayName:
+            androidSelection?.displayName ??
+            _localRootDisplayName(normalizedPath),
+        accessToken: access.token,
+      );
+      setState(() => _clientLibraryRoots = [..._clientLibraryRoots, root]);
+      await _persistClientLibraryRoots();
+      await _syncClientLibraryRoot(root.externalId);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Unable to add this device folder: $error');
+      }
+    }
+  }
+
+  Future<void> _syncAllClientLibraryRoots() async {
+    for (final root in List<_ClientLibraryRoot>.of(_clientLibraryRoots)) {
+      await _syncClientLibraryRoot(root.externalId, refreshAfter: false);
+    }
+    if (mounted && _clientLibraryRoots.isNotEmpty) {
+      await _refreshAll();
+    }
+  }
+
+  Future<void> _syncClientLibraryRoot(
+    String externalId, {
+    bool refreshAfter = true,
+  }) async {
+    final root = _clientLibraryRoots
+        .where((item) => item.externalId == externalId)
+        .firstOrNull;
+    if (root == null || _clientLibrarySyncingRootIds.contains(externalId)) {
+      return;
+    }
+    setState(() {
+      _clientLibrarySyncingRootIds.add(externalId);
+      _replaceClientLibraryRoot(root.copyWith(clearError: true));
+    });
+    try {
+      final directory = Directory(root.path);
+      if (!await directory.exists()) {
+        throw FileSystemException(
+          'The folder is unavailable. Re-add it to restore access.',
+          root.path,
+        );
+      }
+      final scanId =
+          '${DateTime.now().toUtc().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
+      var accepted = 0;
+      var batch = <Map<String, dynamic>>[];
+      final seenExternalIds = <String>{};
+      Future<void> sendBatch({required bool complete}) async {
+        final sentBatch = List<Map<String, dynamic>>.of(batch);
+        final result = _asMap(
+          await _api.postJson('/client-library/manifests', <String, dynamic>{
+            'device_id': _clientId,
+            'device_name': _clientAlias(),
+            'platform': Platform.operatingSystem,
+            'root': <String, dynamic>{
+              'external_id': root.externalId,
+              'display_name': root.displayName,
+              'path_hint': root.path,
+            },
+            'scan_id': scanId,
+            'complete': complete,
+            'files': batch,
+          }),
+        );
+        accepted += _intValue(result['accepted_files']) ?? batch.length;
+        final bindings = <String, Map<String, dynamic>>{
+          for (final value in ((result['bindings'] as List?) ?? const []))
+            if (value is Map && value['external_id'] != null)
+              value['external_id'].toString(): value.cast<String, dynamic>(),
+        };
+        for (final file in sentBatch) {
+          final externalId = file['external_id']?.toString();
+          final binding = externalId == null ? null : bindings[externalId];
+          final trackId = _intValue(binding?['track_id']);
+          final variantId = _intValue(binding?['media_variant_id']);
+          if (externalId == null || trackId == null || variantId == null) {
+            continue;
+          }
+          seenExternalIds.add(externalId);
+          _offlineLibrary.upsert(
+            _OfflineTrackCopy(
+              trackId: trackId,
+              mediaVariantId: variantId,
+              rootExternalId: root.externalId,
+              fileExternalId: externalId,
+              relativePath: file['relative_path']?.toString() ?? externalId,
+              extension: file['extension']?.toString() ?? '',
+              sizeBytes: _intValue(file['size_bytes']) ?? 0,
+              modifiedAt:
+                  DateTime.tryParse(file['modified_at']?.toString() ?? '') ??
+                  DateTime.now().toUtc(),
+              metadata:
+                  (file['metadata'] as Map?)?.cast<String, dynamic>() ??
+                  const <String, dynamic>{},
+              isFavorite: _offlineLibrary.track(trackId)?.isFavorite ?? false,
+              playCount: _offlineLibrary.track(trackId)?.playCount ?? 0,
+            ),
+          );
+        }
+        batch = <Map<String, dynamic>>[];
+      }
+
+      await for (final entity in directory.list(
+        recursive: true,
+        followLinks: false,
+      )) {
+        if (entity is! File || !_isSupportedClientAudioPath(entity.path)) {
+          continue;
+        }
+        batch.add(await _clientFileManifest(root.path, entity));
+        if (batch.length >= 50) {
+          await sendBatch(complete: false);
+        }
+      }
+      await sendBatch(complete: true);
+      _offlineLibrary.retainRootFiles(root.externalId, seenExternalIds);
+      await _OfflineLibraryStore.save(_offlineLibrary);
+      final updated = root.copyWith(
+        lastSyncedAt: DateTime.now().toUtc(),
+        fileCount: accepted,
+        clearError: true,
+      );
+      if (mounted) {
+        setState(() => _replaceClientLibraryRoot(updated));
+      } else {
+        _replaceClientLibraryRoot(updated);
+      }
+      await _persistClientLibraryRoots();
+      if (refreshAfter && mounted) {
+        await _refreshAll();
+      }
+    } catch (error) {
+      final updated = root.copyWith(lastError: error.toString());
+      if (mounted) {
+        setState(() {
+          _replaceClientLibraryRoot(updated);
+          _error = 'Local library sync failed: $error';
+        });
+      } else {
+        _replaceClientLibraryRoot(updated);
+      }
+      await _persistClientLibraryRoots();
+    } finally {
+      if (mounted) {
+        setState(() => _clientLibrarySyncingRootIds.remove(externalId));
+      } else {
+        _clientLibrarySyncingRootIds.remove(externalId);
+      }
+    }
+  }
+
+  Future<void> _removeClientLibraryRoot(String externalId) async {
+    final root = _clientLibraryRoots
+        .where((item) => item.externalId == externalId)
+        .firstOrNull;
+    if (root == null) {
+      return;
+    }
+    try {
+      await _api.deleteJson(
+        '/client-library/devices/${Uri.encodeComponent(_clientId)}'
+        '/roots/${Uri.encodeComponent(externalId)}',
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _clientLibraryRoots = _clientLibraryRoots
+            .where((item) => item.externalId != externalId)
+            .toList(growable: false);
+        _offlineLibrary.retainRootFiles(externalId, const <String>{});
+      });
+      await _persistClientLibraryRoots();
+      await _OfflineLibraryStore.save(_offlineLibrary);
+      await _refreshAll();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = 'Unable to remove local folder: $error');
+      }
+    }
+  }
+
+  void _replaceClientLibraryRoot(_ClientLibraryRoot replacement) {
+    _clientLibraryRoots = _clientLibraryRoots
+        .map(
+          (root) =>
+              root.externalId == replacement.externalId ? replacement : root,
+        )
+        .toList(growable: false);
+  }
+
+  Future<void> _persistClientLibraryRoots() async {
+    final preferences = _preferences ?? await SharedPreferences.getInstance();
+    _preferences = preferences;
+    await preferences.setString(
+      _prefsClientLibraryRootsKey,
+      jsonEncode(
+        _clientLibraryRoots
+            .map((root) => root.toJson())
+            .toList(growable: false),
+      ),
+    );
+  }
+
   Future<Map<String, dynamic>> _refreshLibrarySettingsPayload() async {
     final results = await Future.wait([
       _api.getJson('/library/roots'),
@@ -1040,6 +2078,43 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<Map<String, dynamic>> _loadSearch(String query, {int limit = 25}) {
+    if (_offlineMode) {
+      final normalized = query.trim().toLowerCase();
+      bool matches(Map<String, dynamic> value, Iterable<String> keys) => keys
+          .map((key) => value[key]?.toString().toLowerCase() ?? '')
+          .any((value) => value.contains(normalized));
+      return Future<Map<String, dynamic>>.value(<String, dynamic>{
+        'query': query,
+        'tracks': _tracks
+            .whereType<Map>()
+            .map((value) => value.cast<String, dynamic>())
+            .where(
+              (value) => matches(value, const [
+                'title',
+                'artist_display',
+                'album_title',
+              ]),
+            )
+            .take(limit)
+            .toList(growable: false),
+        'albums': _albums
+            .whereType<Map>()
+            .map((value) => value.cast<String, dynamic>())
+            .where(
+              (value) =>
+                  matches(value, const ['title', 'album_artist_display']),
+            )
+            .take(limit)
+            .toList(growable: false),
+        'artists': _artists
+            .whereType<Map>()
+            .map((value) => value.cast<String, dynamic>())
+            .where((value) => matches(value, const ['name', 'sort_name']))
+            .take(limit)
+            .toList(growable: false),
+        'playlists': const <dynamic>[],
+      });
+    }
     return _api
         .getJson('/search?q=${Uri.encodeQueryComponent(query)}&limit=$limit')
         .then(_asMap);
@@ -1240,6 +2315,11 @@ class _CoreDashboardState extends State<CoreDashboard>
               .toList(growable: false);
         });
       }
+      if (eventType == 'distribution.created' ||
+          eventType == 'distribution.updated') {
+        unawaited(_refreshDistributionJobs());
+        unawaited(_pollDistributionTasks());
+      }
     } catch (error) {
       if (mounted) {
         setState(() => _rendererStatus = 'Renderer event error');
@@ -1260,8 +2340,9 @@ class _CoreDashboardState extends State<CoreDashboard>
           }
           final positionMs = _intValue(command['position_ms']) ?? 0;
           final trackId = _intValue(command['track_id']);
+          final source = await _rendererSource(trackId, streamPath);
           await player.stop();
-          await player.open(_api.apiUrl(streamPath));
+          await player.open(source.uri, localFile: source.localFile);
           if (trackId != null) {
             _rendererLoadedTrackByOutput[outputId] = trackId;
           }
@@ -1356,12 +2437,35 @@ class _CoreDashboardState extends State<CoreDashboard>
       );
     }
     await player.stop();
-    await player.open(_api.apiUrl(streamPath));
+    final source = await _rendererSource(trackId, streamPath);
+    await player.open(source.uri, localFile: source.localFile);
     _rendererLoadedTrackByOutput[outputId] = trackId;
     if (positionMs > 0) {
       await player.seek(Duration(milliseconds: positionMs));
     }
     return true;
+  }
+
+  Future<({String uri, bool localFile})> _rendererSource(
+    int? trackId,
+    String streamPath,
+  ) async {
+    if (trackId != null && _clientLibraryRoots.isNotEmpty) {
+      try {
+        final media = _asMap(await _api.getJson('/tracks/$trackId/media'));
+        final localPath = _resolveClientReplicaPath(
+          _clientLibraryRoots,
+          media,
+          _clientId,
+        );
+        if (localPath != null && await File(localPath).exists()) {
+          return (uri: localPath, localFile: true);
+        }
+      } catch (_) {
+        // A catalog lookup failure must not prevent the normal Core stream.
+      }
+    }
+    return (uri: _api.apiUrl(streamPath), localFile: false);
   }
 
   Future<void> _reportRendererState(
@@ -1487,6 +2591,16 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _openAlbumDetail(int albumId) async {
+    if (_offlineMode) {
+      final detail = _offlineAlbumDetail(_offlineLibrary, albumId);
+      if (detail != null && mounted) {
+        setState(() {
+          _albumDetailCache[albumId] = detail;
+          _navigateToInState(_AppRoute.album(albumId));
+        });
+      }
+      return;
+    }
     final detail = await _run<Map<String, dynamic>>(
       () async => _asMap(await _api.getJson('/albums/$albumId')),
     );
@@ -1503,6 +2617,16 @@ class _CoreDashboardState extends State<CoreDashboard>
   void _closeAlbumDetail() => _closeDetailPage();
 
   Future<void> _openArtistDetail(int artistId) async {
+    if (_offlineMode) {
+      final detail = _offlineArtistDetail(_offlineLibrary, artistId);
+      if (detail != null && mounted) {
+        setState(() {
+          _artistDetailCache[artistId] = detail;
+          _navigateToInState(_AppRoute.artist(artistId));
+        });
+      }
+      return;
+    }
     final detail = await _run<Map<String, dynamic>>(
       () async => _asMap(await _api.getJson('/artists/$artistId')),
     );
@@ -1551,6 +2675,20 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _openTrackDetail(int trackId) async {
+    if (_offlineMode) {
+      final copy = await _availableOfflineCopy(trackId);
+      final path = copy == null
+          ? null
+          : _offlineCopyPath(copy, _clientLibraryRoots);
+      if (copy != null && path != null && mounted) {
+        final detail = copy.toTrackDetail(path);
+        setState(() {
+          _trackDetailCache[trackId] = detail;
+          _navigateToInState(_AppRoute.track(trackId));
+        });
+      }
+      return;
+    }
     final detail = await _run<Map<String, dynamic>>(
       () async => _asMap(await _api.getJson('/tracks/$trackId')),
     );
@@ -1608,6 +2746,41 @@ class _CoreDashboardState extends State<CoreDashboard>
       _replaceTrackInCollections(updatedTrack);
       if (_activeTrackDetailId == trackId) {
         _activeTrackDetail = detail;
+      }
+    });
+  }
+
+  Future<void> _manageTrackVersions(int trackId) async {
+    final detail = _trackDetailCache[trackId];
+    if (detail == null) {
+      return;
+    }
+    final changed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _LocaleScope(
+        language: _language,
+        child: _TrackVersionManagerDialog(
+          api: _api,
+          trackId: trackId,
+          detail: detail,
+        ),
+      ),
+    );
+    if (changed != true || !mounted) {
+      return;
+    }
+    final refreshed = await _run<Map<String, dynamic>>(
+      () async => _asMap(await _api.getJson('/tracks/$trackId')),
+    );
+    if (!mounted || refreshed == null) {
+      return;
+    }
+    setState(() {
+      _trackDetailCache.clear();
+      _trackDetailCache[trackId] = refreshed;
+      if (_activeTrackDetailId == trackId) {
+        _activeTrackDetail = refreshed;
       }
     });
   }
@@ -1754,6 +2927,35 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (trackId == null) {
       return;
     }
+    if (_offlineMode) {
+      final favorite = track['is_favorite'] != true;
+      _offlineLibrary.setFavorite(trackId, favorite);
+      _offlineLibrary.outbox.add(
+        _OfflineMutation(
+          id: _newClientMutationId(),
+          kind: 'favorite',
+          trackId: trackId,
+          occurredAt: DateTime.now().toUtc(),
+          payload: <String, dynamic>{'is_favorite': favorite},
+        ),
+      );
+      final updated = _offlineLibrary.track(trackId)?.toTrackSummary();
+      if (updated != null && mounted) {
+        setState(() {
+          _replaceTrackInCollections(updated);
+          _replaceTrackInDetailCache(_albumDetailCache, updated);
+          _replaceTrackInDetailCache(_artistDetailCache, updated);
+          if (_activeTrackDetailId == trackId && _activeTrackDetail != null) {
+            _activeTrackDetail = <String, dynamic>{
+              ...?_activeTrackDetail,
+              'track': updated,
+            };
+          }
+        });
+      }
+      await _OfflineLibraryStore.save(_offlineLibrary);
+      return;
+    }
     final detail = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson('/tracks/$trackId/favorite', <String, dynamic>{
@@ -1765,6 +2967,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final updatedTrack = _asMap(detail['track']);
+    _offlineLibrary.setFavorite(trackId, updatedTrack['is_favorite'] == true);
+    unawaited(_OfflineLibraryStore.save(_offlineLibrary));
     setState(() {
       _replaceTrackInCollections(updatedTrack);
       if (_activeTrackDetailId == trackId) {
@@ -1840,7 +3044,230 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  Future<_OfflineTrackCopy?> _availableOfflineCopy(int trackId) async {
+    final copies = _offlineLibrary.copies.values.where(
+      (copy) => copy.trackId == trackId,
+    );
+    for (final copy in copies) {
+      final path = _offlineCopyPath(copy, _clientLibraryRoots);
+      if (path != null && await File(path).exists()) {
+        return copy;
+      }
+    }
+    return null;
+  }
+
+  void _setOfflineQueue(List<int> trackIds, {int? startIndex}) {
+    final summaries = <int, Map<String, dynamic>>{
+      for (final value in _offlineTrackSummaries(
+        _offlineLibrary,
+      ).whereType<Map>())
+        if (_intValue(value['id']) != null)
+          _intValue(value['id'])!: value.cast<String, dynamic>(),
+    };
+    final validIds = trackIds
+        .where((trackId) => summaries.containsKey(trackId))
+        .toList(growable: false);
+    _playbackQueue = <String, dynamic>{
+      'zone_id': _clientOutputId,
+      'revision': (_intValue(_playbackQueue?['revision']) ?? 0) + 1,
+      'mode': _playbackMode.nameForApi,
+      'current_index':
+          startIndex == null || startIndex < 0 || startIndex >= validIds.length
+          ? null
+          : startIndex,
+      'items': <dynamic>[
+        for (var index = 0; index < validIds.length; index += 1)
+          <String, dynamic>{
+            'id': -(index + 1),
+            'position': index,
+            'track': summaries[validIds[index]],
+          },
+      ],
+    };
+  }
+
+  Future<void> _playOfflineTrack(
+    int trackId, {
+    List<int>? sourceTrackIds,
+  }) async {
+    var copy = await _availableOfflineCopy(trackId);
+    if (copy == null) {
+      if (mounted) {
+        setState(
+          () => _error = _tr(
+            context,
+            'No accessible local copy is available for this track.',
+          ),
+        );
+      }
+      return;
+    }
+    if (sourceTrackIds != null) {
+      _setOfflineQueue(
+        sourceTrackIds,
+        startIndex: sourceTrackIds.indexOf(trackId),
+      );
+    } else {
+      final items = _queueItems();
+      final existingIndex = items.indexWhere(
+        (item) => _intValue(_asMap(item['track'])['id']) == trackId,
+      );
+      if (existingIndex < 0) {
+        _setOfflineQueue(<int>[trackId], startIndex: 0);
+      } else {
+        _playbackQueue = <String, dynamic>{
+          ...?_playbackQueue,
+          'current_index': existingIndex,
+        };
+      }
+    }
+    await _finishOfflinePlayback('replaced');
+    final path = _offlineCopyPath(copy, _clientLibraryRoots);
+    if (path == null) return;
+    final player = await _playerForOutput(_clientOutputId);
+    await player.stop();
+    await player.open(path, localFile: true);
+    final measuredDuration = await player.durationMs();
+    if ((_intValue(copy.metadata['duration_ms']) ?? 0) <= 0 &&
+        measuredDuration != null &&
+        measuredDuration > 0) {
+      copy = copy.copyWith(durationMs: measuredDuration);
+      _offlineLibrary.upsert(copy);
+      unawaited(_OfflineLibraryStore.save(_offlineLibrary));
+    }
+    _offlinePlaybackStartedAt = DateTime.now().toUtc();
+    _offlinePlaybackStartPositionMs = 0;
+    final summary = copy.toTrackSummary();
+    final detail = copy.toTrackDetail(path);
+    final playback = <String, dynamic>{
+      'zone_id': _clientOutputId,
+      'state': 'playing',
+      'track_id': trackId,
+      'track_title': summary['title'],
+      'position_ms': 0,
+      'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
+    };
+    if (!mounted) return;
+    setState(() {
+      _replaceTrackInCollections(summary);
+      _activeTrackDetailId = trackId;
+      _activeTrackDetail = detail;
+      _trackDetailCache[trackId] = detail;
+      _applyPlayback(playback);
+      _error = null;
+    });
+  }
+
+  Future<void> _finishOfflinePlayback(String reason) async {
+    if (!_offlineMode || _offlinePlaybackStartedAt == null) return;
+    final trackId = _intValue(_playback?['track_id']);
+    if (trackId == null) return;
+    final player = await _playerForOutput(_clientOutputId);
+    final endPosition =
+        await player.currentPositionMs() ??
+        _estimatedPlaybackPositionMs(_playback);
+    final mutation = _OfflineMutation(
+      id: _newClientMutationId(),
+      kind: 'playback',
+      trackId: trackId,
+      occurredAt: DateTime.now().toUtc(),
+      payload: <String, dynamic>{
+        'started_at': _offlinePlaybackStartedAt!.toIso8601String(),
+        'ended_at': DateTime.now().toUtc().toIso8601String(),
+        'start_position_ms': _offlinePlaybackStartPositionMs,
+        'end_position_ms': endPosition,
+        'reason': reason,
+      },
+    );
+    _offlineLibrary.outbox.add(mutation);
+    _offlineLibrary.incrementPlayCount(trackId);
+    _offlinePlaybackStartedAt = null;
+    await _OfflineLibraryStore.save(_offlineLibrary);
+  }
+
+  Future<void> _playNextOfflineTrack({bool completed = false}) async {
+    final items = _queueItems();
+    if (items.isEmpty) {
+      await _setOfflineStopped();
+      return;
+    }
+    var currentIndex = _intValue(_playbackQueue?['current_index']) ?? -1;
+    if (_playbackMode == _PlaybackMode.repeatOne && completed) {
+      // Keep the current index.
+    } else if (_playbackMode == _PlaybackMode.shuffle && items.length > 1) {
+      var next = currentIndex;
+      while (next == currentIndex) {
+        next = Random.secure().nextInt(items.length);
+      }
+      currentIndex = next;
+    } else {
+      currentIndex += 1;
+      if (currentIndex >= items.length) {
+        if (_playbackMode == _PlaybackMode.repeatAll) {
+          currentIndex = 0;
+        } else {
+          await _setOfflineStopped();
+          return;
+        }
+      }
+    }
+    final trackId = _intValue(_asMap(items[currentIndex]['track'])['id']);
+    if (trackId == null) {
+      await _setOfflineStopped();
+      return;
+    }
+    _playbackQueue = <String, dynamic>{
+      ...?_playbackQueue,
+      'current_index': currentIndex,
+    };
+    await _playOfflineTrack(trackId);
+  }
+
+  Future<void> _playPreviousOfflineTrack() async {
+    final items = _queueItems();
+    if (items.isEmpty) return;
+    var currentIndex = _intValue(_playbackQueue?['current_index']) ?? 0;
+    currentIndex -= 1;
+    if (currentIndex < 0) {
+      currentIndex = _playbackMode == _PlaybackMode.repeatAll
+          ? items.length - 1
+          : 0;
+    }
+    final trackId = _intValue(_asMap(items[currentIndex]['track'])['id']);
+    if (trackId == null) return;
+    _playbackQueue = <String, dynamic>{
+      ...?_playbackQueue,
+      'current_index': currentIndex,
+    };
+    await _playOfflineTrack(trackId);
+  }
+
+  Future<void> _setOfflineStopped() async {
+    final player = await _playerForOutput(_clientOutputId);
+    await player.stop();
+    if (!mounted) return;
+    setState(() {
+      _applyPlayback(<String, dynamic>{
+        'zone_id': _clientOutputId,
+        'state': 'stopped',
+        'track_id': null,
+        'track_title': null,
+        'position_ms': 0,
+        'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
+      });
+    });
+  }
+
   Future<void> _playTrack(int trackId) async {
+    if (_offlineMode) {
+      final trackIds = _tracks
+          .map((track) => _intValue((track as Map)['id']))
+          .whereType<int>()
+          .toList(growable: false);
+      await _playOfflineTrack(trackId, sourceTrackIds: trackIds);
+      return;
+    }
     final queueItems = (_playbackQueue?['items'] as List?) ?? const [];
     final queued = queueItems.any((item) {
       final queueItem = (item as Map).cast<String, dynamic>();
@@ -1888,6 +3315,10 @@ class _CoreDashboardState extends State<CoreDashboard>
         .whereType<int>()
         .toList(growable: false);
     final startIndex = trackIds.indexOf(trackId);
+    if (_offlineMode) {
+      await _playOfflineTrack(trackId, sourceTrackIds: trackIds);
+      return;
+    }
     if (startIndex < 0) {
       await _playTrack(trackId);
       return;
@@ -1906,7 +3337,14 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
-  Future<Map<String, dynamic>?> _playTrackOnZone(int trackId, String zoneId) {
+  Future<Map<String, dynamic>?> _playTrackOnZone(
+    int trackId,
+    String zoneId,
+  ) async {
+    if (_offlineMode) {
+      await _playOfflineTrack(trackId);
+      return _playback;
+    }
     return _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -1918,6 +3356,11 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _playPreviousTrack() async {
+    if (_offlineMode) {
+      await _finishOfflinePlayback('previous');
+      await _playPreviousOfflineTrack();
+      return;
+    }
     final playback = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -1932,6 +3375,11 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _playNextTrack() async {
+    if (_offlineMode) {
+      await _finishOfflinePlayback('next');
+      await _playNextOfflineTrack();
+      return;
+    }
     final playback = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -1981,6 +3429,21 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (trackIds.isEmpty) {
       return;
     }
+    if (_offlineMode) {
+      final ids = _queueItems()
+          .map((item) => _intValue(_asMap(item['track'])['id']))
+          .whereType<int>()
+          .toList();
+      final currentIndex = _intValue(_playbackQueue?['current_index']);
+      final insertAt = playNext
+          ? min((currentIndex ?? -1) + 1, ids.length)
+          : ids.length;
+      ids.insertAll(insertAt, trackIds);
+      if (mounted) {
+        setState(() => _setOfflineQueue(ids, startIndex: currentIndex));
+      }
+      return;
+    }
     final currentIndex = _intValue(_playbackQueue?['current_index']);
     final position = playNext ? (currentIndex ?? -1) + 1 : null;
     final queue = await _run<Map<String, dynamic>>(
@@ -2012,6 +3475,15 @@ class _CoreDashboardState extends State<CoreDashboard>
     int? startIndex,
     _PlaybackMode? mode,
   }) async {
+    if (_offlineMode) {
+      if (mode != null) _playbackMode = mode;
+      if (mounted) {
+        setState(() => _setOfflineQueue(trackIds, startIndex: startIndex));
+      } else {
+        _setOfflineQueue(trackIds, startIndex: startIndex);
+      }
+      return _playbackQueue;
+    }
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -2032,6 +3504,15 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   Future<void> _playCollection(List<int> trackIds, bool shuffle) async {
     if (trackIds.isEmpty) {
+      return;
+    }
+    if (_offlineMode) {
+      final offlineIds = List<int>.of(trackIds);
+      if (shuffle) offlineIds.shuffle(Random.secure());
+      _playbackMode = shuffle
+          ? _PlaybackMode.shuffle
+          : _PlaybackMode.sequential;
+      await _playOfflineTrack(offlineIds.first, sourceTrackIds: offlineIds);
       return;
     }
     final queue = await _replaceQueue(
@@ -2074,6 +3555,23 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<Map<String, dynamic>?> _moveQueueItem(int from, int to) async {
+    if (_offlineMode) {
+      final ids = _queueItems()
+          .map((item) => _intValue(_asMap(item['track'])['id']))
+          .whereType<int>()
+          .toList();
+      if (from < 0 || from >= ids.length || to < 0 || to >= ids.length) {
+        return _playbackQueue;
+      }
+      final currentTrackId = _intValue(_playback?['track_id']);
+      final moved = ids.removeAt(from);
+      ids.insert(to, moved);
+      final currentIndex = ids.indexOf(currentTrackId ?? -1);
+      if (mounted) {
+        setState(() => _setOfflineQueue(ids, startIndex: currentIndex));
+      }
+      return _playbackQueue;
+    }
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -2089,6 +3587,20 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<Map<String, dynamic>?> _removeQueueItem(int itemId) async {
+    if (_offlineMode) {
+      final items = _queueItems();
+      final ids = items
+          .where((item) => _intValue(item['id']) != itemId)
+          .map((item) => _intValue(_asMap(item['track'])['id']))
+          .whereType<int>()
+          .toList(growable: false);
+      final currentTrackId = _intValue(_playback?['track_id']);
+      final currentIndex = ids.indexOf(currentTrackId ?? -1);
+      if (mounted) {
+        setState(() => _setOfflineQueue(ids, startIndex: currentIndex));
+      }
+      return _playbackQueue;
+    }
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.deleteJson(
@@ -2110,6 +3622,18 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _setPlaybackMode(_PlaybackMode mode) async {
+    if (_offlineMode) {
+      if (mounted) {
+        setState(() {
+          _playbackMode = mode;
+          _playbackQueue = <String, dynamic>{
+            ...?_playbackQueue,
+            'mode': mode.nameForApi,
+          };
+        });
+      }
+      return;
+    }
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -2236,10 +3760,53 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _pausePlayback() async {
+    if (_offlineMode) {
+      final player = await _playerForOutput(_clientOutputId);
+      final position =
+          await player.currentPositionMs() ??
+          _estimatedPlaybackPositionMs(_playback);
+      await player.pause();
+      if (mounted) {
+        setState(() {
+          _applyPlayback(<String, dynamic>{
+            ...?_playback,
+            'state': 'paused',
+            'position_ms': position,
+          });
+        });
+      }
+      return;
+    }
     await _pauseZone(_activeZoneId());
   }
 
   Future<void> _resumePlayback() async {
+    if (_offlineMode) {
+      final trackId = _intValue(_playback?['track_id']);
+      if (trackId == null) {
+        final items = _queueItems();
+        if (items.isNotEmpty) {
+          final index = _intValue(_playbackQueue?['current_index']) ?? 0;
+          final nextTrackId = _intValue(
+            _asMap(items[index.clamp(0, items.length - 1)]['track'])['id'],
+          );
+          if (nextTrackId != null) await _playOfflineTrack(nextTrackId);
+        }
+        return;
+      }
+      final player = await _playerForOutput(_clientOutputId);
+      await player.play();
+      if (mounted) {
+        setState(() {
+          _applyPlayback(<String, dynamic>{
+            ...?_playback,
+            'state': 'playing',
+            'position_ms': _estimatedPlaybackPositionMs(_playback),
+          });
+        });
+      }
+      return;
+    }
     await _resumeZone(_activeZoneId());
   }
 
@@ -2252,6 +3819,11 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _stopZone(String zoneId) async {
+    if (_offlineMode) {
+      await _finishOfflinePlayback('stopped');
+      await _setOfflineStopped();
+      return;
+    }
     await _postZoneAction(zoneId, 'stop');
   }
 
@@ -2340,6 +3912,19 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _seekPlayback(int positionMs) async {
+    if (_offlineMode) {
+      final player = await _playerForOutput(_clientOutputId);
+      await player.seek(Duration(milliseconds: positionMs));
+      if (mounted) {
+        setState(() {
+          _applyPlayback(<String, dynamic>{
+            ...?_playback,
+            'position_ms': positionMs,
+          });
+        });
+      }
+      return;
+    }
     final playback = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -2366,6 +3951,25 @@ class _CoreDashboardState extends State<CoreDashboard>
     final zoneId = _activeZoneId();
     final normalized = volume.clamp(0.0, 1.0);
     final effectiveMuted = muted ?? (normalized <= 0.001);
+    if (_offlineMode) {
+      final player = await _playerForOutput(_clientOutputId);
+      await player.setVolume(effectiveMuted ? 0 : normalized);
+      if (mounted) {
+        setState(() {
+          _zones = _zones
+              .map((value) {
+                final zone = _asMap(value);
+                return <String, dynamic>{
+                  ...zone,
+                  'volume': normalized,
+                  'muted': effectiveMuted,
+                };
+              })
+              .toList(growable: false);
+        });
+      }
+      return;
+    }
     final result = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -2669,6 +4273,25 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _loadActiveTrackDetail(int trackId) async {
+    if (_offlineMode) {
+      final copy = await _availableOfflineCopy(trackId);
+      final path = copy == null
+          ? null
+          : _offlineCopyPath(copy, _clientLibraryRoots);
+      if (!mounted ||
+          copy == null ||
+          path == null ||
+          _activeTrackDetailId != trackId) {
+        return;
+      }
+      final detail = copy.toTrackDetail(path);
+      setState(() {
+        _activeTrackDetail = detail;
+        _trackDetailCache[trackId] = detail;
+      });
+      _syncSystemPlayback();
+      return;
+    }
     try {
       final detail = _asMap(await _api.getJson('/tracks/$trackId'));
       if (!mounted || _activeTrackDetailId != trackId) {
@@ -2708,6 +4331,7 @@ class _CoreDashboardState extends State<CoreDashboard>
         onPlayCollection: _playCollection,
         onQueueCollection: (trackIds, playNext) =>
             _addTracksToQueue(trackIds, playNext: playNext),
+        onDistributeCollection: _distributeTracks,
         child: CallbackShortcuts(
           bindings: <ShortcutActivator, VoidCallback>{
             const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true):
@@ -3061,6 +4685,7 @@ class _CoreDashboardState extends State<CoreDashboard>
           onPlayTrack: _playTrack,
           onToggleFavorite: _toggleFavorite,
           onAddToPlaylist: _addTrackToPlaylist,
+          onDistributeTracks: _distributeTracks,
           viewMode: _trackViewMode,
           onViewModeChanged: (mode) => _setLibraryViewMode(
             _prefsTrackViewModeKey,
@@ -3103,6 +4728,12 @@ class _CoreDashboardState extends State<CoreDashboard>
           settings: _favoriteSettings,
           metadataSettings: _metadataSettings,
           libraryRoots: _libraryRoots,
+          clientLibraryRoots: _clientLibraryRoots,
+          clientLibraryStatuses: _clientLibraryStatuses,
+          clientLibrarySyncingRootIds: _clientLibrarySyncingRootIds,
+          distributionJobs: _distributionJobs,
+          transcodingStatus: _transcodingStatus,
+          clientId: _clientId,
           diagnostics: _diagnostics,
           language: _language,
           pinCurrentClientRegion: _pinCurrentClientRegion,
@@ -3113,6 +4744,15 @@ class _CoreDashboardState extends State<CoreDashboard>
           onScan: _startScan,
           onAddLibraryRoot: () => unawaited(_addLibraryRoot()),
           onRemoveLibraryRoot: (id) => unawaited(_removeLibraryRoot(id)),
+          onAddClientLibraryRoot: () => unawaited(_addClientLibraryRoot()),
+          onSyncClientLibraryRoot: (id) =>
+              unawaited(_syncClientLibraryRoot(id)),
+          onSyncAllClientLibraryRoots: () =>
+              unawaited(_syncAllClientLibraryRoots()),
+          onRemoveClientLibraryRoot: (id) =>
+              unawaited(_removeClientLibraryRoot(id)),
+          onRefreshDistributions: () => unawaited(_refreshDistributionJobs()),
+          onCancelDistribution: (id) => unawaited(_cancelDistributionJob(id)),
           onSaveServerAlias: () => unawaited(_saveServerAlias()),
           onSaveClientAlias: () => unawaited(_saveClientAlias()),
           onLanguageChanged: (language) => unawaited(_setLanguage(language)),
@@ -3154,6 +4794,9 @@ class _CoreDashboardState extends State<CoreDashboard>
           onToggleFavorite: _toggleFavorite,
           onAddToPlaylist: _addTrackToPlaylist,
           onEdit: trackId == null ? () async {} : () => _editTrack(trackId),
+          onManageVersions: trackId == null
+              ? () async {}
+              : () => _manageTrackVersions(trackId),
         );
       case _AppRouteKind.album:
         final detail =

@@ -1,10 +1,23 @@
 package dev.intmusic.intmusic_client
 
+import android.Manifest
+import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.DocumentsContract
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
 
 object IntMusicPlatformBridge {
     var channel: MethodChannel? = null
@@ -15,7 +28,13 @@ object IntMusicPlatformBridge {
 }
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        private const val PICK_LIBRARY_FOLDER_REQUEST = 41021
+        private const val READ_LIBRARY_PERMISSION_REQUEST = 41022
+    }
+
     private var mediaServiceStarted = false
+    private var pendingLibraryFolderResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -58,6 +77,12 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "updateVolume" -> result.success(null)
+                "selectClientLibraryFolder" -> selectClientLibraryFolder(result)
+                "restoreClientLibraryFolder" -> restoreClientLibraryFolder(call.arguments, result)
+                "downloadDistributionTask" ->
+                    downloadDistributionTask(call.arguments, result)
+                "uploadDistributionSource" ->
+                    uploadDistributionSource(call.arguments, result)
                 "moveToBackground" -> {
                     moveTaskToBack(true)
                     result.success(null)
@@ -84,10 +109,552 @@ class MainActivity : FlutterActivity() {
                 } else {
                     result.notImplemented()
                 }
+        }
+    }
+
+    private fun selectClientLibraryFolder(result: MethodChannel.Result) {
+        if (pendingLibraryFolderResult != null) {
+            result.error(
+                "folder_picker_busy",
+                "Another music folder selection is already in progress",
+                null,
+            )
+            return
+        }
+        pendingLibraryFolderResult = result
+        val missingPermissions =
+            libraryPermissions().filter {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
             }
+        if (missingPermissions.isNotEmpty()) {
+            requestPermissions(
+                missingPermissions.toTypedArray(),
+                READ_LIBRARY_PERMISSION_REQUEST,
+            )
+            return
+        }
+        launchLibraryFolderPicker()
+    }
+
+    private fun launchLibraryFolderPicker() {
+        val intent =
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                .addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
+                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                )
+        startActivityForResult(intent, PICK_LIBRARY_FOLDER_REQUEST)
+    }
+
+    private fun libraryPermissions(): List<String> =
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU ->
+                listOf(Manifest.permission.READ_MEDIA_AUDIO)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ->
+                listOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                )
+            else -> emptyList()
+        }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != READ_LIBRARY_PERMISSION_REQUEST) {
+            return
+        }
+        if (grantResults.isNotEmpty() &&
+            grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        ) {
+            launchLibraryFolderPicker()
+        } else {
+            pendingLibraryFolderResult?.error(
+                "music_permission_denied",
+                "Music access is required to scan and play files from this folder",
+                null,
+            )
+            pendingLibraryFolderResult = null
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != PICK_LIBRARY_FOLDER_REQUEST) {
+            return
+        }
+        val pending = pendingLibraryFolderResult ?: return
+        pendingLibraryFolderResult = null
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            pending.success(null)
+            return
+        }
+        val uri = data.data!!
+        try {
+            val grantedFlags =
+                data.flags and
+                    (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            contentResolver.takePersistableUriPermission(
+                uri,
+                grantedFlags and
+                    (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION),
+            )
+            pending.success(libraryFolderPayload(uri))
+        } catch (error: Exception) {
+            pending.error(
+                "folder_access_failed",
+                "Unable to preserve access to the selected music folder",
+                error.message,
+            )
+        }
+    }
+
+    private fun restoreClientLibraryFolder(arguments: Any?, result: MethodChannel.Result) {
+        val values = arguments as? Map<*, *>
+        val bookmark = values?.get("bookmark")?.toString()
+        if (bookmark.isNullOrBlank()) {
+            result.error("invalid_folder_token", "Folder permission is missing", null)
+            return
+        }
+        try {
+            val uri = Uri.parse(bookmark)
+            val hasPermission =
+                contentResolver.persistedUriPermissions.any {
+                    it.uri == uri && it.isReadPermission && it.isWritePermission
+                }
+            if (!hasPermission) {
+                result.error(
+                    "folder_access_expired",
+                    "The selected folder permission is no longer valid",
+                    bookmark,
+                )
+                return
+            }
+            result.success(libraryFolderPayload(uri))
+        } catch (error: Exception) {
+            result.error(
+                "folder_restore_failed",
+                "Unable to restore access to the selected music folder",
+                error.message,
+            )
+        }
+    }
+
+    private fun downloadDistributionTask(arguments: Any?, result: MethodChannel.Result) {
+        val values = arguments as? Map<*, *>
+        val apiUrl = values?.get("apiUrl")?.toString()
+        val taskId = values?.get("taskId")?.toString()
+        val bookmark = values?.get("bookmark")?.toString()
+        val relativePath = values?.get("relativePath")?.toString()
+        val expectedSize = (values?.get("expectedSize") as? Number)?.toLong()
+        val expectedQuickHash = values?.get("expectedQuickHash")?.toString()
+        if (apiUrl.isNullOrBlank() ||
+            taskId.isNullOrBlank() ||
+            bookmark.isNullOrBlank() ||
+            relativePath.isNullOrBlank() ||
+            expectedSize == null ||
+            expectedSize < 0
+        ) {
+            result.error(
+                "invalid_distribution",
+                "The distribution download request is incomplete",
+                null,
+            )
+            return
+        }
+        Thread {
+            try {
+                val treeUri = Uri.parse(bookmark)
+                val hasPermission =
+                    contentResolver.persistedUriPermissions.any {
+                        it.uri == treeUri && it.isReadPermission && it.isWritePermission
+                    }
+                if (!hasPermission) {
+                    throw SecurityException(
+                        "The destination folder no longer has persistent read/write permission",
+                    )
+                }
+                val downloadDirectory = File(cacheDir, "intmusic-distribution")
+                downloadDirectory.mkdirs()
+                val partial = File(downloadDirectory, "$taskId.part")
+                downloadWithResume(apiUrl, partial, expectedSize)
+                val quickHash = quickFileHash(partial)
+                if (!expectedQuickHash.isNullOrBlank() &&
+                    !quickHash.equals(expectedQuickHash, ignoreCase = true)
+                ) {
+                    throw IllegalStateException(
+                        "Downloaded file failed its content verification",
+                    )
+                }
+                copyIntoDocumentTree(treeUri, relativePath, taskId, partial)
+                val bytes = partial.length()
+                partial.delete()
+                runOnUiThread {
+                    result.success(
+                        mapOf(
+                            "bytes" to bytes,
+                            "quickHash" to quickHash,
+                        ),
+                    )
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    result.error(
+                        "distribution_download_failed",
+                        "Unable to save the distributed music file",
+                        error.message,
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun uploadDistributionSource(arguments: Any?, result: MethodChannel.Result) {
+        val values = arguments as? Map<*, *>
+        val apiUrl = values?.get("apiUrl")?.toString()
+        val bookmark = values?.get("bookmark")?.toString()
+        val relativePath = values?.get("relativePath")?.toString()
+        val expectedSize = (values?.get("expectedSize") as? Number)?.toLong()
+        if (apiUrl.isNullOrBlank() ||
+            bookmark.isNullOrBlank() ||
+            relativePath.isNullOrBlank() ||
+            expectedSize == null ||
+            expectedSize < 0
+        ) {
+            result.error(
+                "invalid_source_upload",
+                "The distribution source request is incomplete",
+                null,
+            )
+            return
+        }
+        Thread {
+            try {
+                val treeUri = Uri.parse(bookmark)
+                val hasPermission =
+                    contentResolver.persistedUriPermissions.any {
+                        it.uri == treeUri && it.isReadPermission
+                    }
+                if (!hasPermission) {
+                    throw SecurityException(
+                        "The source folder no longer has persistent read permission",
+                    )
+                }
+                val source = documentForRelativePath(treeUri, relativePath)
+                val connection = URL(apiUrl).openConnection() as HttpURLConnection
+                connection.connectTimeout = 30_000
+                connection.readTimeout = 60_000
+                connection.requestMethod = "PUT"
+                connection.doOutput = true
+                connection.setFixedLengthStreamingMode(expectedSize)
+                connection.setRequestProperty("Content-Type", "application/octet-stream")
+                val uploaded =
+                    try {
+                        val bytes = connection.outputStream.use { output ->
+                            contentResolver.openInputStream(source)?.use { input ->
+                                input.copyTo(output, 128 * 1024)
+                            } ?: throw IllegalStateException(
+                                "Unable to open the selected source file",
+                            )
+                        }
+                        if (bytes != expectedSize) {
+                            throw IllegalStateException(
+                                "The local source changed after its last library sync",
+                            )
+                        }
+                        val responseCode = connection.responseCode
+                        if (responseCode !in 200..299) {
+                            val message =
+                                connection.errorStream?.bufferedReader()?.use { it.readText() }
+                                    ?: connection.responseMessage
+                            throw IllegalStateException("HTTP $responseCode: $message")
+                        }
+                        bytes
+                    } finally {
+                        connection.disconnect()
+                    }
+                runOnUiThread {
+                    result.success(mapOf("bytes" to uploaded))
+                }
+            } catch (error: Exception) {
+                runOnUiThread {
+                    result.error(
+                        "distribution_source_upload_failed",
+                        "Unable to upload the local source file",
+                        error.message,
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun downloadWithResume(url: String, partial: File, expectedSize: Long) {
+        if (partial.exists() && partial.length() > expectedSize) {
+            partial.delete()
+        }
+        while (partial.length() < expectedSize) {
+            var offset = if (partial.exists()) partial.length() else 0L
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.connectTimeout = 30_000
+            connection.readTimeout = 60_000
+            connection.requestMethod = "GET"
+            if (offset > 0) {
+                connection.setRequestProperty("Range", "bytes=$offset-")
+            }
+            try {
+                val responseCode = connection.responseCode
+                if (offset > 0 && responseCode == HttpURLConnection.HTTP_OK) {
+                    partial.delete()
+                    offset = 0
+                } else if (responseCode != HttpURLConnection.HTTP_OK &&
+                    responseCode != HttpURLConnection.HTTP_PARTIAL
+                ) {
+                    val message =
+                        connection.errorStream?.bufferedReader()?.use { it.readText() }
+                            ?: connection.responseMessage
+                    throw IllegalStateException("HTTP $responseCode: $message")
+                }
+                if (offset == 0L && partial.exists()) {
+                    partial.delete()
+                }
+                FileOutputStream(partial, offset > 0).use { output ->
+                    connection.inputStream.use { input ->
+                        input.copyTo(output, 128 * 1024)
+                    }
+                    output.fd.sync()
+                }
+            } finally {
+                connection.disconnect()
+            }
+            if (partial.length() < expectedSize) {
+                throw IllegalStateException(
+                    "Distribution source ended before the expected file size",
+                )
+            }
+        }
+        if (partial.length() != expectedSize) {
+            throw IllegalStateException(
+                "Downloaded size ${partial.length()} does not match expected size $expectedSize",
+            )
+        }
+    }
+
+    private fun quickFileHash(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val size = file.length()
+        val sampleSize = 64 * 1024
+        RandomAccessFile(file, "r").use { input ->
+            val firstSize = minOf(sampleSize.toLong(), size).toInt()
+            val first = ByteArray(firstSize)
+            input.readFully(first)
+            digest.update(first)
+            if (size > sampleSize.toLong()) {
+                input.seek(maxOf(0L, size - sampleSize))
+                val last = ByteArray(minOf(sampleSize.toLong(), size).toInt())
+                input.readFully(last)
+                digest.update(last)
+            }
+        }
+        for (index in 0 until 8) {
+            digest.update((size ushr (index * 8)).toByte())
+        }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun copyIntoDocumentTree(
+        treeUri: Uri,
+        relativePath: String,
+        taskId: String,
+        source: File,
+    ) {
+        val segments =
+            relativePath
+                .replace('\\', '/')
+                .split('/')
+                .filter { it.isNotBlank() }
+        if (segments.isEmpty() ||
+            segments.any {
+                it == "." || it == ".." || it.contains('\u0000') || it.contains('/') || it.contains('\\')
+            }
+        ) {
+            throw IllegalArgumentException("Core returned an unsafe destination path")
+        }
+        var parent =
+            DocumentsContract.buildDocumentUriUsingTree(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri),
+            )
+        for (directoryName in segments.dropLast(1)) {
+            val existing = findDocumentChild(treeUri, parent, directoryName)
+            parent =
+                if (existing != null) {
+                    if (existing.second != DocumentsContract.Document.MIME_TYPE_DIR) {
+                        throw IllegalStateException(
+                            "$directoryName exists but is not a folder",
+                        )
+                    }
+                    existing.first
+                } else {
+                    DocumentsContract.createDocument(
+                        contentResolver,
+                        parent,
+                        DocumentsContract.Document.MIME_TYPE_DIR,
+                        directoryName,
+                    ) ?: throw IllegalStateException("Unable to create folder $directoryName")
+                }
+        }
+
+        val finalName = segments.last()
+        val temporaryName = ".intmusic-$taskId.part"
+        findDocumentChild(treeUri, parent, temporaryName)?.let {
+            DocumentsContract.deleteDocument(contentResolver, it.first)
+        }
+        val temporary =
+            DocumentsContract.createDocument(
+                contentResolver,
+                parent,
+                "application/octet-stream",
+                temporaryName,
+            ) ?: throw IllegalStateException("Unable to create the temporary destination file")
+        contentResolver.openOutputStream(temporary, "w")?.use { output ->
+            source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
+        } ?: throw IllegalStateException("Unable to open the destination file for writing")
+
+        findDocumentChild(treeUri, parent, finalName)?.let {
+            DocumentsContract.deleteDocument(contentResolver, it.first)
+        }
+        val renamed =
+            DocumentsContract.renameDocument(contentResolver, temporary, finalName)
+        if (renamed == null) {
+            val destination =
+                DocumentsContract.createDocument(
+                    contentResolver,
+                    parent,
+                    "application/octet-stream",
+                    finalName,
+                ) ?: throw IllegalStateException("Unable to create the destination file")
+            contentResolver.openOutputStream(destination, "w")?.use { output ->
+                source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
+            } ?: throw IllegalStateException("Unable to open the destination file for writing")
+            DocumentsContract.deleteDocument(contentResolver, temporary)
+        }
+    }
+
+    private fun findDocumentChild(
+        treeUri: Uri,
+        parentUri: Uri,
+        displayName: String,
+    ): Pair<Uri, String>? {
+        val parentId = DocumentsContract.getDocumentId(parentUri)
+        val childrenUri =
+            DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId)
+        val projection =
+            arrayOf(
+                DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
+            )
+        contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+            val idColumn =
+                cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+            val nameColumn =
+                cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+            val mimeColumn =
+                cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameColumn) == displayName) {
+                    return Pair(
+                        DocumentsContract.buildDocumentUriUsingTree(
+                            treeUri,
+                            cursor.getString(idColumn),
+                        ),
+                        cursor.getString(mimeColumn),
+                    )
+                }
+            }
+        }
+        return null
+    }
+
+    private fun documentForRelativePath(treeUri: Uri, relativePath: String): Uri {
+        val segments =
+            relativePath
+                .replace('\\', '/')
+                .split('/')
+                .filter { it.isNotBlank() }
+        if (segments.isEmpty() ||
+            segments.any {
+                it == "." || it == ".." || it.contains('\u0000') || it.contains('/') || it.contains('\\')
+            }
+        ) {
+            throw IllegalArgumentException("Core returned an unsafe source path")
+        }
+        var current =
+            DocumentsContract.buildDocumentUriUsingTree(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri),
+            )
+        for ((index, segment) in segments.withIndex()) {
+            val child =
+                findDocumentChild(treeUri, current, segment)
+                    ?: throw IllegalStateException("Source path is no longer available")
+            if (index < segments.lastIndex &&
+                child.second != DocumentsContract.Document.MIME_TYPE_DIR
+            ) {
+                throw IllegalStateException("$segment is not a folder")
+            }
+            current = child.first
+        }
+        return current
+    }
+
+    private fun libraryFolderPayload(uri: Uri): Map<String, String> {
+        val path = rawPathForTree(uri)
+        val displayName =
+            File(path).name.takeIf { it.isNotBlank() }
+                ?: DocumentsContract.getTreeDocumentId(uri).substringAfter(':', "Music")
+        return mapOf(
+            "path" to path,
+            "bookmark" to uri.toString(),
+            "displayName" to displayName,
+        )
+    }
+
+    private fun rawPathForTree(uri: Uri): String {
+        if (uri.authority != "com.android.externalstorage.documents") {
+            throw UnsupportedOperationException(
+                "Only folders from Android device storage are supported",
+            )
+        }
+        val parts = DocumentsContract.getTreeDocumentId(uri).split(':', limit = 2)
+        if (parts.size != 2) {
+            throw UnsupportedOperationException("The selected folder path is not available")
+        }
+        val volume = parts[0]
+        val relative = parts[1]
+        val base =
+            if (volume.equals("primary", ignoreCase = true)) {
+                Environment.getExternalStorageDirectory()
+            } else {
+                File("/storage/$volume")
+            }
+        return if (relative.isBlank()) base.path else File(base, relative).path
     }
 
     override fun onDestroy() {
+        pendingLibraryFolderResult?.error(
+            "activity_destroyed",
+            "Folder selection was interrupted",
+            null,
+        )
+        pendingLibraryFolderResult = null
         IntMusicPlatformBridge.channel = null
         super.onDestroy()
     }

@@ -57,6 +57,7 @@ pub struct CoreConfig {
     pub playback: PlaybackConfig,
     pub favorites: FavoritesConfig,
     pub cache: CacheConfig,
+    pub transcoding: TranscodingConfig,
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
 }
@@ -273,6 +274,28 @@ impl Default for FavoritesConfig {
 pub struct CacheConfig {
     pub cover_thumb_sizes: Vec<u32>,
     pub max_cover_cache_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TranscodingConfig {
+    pub enabled: bool,
+    pub ffmpeg_path: Option<PathBuf>,
+    pub ffprobe_path: Option<PathBuf>,
+    pub max_concurrent_jobs: usize,
+    pub max_cache_mb: u64,
+}
+
+impl Default for TranscodingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ffmpeg_path: None,
+            ffprobe_path: None,
+            max_concurrent_jobs: 2,
+            max_cache_mb: 20 * 1024,
+        }
+    }
 }
 
 impl Default for CacheConfig {

@@ -15,6 +15,7 @@ members = [
     "crates/playback",
     "crates/protocol",
     "crates/search-index",
+    "crates/transcoder",
 ]
 resolver = "2"
 
@@ -58,7 +59,7 @@ sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "runtime-tokio-rustls", "sqlite", "uuid"] }
 symphonia = { version = "0.5", features = ["flac", "mp3", "pcm"] }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 toml = "0.9"
 tower-http = { version = "0.6", features = ["cors", "trace"] }

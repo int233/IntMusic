@@ -73,6 +73,7 @@ private final class IntMusicPlatformController: NSObject {
   private var metadataGeneration = 0
   private var windowMetricObservers: [NSObjectProtocol] = []
   private var lastTitlebarSafeInset: CGFloat?
+  private var securityScopedURLs: [URL] = []
 
   init(messenger: FlutterBinaryMessenger, window: NSWindow) {
     channel = FlutterMethodChannel(
@@ -90,6 +91,9 @@ private final class IntMusicPlatformController: NSObject {
 
   deinit {
     artworkTask?.cancel()
+    for url in securityScopedURLs {
+      url.stopAccessingSecurityScopedResource()
+    }
     for observer in windowMetricObservers {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -126,8 +130,107 @@ private final class IntMusicPlatformController: NSObject {
     case "moveToBackground":
       window?.orderOut(nil)
       result(nil)
+    case "createSecurityScopedBookmark":
+      createSecurityScopedBookmark(call.arguments, result: result)
+    case "resolveSecurityScopedBookmark":
+      resolveSecurityScopedBookmark(call.arguments, result: result)
     default:
       result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private func createSecurityScopedBookmark(
+    _ arguments: Any?,
+    result: @escaping FlutterResult
+  ) {
+    guard
+      let values = arguments as? [String: Any],
+      let path = values["path"] as? String,
+      !path.isEmpty
+    else {
+      result(FlutterError(code: "invalid_path", message: "Folder path is missing", details: nil))
+      return
+    }
+    let url = URL(fileURLWithPath: path, isDirectory: true)
+    let accessed = url.startAccessingSecurityScopedResource()
+    do {
+      let data = try url.bookmarkData(
+        options: .withSecurityScope,
+        includingResourceValuesForKeys: nil,
+        relativeTo: nil
+      )
+      if accessed {
+        securityScopedURLs.append(url)
+      }
+      result([
+        "path": url.path,
+        "bookmark": data.base64EncodedString(),
+      ])
+    } catch {
+      if accessed {
+        url.stopAccessingSecurityScopedResource()
+      }
+      result(
+        FlutterError(
+          code: "bookmark_failed",
+          message: "Unable to preserve folder access",
+          details: error.localizedDescription
+        )
+      )
+    }
+  }
+
+  private func resolveSecurityScopedBookmark(
+    _ arguments: Any?,
+    result: @escaping FlutterResult
+  ) {
+    guard
+      let values = arguments as? [String: Any],
+      let encoded = values["bookmark"] as? String,
+      let data = Data(base64Encoded: encoded)
+    else {
+      result(FlutterError(code: "invalid_bookmark", message: "Folder bookmark is missing", details: nil))
+      return
+    }
+    do {
+      var stale = false
+      let url = try URL(
+        resolvingBookmarkData: data,
+        options: [.withSecurityScope, .withoutUI],
+        relativeTo: nil,
+        bookmarkDataIsStale: &stale
+      )
+      guard url.startAccessingSecurityScopedResource() else {
+        result(
+          FlutterError(
+            code: "folder_access_denied",
+            message: "The selected folder permission is no longer valid",
+            details: url.path
+          )
+        )
+        return
+      }
+      securityScopedURLs.append(url)
+      var bookmark = data
+      if stale {
+        bookmark = try url.bookmarkData(
+          options: .withSecurityScope,
+          includingResourceValuesForKeys: nil,
+          relativeTo: nil
+        )
+      }
+      result([
+        "path": url.path,
+        "bookmark": bookmark.base64EncodedString(),
+      ])
+    } catch {
+      result(
+        FlutterError(
+          code: "bookmark_restore_failed",
+          message: "Unable to restore folder access",
+          details: error.localizedDescription
+        )
+      )
     }
   }
 

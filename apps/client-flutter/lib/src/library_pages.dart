@@ -442,6 +442,7 @@ class _TracksPage extends StatefulWidget {
     required this.onPlayTrack,
     required this.onToggleFavorite,
     required this.onAddToPlaylist,
+    required this.onDistributeTracks,
     required this.viewMode,
     required this.onViewModeChanged,
   });
@@ -452,6 +453,7 @@ class _TracksPage extends StatefulWidget {
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onAddToPlaylist;
+  final Future<void> Function(List<int>) onDistributeTracks;
   final _LibraryViewMode viewMode;
   final ValueChanged<_LibraryViewMode> onViewModeChanged;
 
@@ -462,6 +464,8 @@ class _TracksPage extends StatefulWidget {
 class _TracksPageState extends State<_TracksPage> {
   Timer? _scrollIdleTimer;
   bool _deferArtwork = false;
+  bool _selecting = false;
+  final Set<int> _selectedTrackIds = <int>{};
   String _query = '';
   String _sort = 'title';
 
@@ -539,6 +543,13 @@ class _TracksPageState extends State<_TracksPage> {
         _ => _compareLibraryText(a['title'], b['title']),
       };
     });
+    final visibleTrackIds = tracks
+        .map((item) => _intValue((item as Map)['id']))
+        .whereType<int>()
+        .toSet();
+    final allVisibleSelected =
+        visibleTrackIds.isNotEmpty &&
+        visibleTrackIds.every(_selectedTrackIds.contains);
     return _PageFrame(
       title: 'Tracks',
       child: Column(
@@ -561,7 +572,57 @@ class _TracksPageState extends State<_TracksPage> {
               onSortChanged: (value) => setState(() => _sort = value),
               viewMode: widget.viewMode,
               onViewModeChanged: widget.onViewModeChanged,
+              action: OutlinedButton.icon(
+                onPressed: () => setState(() {
+                  _selecting = !_selecting;
+                  if (!_selecting) {
+                    _selectedTrackIds.clear();
+                  }
+                }),
+                icon: Icon(
+                  _selecting ? Icons.close : Icons.checklist_rounded,
+                  size: 18,
+                ),
+                label: Text(_tr(context, _selecting ? 'Cancel' : 'Select')),
+              ),
             ),
+          ),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 180),
+            child: !_selecting
+                ? const SizedBox.shrink()
+                : Padding(
+                    key: const ValueKey('track-selection-bar'),
+                    padding: const EdgeInsets.fromLTRB(22, 0, 22, 8),
+                    child: _TrackSelectionBar(
+                      selectedCount: _selectedTrackIds.length,
+                      allVisibleSelected: allVisibleSelected,
+                      onToggleAll: () => setState(() {
+                        if (allVisibleSelected) {
+                          _selectedTrackIds.removeAll(visibleTrackIds);
+                        } else {
+                          _selectedTrackIds.addAll(visibleTrackIds);
+                        }
+                      }),
+                      onClear: _selectedTrackIds.isEmpty
+                          ? null
+                          : () => setState(_selectedTrackIds.clear),
+                      onDistribute: _selectedTrackIds.isEmpty
+                          ? null
+                          : () async {
+                              await widget.onDistributeTracks(
+                                _selectedTrackIds.toList(growable: false)
+                                  ..sort(),
+                              );
+                              if (mounted) {
+                                setState(() {
+                                  _selecting = false;
+                                  _selectedTrackIds.clear();
+                                });
+                              }
+                            },
+                    ),
+                  ),
           ),
           Expanded(
             child: tracks.isEmpty
@@ -584,17 +645,30 @@ class _TracksPageState extends State<_TracksPage> {
                         final track = (tracks[index] as Map)
                             .cast<String, dynamic>();
                         final id = _intValue(track['id']);
+                        final selected =
+                            id != null && _selectedTrackIds.contains(id);
                         return _TrackCard(
                           coreBaseUrl: widget.coreBaseUrl,
                           track: track,
                           deferArtwork: _deferArtwork,
-                          onOpen: id == null
+                          selectionMode: _selecting,
+                          selected: selected,
+                          onSelectionChanged: id == null
+                              ? null
+                              : () => setState(() {
+                                  if (selected) {
+                                    _selectedTrackIds.remove(id);
+                                  } else {
+                                    _selectedTrackIds.add(id);
+                                  }
+                                }),
+                          onOpen: id == null || _selecting
                               ? null
                               : () => unawaited(widget.onOpenTrack(id)),
-                          onPlay: id == null
+                          onPlay: id == null || _selecting
                               ? null
                               : () => unawaited(widget.onPlayTrack(id)),
-                          onAddToPlaylist: id == null
+                          onAddToPlaylist: id == null || _selecting
                               ? null
                               : () => unawaited(widget.onAddToPlaylist(id)),
                           onToggleFavorite: widget.onToggleFavorite,
@@ -627,6 +701,9 @@ class _TracksPageState extends State<_TracksPage> {
                                   final track = (tracks[index] as Map)
                                       .cast<String, dynamic>();
                                   final id = _intValue(track['id']);
+                                  final selected =
+                                      id != null &&
+                                      _selectedTrackIds.contains(id);
                                   return DecoratedBox(
                                     decoration: BoxDecoration(
                                       border: Border(
@@ -642,17 +719,28 @@ class _TracksPageState extends State<_TracksPage> {
                                       track: track,
                                       showAlbum: showAlbum,
                                       deferArtwork: _deferArtwork,
-                                      onTap: id == null
+                                      selectionMode: _selecting,
+                                      selected: selected,
+                                      onSelectionChanged: id == null
+                                          ? null
+                                          : () => setState(() {
+                                              if (selected) {
+                                                _selectedTrackIds.remove(id);
+                                              } else {
+                                                _selectedTrackIds.add(id);
+                                              }
+                                            }),
+                                      onTap: id == null || _selecting
                                           ? null
                                           : () => unawaited(
                                               widget.onOpenTrack(id),
                                             ),
-                                      onPlay: id == null
+                                      onPlay: id == null || _selecting
                                           ? null
                                           : () => unawaited(
                                               widget.onPlayTrack(id),
                                             ),
-                                      onAddToPlaylist: id == null
+                                      onAddToPlaylist: id == null || _selecting
                                           ? null
                                           : () => unawaited(
                                               widget.onAddToPlaylist(id),
@@ -675,6 +763,65 @@ class _TracksPageState extends State<_TracksPage> {
   }
 }
 
+class _TrackSelectionBar extends StatelessWidget {
+  const _TrackSelectionBar({
+    required this.selectedCount,
+    required this.allVisibleSelected,
+    required this.onToggleAll,
+    required this.onClear,
+    required this.onDistribute,
+  });
+
+  final int selectedCount;
+  final bool allVisibleSelected;
+  final VoidCallback onToggleAll;
+  final VoidCallback? onClear;
+  final VoidCallback? onDistribute;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: tokens.accent.withValues(alpha: 0.08),
+        border: Border.all(color: tokens.accent.withValues(alpha: 0.24)),
+        borderRadius: BorderRadius.circular(tokens.radiusSmall),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+        child: Row(
+          children: [
+            Icon(Icons.check_circle_outline, color: tokens.accent, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '$selectedCount ${_tr(context, 'selected')}',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ),
+            TextButton(
+              onPressed: onToggleAll,
+              child: Text(
+                _tr(
+                  context,
+                  allVisibleSelected ? 'Deselect visible' : 'Select visible',
+                ),
+              ),
+            ),
+            TextButton(onPressed: onClear, child: Text(_tr(context, 'Clear'))),
+            const SizedBox(width: 4),
+            FilledButton.icon(
+              onPressed: onDistribute,
+              icon: const Icon(Icons.send_to_mobile_outlined, size: 18),
+              label: Text(_tr(context, 'Distribute to device')),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _TrackCard extends StatelessWidget {
   const _TrackCard({
     required this.coreBaseUrl,
@@ -684,6 +831,9 @@ class _TrackCard extends StatelessWidget {
     required this.onOpen,
     required this.onPlay,
     required this.onAddToPlaylist,
+    required this.selectionMode,
+    required this.selected,
+    required this.onSelectionChanged,
   });
 
   final String coreBaseUrl;
@@ -693,16 +843,21 @@ class _TrackCard extends StatelessWidget {
   final VoidCallback? onOpen;
   final VoidCallback? onPlay;
   final VoidCallback? onAddToPlaylist;
+  final bool selectionMode;
+  final bool selected;
+  final VoidCallback? onSelectionChanged;
 
   @override
   Widget build(BuildContext context) {
     final title = track['title']?.toString() ?? 'Untitled';
     final artist = track['artist_display']?.toString() ?? 'Unknown Artist';
     return Material(
-      color: Colors.transparent,
+      color: selected
+          ? IntMusicTheme.of(context).accent.withValues(alpha: 0.10)
+          : Colors.transparent,
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
-        onTap: onOpen,
+        onTap: selectionMode ? onSelectionChanged : onOpen,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
           padding: const EdgeInsets.all(8),
@@ -756,13 +911,21 @@ class _TrackCard extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
-                  _TrackActions(
-                    track: track,
-                    compact: true,
-                    onToggleFavorite: onToggleFavorite,
-                    onAddToPlaylist: onAddToPlaylist,
-                    onPlay: onPlay,
-                  ),
+                  if (selectionMode)
+                    Checkbox(
+                      value: selected,
+                      onChanged: onSelectionChanged == null
+                          ? null
+                          : (_) => onSelectionChanged!(),
+                    )
+                  else
+                    _TrackActions(
+                      track: track,
+                      compact: true,
+                      onToggleFavorite: onToggleFavorite,
+                      onAddToPlaylist: onAddToPlaylist,
+                      onPlay: onPlay,
+                    ),
                 ],
               ),
             ],
@@ -813,6 +976,9 @@ class _TrackTableRow extends StatelessWidget {
     required this.onTap,
     required this.onPlay,
     required this.onAddToPlaylist,
+    required this.selectionMode,
+    required this.selected,
+    required this.onSelectionChanged,
   });
 
   final String coreBaseUrl;
@@ -823,6 +989,9 @@ class _TrackTableRow extends StatelessWidget {
   final VoidCallback? onTap;
   final VoidCallback? onPlay;
   final VoidCallback? onAddToPlaylist;
+  final bool selectionMode;
+  final bool selected;
+  final VoidCallback? onSelectionChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -831,10 +1000,14 @@ class _TrackTableRow extends StatelessWidget {
     final favorite = track['is_favorite'] == true;
 
     return Material(
-      color: favorite ? appPrimary.withValues(alpha: 0.06) : Colors.transparent,
+      color: selected
+          ? IntMusicTheme.of(context).accent.withValues(alpha: 0.10)
+          : favorite
+          ? appPrimary.withValues(alpha: 0.06)
+          : Colors.transparent,
       borderRadius: BorderRadius.circular(8),
       child: InkWell(
-        onTap: onTap,
+        onTap: selectionMode ? onSelectionChanged : onTap,
         borderRadius: BorderRadius.circular(8),
         child: SizedBox(
           height: 66,
@@ -901,13 +1074,27 @@ class _TrackTableRow extends StatelessWidget {
                     ),
                   ),
                 ),
-                _TrackActions(
-                  track: track,
-                  compact: true,
-                  onToggleFavorite: onToggleFavorite,
-                  onAddToPlaylist: onAddToPlaylist,
-                  onPlay: onPlay,
-                ),
+                if (selectionMode)
+                  SizedBox(
+                    width: 150,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Checkbox(
+                        value: selected,
+                        onChanged: onSelectionChanged == null
+                            ? null
+                            : (_) => onSelectionChanged!(),
+                      ),
+                    ),
+                  )
+                else
+                  _TrackActions(
+                    track: track,
+                    compact: true,
+                    onToggleFavorite: onToggleFavorite,
+                    onAddToPlaylist: onAddToPlaylist,
+                    onPlay: onPlay,
+                  ),
               ],
             ),
           ),
@@ -979,6 +1166,8 @@ class _TrackActionsState extends State<_TrackActions> {
                 unawaited(queueActions!.onAddToQueue(trackId!));
               case _TrackMoreAction.addToPlaylist:
                 widget.onAddToPlaylist?.call();
+              case _TrackMoreAction.distribute:
+                unawaited(queueActions!.onDistributeCollection([trackId!]));
             }
           },
           itemBuilder: (context) => [
@@ -1006,6 +1195,14 @@ class _TrackActionsState extends State<_TrackActions> {
                   title: Text(_tr(context, 'Add to playlist')),
                 ),
               ),
+            if (trackId != null && queueActions != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.distribute,
+                child: ListTile(
+                  leading: const Icon(Icons.send_to_mobile_outlined),
+                  title: Text(_tr(context, 'Distribute to device')),
+                ),
+              ),
           ],
         ),
       if (widget.onPlay != null)
@@ -1025,7 +1222,7 @@ class _TrackActionsState extends State<_TrackActions> {
   }
 }
 
-enum _TrackMoreAction { playNext, addToQueue, addToPlaylist }
+enum _TrackMoreAction { playNext, addToQueue, addToPlaylist, distribute }
 
 int _compareLibraryText(
   Object? a,

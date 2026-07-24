@@ -38,6 +38,7 @@ dependencies:
   audioplayers: 6.6.0
   audioplayers_windows: 4.3.0
   cached_network_image: ^3.4.1
+  crypto: ^3.0.6
   cupertino_icons: ^1.0.8
   file_selector: ^1.1.0
   flutter_cache_manager: ^3.4.1
@@ -46,6 +47,7 @@ dependencies:
   media_kit_libs_macos_audio: ^1.1.4
   media_kit_libs_windows_audio: ^1.0.9
   multicast_dns: ^0.3.3
+  path_provider: ^2.1.5
   shared_preferences: ^2.5.3
 dev_dependencies:
   flutter_test:

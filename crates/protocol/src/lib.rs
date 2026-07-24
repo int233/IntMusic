@@ -46,6 +46,259 @@ pub struct NewLibraryRoot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryRootManifest {
+    pub external_id: String,
+    pub display_name: String,
+    pub path_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientTrackManifest {
+    pub title: String,
+    pub sort_title: Option<String>,
+    pub subtitle: Option<String>,
+    pub album: Option<String>,
+    #[serde(default)]
+    pub track_artists: Vec<String>,
+    #[serde(default)]
+    pub album_artists: Vec<String>,
+    #[serde(default)]
+    pub composers: Vec<String>,
+    #[serde(default)]
+    pub lyricists: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    pub disc_number: Option<i64>,
+    pub disc_total: Option<i64>,
+    pub track_number: Option<i64>,
+    pub track_total: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub date: Option<String>,
+    pub year: Option<i64>,
+    pub bpm: Option<i64>,
+    pub comment: Option<String>,
+    pub lyrics: Option<String>,
+    pub lyrics_kind: Option<String>,
+    pub tag_rating: Option<i64>,
+    pub tag_rating_scale: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryFileManifest {
+    pub external_id: String,
+    pub relative_path: String,
+    pub extension: String,
+    pub size_bytes: i64,
+    pub modified_at: DateTime<Utc>,
+    pub quick_hash: Option<String>,
+    pub content_hash: Option<String>,
+    pub codec: Option<String>,
+    pub sample_rate: Option<i64>,
+    pub channels: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub bitrate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub metadata: ClientTrackManifest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryManifestRequest {
+    pub device_id: String,
+    pub device_name: String,
+    pub platform: Option<String>,
+    pub root: ClientLibraryRootManifest,
+    pub scan_id: String,
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub files: Vec<ClientLibraryFileManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryManifestResult {
+    pub root_id: i64,
+    pub accepted_files: i64,
+    pub missing_files: i64,
+    pub complete: bool,
+    #[serde(default)]
+    pub bindings: Vec<ClientLibraryFileBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryFileBinding {
+    pub external_id: String,
+    pub track_id: i64,
+    pub media_variant_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryRootStatus {
+    pub root_id: i64,
+    pub external_id: String,
+    pub display_name: String,
+    pub device_id: String,
+    pub device_name: String,
+    pub platform: Option<String>,
+    pub path_hint: Option<String>,
+    pub enabled: bool,
+    pub file_count: i64,
+    pub ready_file_count: i64,
+    pub last_scan_id: Option<String>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientMutation {
+    pub id: String,
+    pub kind: String,
+    pub track_id: i64,
+    pub occurred_at: DateTime<Utc>,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientMutationBatchRequest {
+    pub device_id: String,
+    pub device_name: String,
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub mutations: Vec<ClientMutation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientMutationBatchResult {
+    #[serde(default)]
+    pub applied_ids: Vec<String>,
+    #[serde(default)]
+    pub duplicate_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreateDistributionRequest {
+    pub target_device_id: String,
+    pub target_root_external_id: String,
+    #[serde(default = "default_distribution_quality")]
+    pub quality: String,
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    #[serde(default)]
+    pub album_ids: Vec<i64>,
+    #[serde(default)]
+    pub playlist_ids: Vec<i64>,
+}
+
+fn default_distribution_quality() -> String {
+    "original".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributionJobSummary {
+    pub id: String,
+    pub target_device_id: String,
+    pub target_device_name: String,
+    pub target_root_external_id: String,
+    pub target_root_name: String,
+    pub quality: String,
+    pub state: String,
+    pub total_items: i64,
+    pub completed_items: i64,
+    pub failed_items: i64,
+    pub total_bytes: i64,
+    pub transferred_bytes: i64,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributionTaskAssignment {
+    pub id: String,
+    pub job_id: String,
+    pub track_id: i64,
+    pub title: String,
+    pub artist_display: Option<String>,
+    pub album_title: Option<String>,
+    pub target_root_external_id: String,
+    pub relative_path: String,
+    pub extension: String,
+    pub expected_size_bytes: i64,
+    pub expected_quick_hash: Option<String>,
+    pub attempt_count: i64,
+    pub content_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributionSourceTaskAssignment {
+    pub id: String,
+    pub job_id: String,
+    pub track_id: i64,
+    pub title: String,
+    pub source_root_external_id: String,
+    pub source_relative_path: String,
+    pub expected_size_bytes: i64,
+    pub expected_quick_hash: Option<String>,
+    pub attempt_count: i64,
+    pub upload_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributionTaskProgress {
+    pub device_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub transferred_bytes: i64,
+    #[serde(default)]
+    pub retryable: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributionContentSource {
+    pub path: String,
+    pub extension: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributionTranscodeTask {
+    pub id: String,
+    pub job_id: String,
+    pub quality: String,
+    pub source_path: String,
+    pub source_signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscodingProfileCapability {
+    pub id: String,
+    pub label: String,
+    pub codec: String,
+    pub container: String,
+    pub bitrate_kbps: Option<u32>,
+    pub lossless: bool,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscodingStatus {
+    pub enabled: bool,
+    pub available: bool,
+    pub ffmpeg_path: Option<String>,
+    pub ffprobe_path: Option<String>,
+    pub version: Option<String>,
+    pub error: Option<String>,
+    pub max_concurrent_jobs: u32,
+    pub cache_dir: String,
+    pub cache_bytes: u64,
+    pub max_cache_bytes: u64,
+    #[serde(default)]
+    pub profiles: Vec<TranscodingProfileCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtistSummary {
     pub id: i64,
     pub name: String,
@@ -252,6 +505,128 @@ pub struct TrackDetail {
     pub composers: Vec<String>,
     pub lyricists: Vec<String>,
     pub lyrics: Option<LyricPayload>,
+    #[serde(default)]
+    pub media: Option<TrackMediaProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogWorkSummary {
+    pub id: i64,
+    pub global_id: String,
+    pub title: String,
+    pub disambiguation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CatalogRecordingSummary {
+    pub id: i64,
+    pub global_id: String,
+    pub title: String,
+    pub version_title: Option<String>,
+    pub recording_kind: String,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseEditionSummary {
+    pub id: i64,
+    pub global_id: String,
+    pub album_id: Option<i64>,
+    pub title: Option<String>,
+    pub edition_title: Option<String>,
+    pub edition_kind: String,
+    pub date: Option<String>,
+    pub year: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioMasterSummary {
+    pub id: i64,
+    pub global_id: String,
+    pub label: Option<String>,
+    pub mastering_kind: String,
+    pub release_year: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaReplicaSummary {
+    pub id: i64,
+    pub file_id: Option<i64>,
+    pub device_id: Option<String>,
+    pub device_name: String,
+    pub source_kind: String,
+    pub availability_state: String,
+    pub is_primary: bool,
+    pub relative_path: Option<String>,
+    pub root_external_id: Option<String>,
+    pub client_file_id: Option<String>,
+    pub last_verified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaVariantSummary {
+    pub id: i64,
+    pub global_id: String,
+    pub relation_kind: String,
+    pub is_preferred: bool,
+    pub codec: Option<String>,
+    pub container: Option<String>,
+    pub bitrate: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub channels: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub content_hash: Option<String>,
+    pub master: AudioMasterSummary,
+    #[serde(default)]
+    pub replicas: Vec<MediaReplicaSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelatedReleaseTrackSummary {
+    pub release_track_id: i64,
+    pub legacy_track_id: Option<i64>,
+    pub release: Option<ReleaseEditionSummary>,
+    pub title: String,
+    pub disc_number: Option<i64>,
+    pub track_number: Option<i64>,
+    pub is_current: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMediaProfile {
+    pub release_track_id: i64,
+    pub work: CatalogWorkSummary,
+    pub recording: CatalogRecordingSummary,
+    pub release: Option<ReleaseEditionSummary>,
+    #[serde(default)]
+    pub variants: Vec<MediaVariantSummary>,
+    #[serde(default)]
+    pub related_release_tracks: Vec<RelatedReleaseTrackSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingLinkCandidate {
+    pub track_id: i64,
+    pub release_track_id: i64,
+    pub recording_id: i64,
+    pub title: String,
+    pub artist_display: Option<String>,
+    pub album_id: Option<i64>,
+    pub album_title: Option<String>,
+    pub year: Option<i64>,
+    pub disc_number: Option<i64>,
+    pub track_number: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub already_linked: bool,
+    pub confidence: f32,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkTrackRecordingRequest {
+    pub source_track_id: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

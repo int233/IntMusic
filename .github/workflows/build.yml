@@ -60,8 +60,23 @@ jobs:
             libgstreamer-plugins-base1.0-dev \
             libgtk-3-dev \
             liblzma-dev \
+            nasm \
             ninja-build \
             pkg-config
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cache/ffmpeg
+            packaging/ffmpeg/linux-x86_64
+          key: ffmpeg-8.1.2-linux-x86_64-${{ hashFiles('scripts/build-bundled-ffmpeg.sh') }}
+
+      - name: Build bundled LGPL FFmpeg
+        run: |
+          if [ ! -x packaging/ffmpeg/linux-x86_64/bin/ffmpeg ]; then
+            ./scripts/build-bundled-ffmpeg.sh \
+              --output packaging/ffmpeg/linux-x86_64
+          fi
 
       - name: Build Ubuntu artifacts
         run: |
@@ -87,6 +102,36 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cache/ffmpeg
+            packaging/ffmpeg/windows-x64
+          key: ffmpeg-8.1.2-windows-x64-${{ hashFiles('scripts/build-bundled-ffmpeg.sh') }}
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            curl
+            diffutils
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            nasm
+            pkgconf
+            tar
+            xz
+
+      - name: Build bundled LGPL FFmpeg
+        shell: msys2 {0}
+        run: |
+          if [ ! -x packaging/ffmpeg/windows-x64/bin/ffmpeg.exe ]; then
+            ./scripts/build-bundled-ffmpeg.sh \
+              --output packaging/ffmpeg/windows-x64
+          fi
 
       - name: Install Inno Setup
         run: choco install innosetup --no-progress -y
@@ -141,6 +186,13 @@ jobs:
                 $status.api_version -ne "v1") {
               throw "Installed Core returned an unexpected health response."
             }
+            $transcoding = Invoke-RestMethod `
+              -Uri "$($endpoint.base_url)/api/v1/transcoding/status" `
+              -Method Get `
+              -TimeoutSec 10
+            if (-not $transcoding.available) {
+              throw "Installed Core did not discover bundled FFmpeg: $($transcoding.error)"
+            }
           }
           finally {
             $uninstaller = Join-Path `
@@ -171,6 +223,22 @@ jobs:
         with:
           channel: stable
           cache: true
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            .cache/ffmpeg
+            packaging/ffmpeg/macos-arm64
+            packaging/ffmpeg/macos-x86_64
+          key: ffmpeg-8.1.2-macos-${{ runner.arch }}-${{ hashFiles('scripts/build-bundled-ffmpeg.sh') }}
+
+      - name: Build bundled LGPL FFmpeg
+        run: |
+          target="macos-$(uname -m)"
+          if [ ! -x "packaging/ffmpeg/$target/bin/ffmpeg" ]; then
+            ./scripts/build-bundled-ffmpeg.sh \
+              --output "packaging/ffmpeg/$target"
+          fi
 
       - name: Build macOS artifacts
         run: |

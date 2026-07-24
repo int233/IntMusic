@@ -327,6 +327,8 @@ class _CollectionActions extends StatelessWidget {
                 unawaited(actions!.onQueueCollection(trackIds, true));
               case _CollectionMoreAction.addToQueue:
                 unawaited(actions!.onQueueCollection(trackIds, false));
+              case _CollectionMoreAction.distribute:
+                unawaited(actions!.onDistributeCollection(trackIds));
             }
           },
           itemBuilder: (context) => [
@@ -344,6 +346,13 @@ class _CollectionActions extends StatelessWidget {
                 title: Text(_tr(context, 'Add to queue')),
               ),
             ),
+            PopupMenuItem(
+              value: _CollectionMoreAction.distribute,
+              child: ListTile(
+                leading: const Icon(Icons.send_to_mobile_outlined),
+                title: Text(_tr(context, 'Distribute to device')),
+              ),
+            ),
           ],
         ),
         if (onClose != null)
@@ -359,7 +368,7 @@ class _CollectionActions extends StatelessWidget {
   }
 }
 
-enum _CollectionMoreAction { playNext, addToQueue }
+enum _CollectionMoreAction { playNext, addToQueue, distribute }
 
 class _ResponsiveDetailHeading extends StatelessWidget {
   const _ResponsiveDetailHeading({required this.header, required this.actions});
@@ -433,6 +442,7 @@ class _LibraryToolbar extends StatefulWidget {
     required this.onSortChanged,
     required this.viewMode,
     required this.onViewModeChanged,
+    this.action,
   });
 
   final String countLabel;
@@ -443,6 +453,7 @@ class _LibraryToolbar extends StatefulWidget {
   final ValueChanged<String> onSortChanged;
   final _LibraryViewMode viewMode;
   final ValueChanged<_LibraryViewMode> onViewModeChanged;
+  final Widget? action;
 
   @override
   State<_LibraryToolbar> createState() => _LibraryToolbarState();
@@ -483,6 +494,10 @@ class _LibraryToolbarState extends State<_LibraryToolbar> {
     final controls = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (widget.action != null) ...[
+          widget.action!,
+          const SizedBox(width: 8),
+        ],
         PopupMenuButton<String>(
           initialValue: widget.sortValue,
           tooltip: _tr(context, 'Sort'),
@@ -693,6 +708,7 @@ class _TrackActionScope extends InheritedWidget {
     required this.onAddToQueue,
     required this.onPlayCollection,
     required this.onQueueCollection,
+    required this.onDistributeCollection,
     required super.child,
   });
 
@@ -702,6 +718,7 @@ class _TrackActionScope extends InheritedWidget {
   onPlayCollection;
   final Future<void> Function(List<int> trackIds, bool playNext)
   onQueueCollection;
+  final Future<void> Function(List<int> trackIds) onDistributeCollection;
 
   static _TrackActionScope? maybeOf(BuildContext context) {
     return context.dependOnInheritedWidgetOfExactType<_TrackActionScope>();
@@ -712,7 +729,8 @@ class _TrackActionScope extends InheritedWidget {
     return onPlayNext != oldWidget.onPlayNext ||
         onAddToQueue != oldWidget.onAddToQueue ||
         onPlayCollection != oldWidget.onPlayCollection ||
-        onQueueCollection != oldWidget.onQueueCollection;
+        onQueueCollection != oldWidget.onQueueCollection ||
+        onDistributeCollection != oldWidget.onDistributeCollection;
   }
 }
 

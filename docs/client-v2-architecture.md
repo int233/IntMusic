@@ -37,12 +37,22 @@ flowchart LR
 | 状态 | 唯一来源 | 持久化 | 分发方式 |
 | --- | --- | --- | --- |
 | 媒体库、收藏、播放列表 | Rust Core / SQLite | 是 | REST + Core event |
+| 本机媒体副本与离线目录快照 | Flutter client | 是 | Client manifest + SharedPreferences |
+| 离线收藏与播放历史 outbox | Flutter client，重连后 Core | 是 | 幂等 mutation batch |
 | 播放队列与当前索引 | Rust Core / SQLite | 是 | REST + `playback.queue_changed` |
 | 播放模式 | Rust Core / SQLite | 是 | queue snapshot |
 | zone 音量与静音 | Rust Core / SQLite | 是 | REST + renderer command |
 | 播放位置与 transport state | 当前 renderer / Core | 运行时 | renderer report + Core event |
 | 主题、语言、客户端别名 | Flutter client | 是 | SharedPreferences |
 | 托盘、锁屏、系统媒体面板 | 平台投影 | 否 | `dev.intmusic/platform` |
+
+## Client 媒体库与分发
+
+- Client 文件始终由该设备持有；Core 保存统一曲目身份、媒体版本和副本位置，不把不同发行版的 release track 合并掉。
+- 内容指纹相同的文件可以成为同一媒体版本的多个副本；码率、编码、母带或发行版不同则保留独立版本关系。
+- 分发优先使用 Core 本机副本。仅存在于 Client 的源文件由源 Client 领取 source task，流式上传至 Core 临时中继缓存，通过大小和 quick hash 校验后进入转码/交付阶段。
+- FFmpeg 仅随 Core 分发，Client 不执行转码。转码参数来自固定白名单 profile，不能从 API 注入任意命令行参数。
+- 目标 Client 使用临时文件、断点下载、大小与 quick hash 校验和原子替换写入音乐文件夹；Android 通过 SAF 持久权限读写。
 
 Flutter 不根据本地曲目列表推算下一首；平台媒体中心也不自行跳转。所有入口最终调用同一组 Core queue API，因此 UI 按钮、键盘媒体键、macOS 控制中心、Windows SMTC 和 Android 锁屏不会产生不同状态。
 
