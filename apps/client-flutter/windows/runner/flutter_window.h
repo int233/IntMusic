@@ -26,6 +26,14 @@ class FlutterWindow : public Win32Window {
 
  private:
   class WindowsMediaSession;
+  enum class CoreServiceState {
+    kNotInstalled,
+    kStopped,
+    kRunning,
+    kPaused,
+    kPending,
+    kUnknown,
+  };
 
   void ConfigureNativeBackdrop();
   void ConfigurePlatformChannel();
@@ -33,6 +41,9 @@ class FlutterWindow : public Win32Window {
   void RemoveTrayIcon();
   void ShowTrayMenu();
   void ShowMainWindow();
+  void HideMainWindow();
+  CoreServiceState QueryCoreServiceState() const;
+  void RunCoreServiceAction(const wchar_t* action);
   void InvokeDartCommand(const char* command);
 
   // The project to run.
@@ -46,6 +57,8 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<WindowsMediaSession> media_session_;
   NOTIFYICONDATAW tray_icon_{};
   bool tray_icon_added_ = false;
+  UINT taskbar_created_message_ = 0;
+  UINT installer_shutdown_message_ = 0;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

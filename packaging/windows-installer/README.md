@@ -61,6 +61,18 @@ packaging\dist\installer\IntMusic-Windows-Setup.exe
 - 仅 Core：只安装无界面 Core，并注册 `IntMusicCore` Windows 服务。
 - Core + 客户端：同时安装 Core 服务和桌面客户端。
 
+安装或升级开始前，安装器会根据所选组件：
+
+- 向正在运行的客户端发送正常退出请求；旧版客户端不响应时，仅终止安装目录中的 `IntMusic.exe`。
+- 停止 `IntMusicCore` 服务并等待服务确实进入 `Stopped` 状态。
+- 清理安装目录中残留的 Core CLI/daemon 进程，避免新文件被旧进程锁定。
+
+停止过程最多等待 45 秒；失败时安装会中止，而不是在程序仍运行时继续覆盖文件。诊断日志位于：
+
+```text
+C:\ProgramData\IntMusic\Installer\install.log
+```
+
 安装 Core 组件时，安装器会写入当前用户的环境变量：
 
 - `INTMUSIC_HOME`
@@ -116,6 +128,16 @@ Start-Service IntMusicCore
 Stop-Service IntMusicCore
 Restart-Service IntMusicCore
 ```
+
+安装桌面客户端后，也可以右键任务栏通知区域的 IntMusic 图标：
+
+- 显示或隐藏客户端。
+- 播放/暂停、上一首、下一首。
+- 查看 Core 服务当前状态。
+- 启动、重启或停止 Core 服务。
+- 完全退出客户端。
+
+Core 服务控制需要管理员权限，Windows 会显示 UAC 确认窗口；拒绝提权不会改变服务状态。
 
 ## 端口和防火墙
 

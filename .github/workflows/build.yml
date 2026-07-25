@@ -163,16 +163,38 @@ jobs:
             throw "Windows installer artifact was not found."
           }
 
+          $client = $null
           try {
-            foreach ($pass in 1..2) {
-              $installer = Start-Process `
-                -FilePath $setup.FullName `
-                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TYPE=coreonly" `
-                -Wait `
-                -PassThru
-              if ($installer.ExitCode -ne 0) {
-                throw "Windows installer pass $pass failed with exit code $($installer.ExitCode)."
-              }
+            $installer = Start-Process `
+              -FilePath $setup.FullName `
+              -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TYPE=full" `
+              -Wait `
+              -PassThru
+            if ($installer.ExitCode -ne 0) {
+              throw "Initial Windows installation failed with exit code $($installer.ExitCode)."
+            }
+
+            $clientPath = Join-Path `
+              $env:ProgramFiles `
+              "IntMusic\client\IntMusic.exe"
+            $client = Start-Process -FilePath $clientPath -PassThru
+            Start-Sleep -Seconds 5
+            $client.Refresh()
+            if ($client.HasExited) {
+              throw "The installed Client exited before the upgrade test."
+            }
+
+            $installer = Start-Process `
+              -FilePath $setup.FullName `
+              -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/TYPE=full" `
+              -Wait `
+              -PassThru
+            if ($installer.ExitCode -ne 0) {
+              throw "Windows installer upgrade failed with exit code $($installer.ExitCode)."
+            }
+            $client.Refresh()
+            if (-not $client.HasExited) {
+              throw "The installer did not stop the running IntMusic Client."
             }
 
             $service = Get-Service -Name "IntMusicCore" -ErrorAction Stop
@@ -202,6 +224,12 @@ jobs:
             }
           }
           finally {
+            if ($null -ne $client) {
+              $client.Refresh()
+              if (-not $client.HasExited) {
+                Stop-Process -Id $client.Id -Force -ErrorAction SilentlyContinue
+              }
+            }
             $uninstaller = Join-Path `
               $env:ProgramFiles `
               "IntMusic\unins000.exe"

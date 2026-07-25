@@ -47,6 +47,8 @@ Source: "Start-IntMusic.cmd"; DestDir: "{app}"; Flags: ignoreversion; Components
 Source: "Start-IntMusic.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: client and core
 Source: "Install-IntMusicCoreService.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: core
 Source: "Uninstall-IntMusicCoreService.ps1"; DestDir: "{app}"; Flags: ignoreversion; Components: core
+Source: "Stop-IntMusicForUpdate.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "Stop-IntMusicForUpdate.ps1"; Flags: dontcopy
 
 [Icons]
 Name: "{group}\IntMusic"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""{app}\Start-IntMusic.ps1"" -InstallDir ""{app}"""; WorkingDir: "{app}"; IconFilename: "{app}\client\{#MyAppExeName}"; Components: client and core
@@ -61,6 +63,8 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile
 Filename: "{app}\client\{#MyAppExeName}"; Description: "Launch IntMusic"; Flags: nowait postinstall skipifsilent; Components: client; Check: IsClientOnlyInstall
 
 [UninstallRun]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Stop-IntMusicForUpdate.ps1"" -InstallDir ""{app}"" -StopClient"; Flags: runhidden waituntilterminated; RunOnceId: "StopIntMusicClient"; Components: client
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Stop-IntMusicForUpdate.ps1"" -InstallDir ""{app}"" -StopCore"; Flags: runhidden waituntilterminated; RunOnceId: "StopIntMusicCore"; Components: core
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Uninstall-IntMusicCoreService.ps1"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveIntMusicCoreService"
 
 [Registry]
@@ -146,21 +150,44 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var
-  ResultCode: Integer;
 begin
-  if (CurStep = ssInstall) and WizardIsComponentSelected('core') then
-  begin
-    Exec(ExpandConstant('{sys}\sc.exe'), 'stop IntMusicCore', '', SW_HIDE,
-      ewWaitUntilTerminated, ResultCode);
-    Sleep(1500);
-  end;
-
   if (CurStep = ssPostInstall) and WizardIsComponentSelected('core') and
      WizardIsTaskSelected('addcoretopath') then
   begin
     AddToUserPath(ExpandConstant('{app}\core'));
     BroadcastEnvironmentChanged;
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Parameters: String;
+  ResultCode: Integer;
+begin
+  Result := '';
+  ExtractTemporaryFile('Stop-IntMusicForUpdate.ps1');
+  Parameters :=
+    '-NoProfile -ExecutionPolicy Bypass -File "' +
+    ExpandConstant('{tmp}\Stop-IntMusicForUpdate.ps1') +
+    '" -InstallDir "' + ExpandConstant('{app}') + '"';
+
+  if WizardIsComponentSelected('client') then
+    Parameters := Parameters + ' -StopClient';
+  if WizardIsComponentSelected('core') then
+    Parameters := Parameters + ' -StopCore';
+
+  if not Exec(
+    ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    Parameters,
+    '',
+    SW_HIDE,
+    ewWaitUntilTerminated,
+    ResultCode
+  ) or (ResultCode <> 0) then
+  begin
+    Result :=
+      'IntMusic could not stop the running Client or Core processes. ' +
+      'Review C:\ProgramData\IntMusic\Installer\install.log and retry.';
   end;
 end;
 
