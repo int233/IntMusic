@@ -162,7 +162,10 @@ class _PlaybackBar extends StatelessWidget {
     final isPaused = status == 'paused';
     final hasTrack = _intValue(state?['track_id']) != null;
     final durationMs = _intValue(track?['duration_ms']) ?? 0;
-    final canNavigate = hasTrack && trackDetail != null;
+    // Queue navigation must not depend on a metadata request completing.
+    // On a weak link the track can already be playing from a local copy while
+    // its detail payload is still loading.
+    final canNavigate = hasTrack;
 
     final bar = Padding(
       padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),

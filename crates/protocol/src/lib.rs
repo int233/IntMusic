@@ -898,6 +898,12 @@ pub struct ZoneSummary {
     pub track_id: Option<i64>,
     pub track_title: Option<String>,
     pub position_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<String>,
     pub is_online: bool,
     pub is_remote: bool,
     pub node_id: Option<String>,
@@ -920,6 +926,12 @@ pub struct PlaybackState {
     pub track_title: Option<String>,
     pub position_ms: u64,
     pub queue_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_sequence: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1024,6 +1036,8 @@ pub struct RendererRegistration {
     pub outputs: Vec<RendererOutputRegistration>,
     #[serde(default)]
     pub reset_playback: bool,
+    #[serde(default)]
+    pub request_playback_sync: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1049,6 +1063,16 @@ pub struct RegisteredRenderer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RendererCommandPayload {
     pub command_id: Uuid,
+    #[serde(default)]
+    pub sequence: u64,
+    #[serde(default)]
+    pub issued_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub expires_after_ms: Option<u64>,
+    #[serde(default)]
+    pub origin_client_id: Option<String>,
+    #[serde(default)]
+    pub intent_id: Option<String>,
     pub target_output_id: String,
     pub action: String,
     pub track_id: Option<i64>,
@@ -1068,6 +1092,12 @@ pub struct RendererStateReport {
     pub track_id: Option<i64>,
     pub track_title: Option<String>,
     pub position_ms: u64,
+    #[serde(default)]
+    pub command_sequence: Option<u64>,
+    #[serde(default)]
+    pub origin_client_id: Option<String>,
+    #[serde(default)]
+    pub intent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

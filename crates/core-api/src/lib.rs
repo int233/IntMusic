@@ -2,7 +2,7 @@ mod renderers;
 
 use std::{
     collections::HashMap,
-    future::Future,
+    future::{Future, IntoFuture},
     io::{Cursor, SeekFrom},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path as FsPath, PathBuf},
@@ -29,7 +29,7 @@ use chrono::Utc;
 use core_config::{CoreConfig, CorePaths, FavoritesConfig};
 use core_db::DbPool;
 use discovery::DiscoveryPublisher;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use image::{
     codecs::jpeg::JpegEncoder,
     imageops::{self, FilterType},
@@ -48,13 +48,12 @@ use protocol::{
     DistributionTaskProgress, EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload,
     LinkTrackRecordingRequest, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
     MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
-    PlayRequest, PlaybackEvent, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
+    PlaybackEvent, PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
     PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
     RendererCommandPayload, RendererRegistration, RendererStateReport, ReplacePlaybackQueue,
-    ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate, TrackFavoriteUpdate,
+    ScanProgressPayload, SearchResponse, ServerSettingsUpdate, TrackFavoriteUpdate,
     TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual,
-    UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, ZoneVolumeUpdate, API_PREFIX,
-    EVENTS_WS_PATH,
+    UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -65,7 +64,7 @@ use tokio::{
 };
 use tokio_util::io::ReaderStream;
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use transcoder::{TranscodeProfile, Transcoder, TranscoderSettings};
 use uuid::Uuid;
 
@@ -83,8 +82,10 @@ struct AppStateInner {
     started_at: chrono::DateTime<Utc>,
     library_revision: AtomicU64,
     events: broadcast::Sender<EventEnvelope>,
+    renderer_commands: broadcast::Sender<EventEnvelope>,
     playback: PlaybackController,
     renderers: RendererRegistry,
+    playback_control_gates: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     server_id: Uuid,
     bind_address: SocketAddr,
     discovery_service: Option<String>,
@@ -105,6 +106,7 @@ impl AppState {
         transcoder: Transcoder,
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
+        let (renderer_commands, _) = broadcast::channel(256);
         Self {
             inner: Arc::new(AppStateInner {
                 config: RwLock::new(config),
@@ -113,8 +115,10 @@ impl AppState {
                 started_at: Utc::now(),
                 library_revision: AtomicU64::new(1),
                 events,
+                renderer_commands,
                 playback: PlaybackController::new_local(),
                 renderers: RendererRegistry::default(),
+                playback_control_gates: tokio::sync::Mutex::new(HashMap::new()),
                 server_id,
                 bind_address,
                 discovery_service,
@@ -145,6 +149,21 @@ impl AppState {
             .inner
             .events
             .send(EventEnvelope::new(event_type, payload));
+    }
+
+    fn emit_renderer_command(&self, renderer_id: &str, command: &RendererCommandPayload) {
+        let _ = self.inner.renderer_commands.send(EventEnvelope::new(
+            "renderer.command",
+            json!({ "renderer_id": renderer_id, "command": command }),
+        ));
+    }
+
+    async fn playback_control_gate(&self, zone_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.inner.playback_control_gates.lock().await;
+        gates
+            .entry(zone_id.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     async fn bump_library_revision(&self, reason: &str) -> u64 {
@@ -258,9 +277,34 @@ where
     let router = build_router(state);
     info!(address = %bind_addr, "local music core listening");
     let _discovery_publisher = discovery_publisher;
-    let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await;
+    let (shutdown_started_tx, mut shutdown_started_rx) = tokio::sync::watch::channel(false);
+    let mut server = Box::pin(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                shutdown.await;
+                let _ = shutdown_started_tx.send(true);
+            })
+            .into_future(),
+    );
+    let serve_result = tokio::select! {
+        result = &mut server => result,
+        changed = shutdown_started_rx.changed() => {
+            if changed.is_err() || !*shutdown_started_rx.borrow() {
+                server.await
+            } else {
+                match tokio::time::timeout(Duration::from_secs(8), &mut server).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        warn!(
+                            timeout_seconds = 8,
+                            "forcing Core shutdown with active connections still open"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+        }
+    };
     if let Err(error) = tokio::fs::remove_file(&runtime_endpoint_file).await {
         if error.kind() != std::io::ErrorKind::NotFound {
             error!(
@@ -324,8 +368,14 @@ fn start_local_playback_monitor(state: AppState) {
                 state.emit("playback.state_changed", &current);
                 match step_playback_queue_and_emit(&state, &previous.zone_id, false, true).await {
                     Ok(Some(track_id)) => {
-                        if let Err(error) =
-                            play_track_on_zone(&state, &previous.zone_id, track_id, 0).await
+                        if let Err(error) = play_track_on_zone(
+                            &state,
+                            &previous.zone_id,
+                            track_id,
+                            0,
+                            &PlaybackCommandContext::default(),
+                        )
+                        .await
                         {
                             error!(
                                 zone_id = previous.zone_id,
@@ -2670,6 +2720,7 @@ async fn register_renderer(
     State(state): State<AppState>,
     Json(payload): Json<RendererRegistration>,
 ) -> ApiResult<protocol::RegisteredRenderer> {
+    let request_playback_sync = payload.request_playback_sync;
     let (renderer, reset_states) = state.inner.renderers.register(payload).await;
     for (previous, current) in reset_states {
         record_playback_finish(
@@ -2683,6 +2734,38 @@ async fn register_renderer(
         state.emit("playback.state_changed", &current);
     }
     state.emit("renderer.registered", &renderer);
+    if request_playback_sync {
+        for output in &renderer.outputs {
+            let Some(playback) = state.inner.renderers.state_for_output(&output.id).await else {
+                continue;
+            };
+            let (action, stream_path) = match playback.state {
+                PlaybackTransportState::Playing => (
+                    "play",
+                    playback
+                        .track_id
+                        .map(|track_id| format!("/tracks/{track_id}/stream")),
+                ),
+                PlaybackTransportState::Paused => ("pause", None),
+                PlaybackTransportState::Stopped => ("stop", None),
+            };
+            let (renderer_id, command) = create_renderer_command(
+                &state,
+                &output.id,
+                action,
+                playback.track_id,
+                playback.track_title.clone(),
+                stream_path,
+                Some(playback.position_ms),
+                None,
+                None,
+                &PlaybackCommandContext::default(),
+                TRANSPORT_COMMAND_TTL_MS,
+            )
+            .await?;
+            state.emit_renderer_command(&renderer_id, &command);
+        }
+    }
     Ok(Json(renderer))
 }
 
@@ -2697,24 +2780,49 @@ async fn report_renderer_state(
         renderers::remote_output_id(&client_id, &payload.output_id)
     };
     let previous = state.inner.renderers.state_for_output(&output_id).await;
-    let completed = previous.as_ref().is_some_and(|previous| {
-        previous.track_id.is_some()
-            && previous.state == PlaybackTransportState::Playing
-            && payload.state == PlaybackTransportState::Stopped
-    });
     let playback = state
         .inner
         .renderers
         .report_state(&client_id, payload)
         .await?;
-    record_renderer_state_transition(&state, previous, &playback).await;
-    state.emit("playback.state_changed", &playback);
+    let transport_changed = previous.as_ref().is_none_or(|previous| {
+        previous.state != playback.state
+            || previous.track_id != playback.track_id
+            || previous.command_sequence != playback.command_sequence
+    });
+    let position_changed = previous
+        .as_ref()
+        .is_none_or(|previous| previous.position_ms.abs_diff(playback.position_ms) >= 4_000);
+    let completed = previous.as_ref().is_some_and(|previous| {
+        previous.track_id.is_some()
+            && previous.state == PlaybackTransportState::Playing
+            && playback.state == PlaybackTransportState::Stopped
+            && transport_changed
+    });
+    if transport_changed || position_changed {
+        record_renderer_state_transition(&state, previous, &playback).await;
+        state.emit(
+            if transport_changed {
+                "playback.state_changed"
+            } else {
+                "playback.position"
+            },
+            &playback,
+        );
+    }
     if completed {
         if let Some(track_id) =
             step_playback_queue_and_emit(&state, &output_id, false, true).await?
         {
             return Ok(Json(
-                play_track_on_zone(&state, &output_id, track_id, 0).await?,
+                play_track_on_zone(
+                    &state,
+                    &output_id,
+                    track_id,
+                    0,
+                    &PlaybackCommandContext::default(),
+                )
+                .await?,
             ));
         }
     }
@@ -2758,6 +2866,9 @@ async fn list_zones(State(state): State<AppState>) -> ApiResult<Vec<protocol::Zo
             track_id: None,
             track_title: None,
             position_ms: 0,
+            command_sequence: None,
+            origin_client_id: None,
+            intent_id: None,
             is_online: output.is_online,
             is_remote: output.is_remote,
             node_id: output.node_id,
@@ -2816,18 +2927,30 @@ fn apply_playback_to_zone(zone: &mut protocol::ZoneSummary, playback: PlaybackSt
     zone.track_id = playback.track_id;
     zone.track_title = playback.track_title;
     zone.position_ms = playback.position_ms;
+    zone.command_sequence = playback.command_sequence;
+    zone.origin_client_id = playback.origin_client_id;
+    zone.intent_id = playback.intent_id;
 }
 
 async fn play_zone(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
-    payload: Option<Json<PlayRequest>>,
+    payload: Option<Json<PlayControlRequest>>,
 ) -> ApiResult<PlaybackState> {
     let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
     let playback = if let Some(track_id) = request.track_id {
-        play_track_on_zone(&state, &zone_id, track_id, request.position_ms.unwrap_or(0)).await?
+        play_track_on_zone(
+            &state,
+            &zone_id,
+            track_id,
+            request.position_ms.unwrap_or(0),
+            &request.command,
+        )
+        .await?
     } else {
-        resume_zone_internal(&state, &zone_id).await?
+        resume_zone_internal(&state, &zone_id, &request.command).await?
     };
     Ok(Json(playback))
 }
@@ -2835,8 +2958,10 @@ async fn play_zone(
 async fn play_zone_collection(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
-    Json(payload): Json<ReplacePlaybackQueue>,
+    Json(payload): Json<PlayCollectionControlRequest>,
 ) -> ApiResult<serde_json::Value> {
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
     let request_started = tokio::time::Instant::now();
     let start_index = payload.start_index.unwrap_or(0);
     let index = usize::try_from(start_index)
@@ -2844,10 +2969,11 @@ async fn play_zone_collection(
         .filter(|index| *index < payload.track_ids.len())
         .ok_or_else(|| anyhow::anyhow!("collection start_index is out of range"))?;
     let track_id = payload.track_ids[index];
-    let queue = core_db::replace_playback_queue(state.pool(), &zone_id, payload).await?;
+    let queue =
+        core_db::replace_playback_queue(state.pool(), &zone_id, payload.queue_request()).await?;
     let queue_elapsed_ms = request_started.elapsed().as_millis();
     state.emit("playback.queue_changed", &queue);
-    let playback = play_track_on_zone(&state, &zone_id, track_id, 0).await?;
+    let playback = play_track_on_zone(&state, &zone_id, track_id, 0, &payload.command).await?;
     let total_elapsed_ms = request_started.elapsed().as_millis();
     Ok(Json(json!({
         "queue": queue,
@@ -2872,6 +2998,7 @@ async fn play_many_zones(
                 &zone_id,
                 payload.track_id,
                 payload.position_ms.unwrap_or(0),
+                &PlaybackCommandContext::default(),
             )
             .await?,
         );
@@ -2901,6 +3028,7 @@ async fn transfer_zone(
             &payload.target_zone_id,
             track_id,
             source.position_ms,
+            &PlaybackCommandContext::default(),
         )
         .await?,
     ];
@@ -2911,6 +3039,7 @@ async fn transfer_zone(
                 &source_zone_id,
                 "transferred",
                 Some(payload.target_zone_id.as_str()),
+                &PlaybackCommandContext::default(),
             )
             .await?,
         );
@@ -2922,25 +3051,36 @@ async fn transfer_zone(
 async fn pause_zone(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
+    payload: Option<Json<PlaybackControlRequest>>,
 ) -> ApiResult<PlaybackState> {
-    let playback = pause_zone_internal(&state, &zone_id).await?;
+    let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
+    let playback = pause_zone_internal(&state, &zone_id, &request.command).await?;
     Ok(Json(playback))
 }
 
 async fn stop_zone(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
+    payload: Option<Json<PlaybackControlRequest>>,
 ) -> ApiResult<PlaybackState> {
-    let playback = stop_zone_internal(&state, &zone_id).await?;
+    let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
+    let playback = stop_zone_internal(&state, &zone_id, &request.command).await?;
     Ok(Json(playback))
 }
 
 async fn seek_zone(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
-    Json(payload): Json<SeekRequest>,
+    Json(payload): Json<SeekControlRequest>,
 ) -> ApiResult<PlaybackState> {
-    let playback = seek_zone_internal(&state, &zone_id, payload.position_ms).await?;
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
+    let playback =
+        seek_zone_internal(&state, &zone_id, payload.position_ms, &payload.command).await?;
     Ok(Json(playback))
 }
 
@@ -3010,15 +3150,27 @@ async fn update_zone_queue_mode(
 async fn next_zone_track(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
+    payload: Option<Json<PlaybackControlRequest>>,
 ) -> ApiResult<PlaybackState> {
-    Ok(Json(play_queue_step(&state, &zone_id, false, false).await?))
+    let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
+    Ok(Json(
+        play_queue_step(&state, &zone_id, false, false, &request.command).await?,
+    ))
 }
 
 async fn previous_zone_track(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
+    payload: Option<Json<PlaybackControlRequest>>,
 ) -> ApiResult<PlaybackState> {
-    Ok(Json(play_queue_step(&state, &zone_id, true, false).await?))
+    let request = payload.map(|Json(payload)| payload).unwrap_or_default();
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
+    Ok(Json(
+        play_queue_step(&state, &zone_id, true, false, &request.command).await?,
+    ))
 }
 
 async fn get_zone_volume(
@@ -3031,11 +3183,13 @@ async fn get_zone_volume(
 async fn update_zone_volume(
     State(state): State<AppState>,
     Path(zone_id): Path<String>,
-    Json(payload): Json<ZoneVolumeUpdate>,
+    Json(payload): Json<VolumeControlRequest>,
 ) -> ApiResult<ZoneVolume> {
+    let gate = state.playback_control_gate(&zone_id).await;
+    let _guard = gate.lock().await;
     let volume =
         core_db::set_zone_volume(state.pool(), &zone_id, payload.volume, payload.muted).await?;
-    apply_zone_volume(&state, &volume).await?;
+    apply_zone_volume(&state, &volume, &payload.command).await?;
     state.emit("zone.volume_changed", &volume);
     Ok(Json(volume))
 }
@@ -3206,20 +3360,135 @@ async fn playback_stats(
     ))
 }
 
-async fn events_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+#[derive(Debug, Default, Deserialize)]
+struct EventsWsQuery {
+    renderer_id: Option<String>,
 }
 
-async fn handle_ws(mut socket: WebSocket, state: AppState) {
-    let mut rx = state.inner.events.subscribe();
-    while let Ok(event) = rx.recv().await {
-        match serde_json::to_string(&event) {
-            Ok(text) => {
-                if socket.send(Message::Text(text.into())).await.is_err() {
-                    break;
+async fn events_ws(
+    State(state): State<AppState>,
+    Query(query): Query<EventsWsQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(socket, state, query.renderer_id))
+}
+
+async fn handle_ws(socket: WebSocket, state: AppState, renderer_id: Option<String>) {
+    let (mut sender, mut receiver) = socket.split();
+    let mut command_rx = state.inner.renderer_commands.subscribe();
+    let mut event_rx = state.inner.events.subscribe();
+
+    loop {
+        tokio::select! {
+            biased;
+            command = command_rx.recv() => {
+                match command {
+                    Ok(command) => {
+                        if renderer_id.as_deref().is_some_and(|renderer_id| {
+                            command
+                                .payload
+                                .get("renderer_id")
+                                .and_then(|value| value.as_str())
+                                != Some(renderer_id)
+                        }) {
+                            continue;
+                        }
+                        if !send_ws_event(&mut sender, &command).await {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "renderer command subscriber lagged");
+                        let event = EventEnvelope::new(
+                            "renderer.resync_required",
+                            json!({ "reason": "command_lag", "skipped": skipped }),
+                        );
+                        if !send_ws_event(&mut sender, &event).await {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            Err(error) => error!(error = %error, "failed to serialize event"),
+            inbound = receiver.next() => {
+                match inbound {
+                    Some(Ok(Message::Text(text))) => {
+                        let Ok(message) = serde_json::from_str::<serde_json::Value>(&text) else {
+                            continue;
+                        };
+                        if message.get("type").and_then(|value| value.as_str())
+                            == Some("client.ping")
+                        {
+                            let event = EventEnvelope::new(
+                                "connection.pong",
+                                json!({
+                                    "ping_id": message.get("ping_id"),
+                                    "client_time_ms": message.get("client_time_ms"),
+                                    "server_time_ms": Utc::now().timestamp_millis(),
+                                }),
+                            );
+                            if !send_ws_event(&mut sender, &event).await {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        info!(error = %error, "event WebSocket receive failed");
+                        break;
+                    }
+                }
+            }
+            event = event_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        if !send_ws_event(&mut sender, &event).await {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(skipped, "event subscriber lagged");
+                        let event = EventEnvelope::new(
+                            "connection.snapshot_required",
+                            json!({ "reason": "event_lag", "skipped": skipped }),
+                        );
+                        if !send_ws_event(&mut sender, &event).await {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+async fn send_ws_event(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    event: &EventEnvelope,
+) -> bool {
+    match serde_json::to_string(event) {
+        Ok(text) => {
+            match tokio::time::timeout(
+                Duration::from_secs(4),
+                sender.send(Message::Text(text.into())),
+            )
+            .await
+            {
+                Ok(result) => result.is_ok(),
+                Err(_) => {
+                    warn!(
+                        event_type = event.event_type,
+                        "closing stalled event WebSocket"
+                    );
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            error!(error = %error, "failed to serialize event");
+            true
         }
     }
 }
@@ -3228,6 +3497,113 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
 struct Paging {
     limit: Option<u32>,
     offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PlaybackCommandContext {
+    #[serde(default)]
+    origin_client_id: Option<String>,
+    #[serde(default)]
+    intent_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PlaybackControlRequest {
+    #[serde(flatten)]
+    command: PlaybackCommandContext,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PlayControlRequest {
+    track_id: Option<i64>,
+    position_ms: Option<u64>,
+    #[serde(flatten)]
+    command: PlaybackCommandContext,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlayCollectionControlRequest {
+    track_ids: Vec<i64>,
+    start_index: Option<i64>,
+    mode: Option<PlaybackMode>,
+    #[serde(flatten)]
+    command: PlaybackCommandContext,
+}
+
+impl PlayCollectionControlRequest {
+    fn queue_request(&self) -> ReplacePlaybackQueue {
+        ReplacePlaybackQueue {
+            track_ids: self.track_ids.clone(),
+            start_index: self.start_index,
+            mode: self.mode,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct SeekControlRequest {
+    position_ms: u64,
+    #[serde(flatten)]
+    command: PlaybackCommandContext,
+}
+
+#[derive(Debug, Deserialize)]
+struct VolumeControlRequest {
+    volume: f32,
+    muted: Option<bool>,
+    #[serde(flatten)]
+    command: PlaybackCommandContext,
+}
+
+const TRANSPORT_COMMAND_TTL_MS: u64 = 6_000;
+const VOLUME_COMMAND_TTL_MS: u64 = 4_000;
+
+#[allow(clippy::too_many_arguments)]
+async fn create_renderer_command(
+    state: &AppState,
+    zone_id: &str,
+    action: &str,
+    track_id: Option<i64>,
+    track_title: Option<String>,
+    stream_path: Option<String>,
+    position_ms: Option<u64>,
+    volume: Option<f32>,
+    muted: Option<bool>,
+    context: &PlaybackCommandContext,
+    expires_after_ms: u64,
+) -> Result<(String, RendererCommandPayload)> {
+    let renderer_id = state
+        .inner
+        .renderers
+        .renderer_id_for_output(zone_id)
+        .await
+        .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
+    let sequence = state.inner.renderers.next_command_sequence(zone_id).await?;
+    Ok((
+        renderer_id,
+        RendererCommandPayload {
+            command_id: Uuid::now_v7(),
+            sequence,
+            issued_at: Some(Utc::now()),
+            expires_after_ms: Some(expires_after_ms),
+            origin_client_id: context.origin_client_id.clone(),
+            intent_id: context.intent_id.clone(),
+            target_output_id: zone_id.to_string(),
+            action: action.to_string(),
+            track_id,
+            track_title,
+            stream_path,
+            position_ms,
+            volume,
+            muted,
+        },
+    ))
+}
+
+fn stamp_playback_command(playback: &mut PlaybackState, command: &RendererCommandPayload) {
+    playback.command_sequence = Some(command.sequence);
+    playback.origin_client_id = command.origin_client_id.clone();
+    playback.intent_id = command.intent_id.clone();
 }
 
 impl Paging {
@@ -3300,19 +3676,6 @@ fn has_max_tag_rating(track: &protocol::TrackSummary) -> bool {
     )
 }
 
-async fn remote_state_from_current(
-    renderers: &RendererRegistry,
-    zone_id: &str,
-    transport_state: PlaybackTransportState,
-) -> Result<PlaybackState> {
-    let mut playback = renderers
-        .state_for_output(zone_id)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-    playback.state = transport_state;
-    renderers.update_state(playback).await
-}
-
 async fn playback_state_for_zone(state: &AppState, zone_id: &str) -> Result<PlaybackState> {
     let mut playback = if is_core_zone(zone_id) {
         state.inner.playback.state_for_zone(zone_id).await
@@ -3335,10 +3698,13 @@ async fn play_queue_step(
     zone_id: &str,
     previous: bool,
     automatic: bool,
+    context: &PlaybackCommandContext,
 ) -> Result<PlaybackState> {
     match step_playback_queue_and_emit(state, zone_id, previous, automatic).await? {
-        Some(track_id) => play_track_on_zone(state, zone_id, track_id, 0).await,
-        None => stop_zone_internal_with_reason(state, zone_id, "queue_completed", None).await,
+        Some(track_id) => play_track_on_zone(state, zone_id, track_id, 0, context).await,
+        None => {
+            stop_zone_internal_with_reason(state, zone_id, "queue_completed", None, context).await
+        }
     }
 }
 
@@ -3354,7 +3720,11 @@ async fn step_playback_queue_and_emit(
     Ok(track_id)
 }
 
-async fn apply_zone_volume(state: &AppState, volume: &ZoneVolume) -> Result<()> {
+async fn apply_zone_volume(
+    state: &AppState,
+    volume: &ZoneVolume,
+    context: &PlaybackCommandContext,
+) -> Result<()> {
     let effective_volume = if volume.muted { 0.0 } else { volume.volume };
     if is_core_zone(&volume.zone_id) {
         state
@@ -3364,34 +3734,26 @@ async fn apply_zone_volume(state: &AppState, volume: &ZoneVolume) -> Result<()> 
             .await;
         return Ok(());
     }
-    let renderer_id = state
-        .inner
-        .renderers
-        .renderer_id_for_output(&volume.zone_id)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("playback zone {} is not registered", volume.zone_id))?;
     let playback = state
         .inner
         .renderers
         .state_for_output(&volume.zone_id)
         .await;
-    state.emit(
-        "renderer.command",
-        json!({
-            "renderer_id": renderer_id,
-            "command": RendererCommandPayload {
-                command_id: Uuid::now_v7(),
-                target_output_id: volume.zone_id.clone(),
-                action: "volume".to_string(),
-                track_id: playback.as_ref().and_then(|state| state.track_id),
-                track_title: playback.and_then(|state| state.track_title),
-                stream_path: None,
-                position_ms: None,
-                volume: Some(volume.volume),
-                muted: Some(volume.muted),
-            }
-        }),
-    );
+    let (renderer_id, command) = create_renderer_command(
+        state,
+        &volume.zone_id,
+        "volume",
+        playback.as_ref().and_then(|state| state.track_id),
+        playback.and_then(|state| state.track_title),
+        None,
+        None,
+        Some(volume.volume),
+        Some(volume.muted),
+        context,
+        VOLUME_COMMAND_TTL_MS,
+    )
+    .await?;
+    state.emit_renderer_command(&renderer_id, &command);
     Ok(())
 }
 
@@ -3414,6 +3776,7 @@ async fn play_track_on_zone(
     zone_id: &str,
     track_id: i64,
     position_ms: u64,
+    context: &PlaybackCommandContext,
 ) -> Result<PlaybackState> {
     let previous = playback_state_for_zone(state, zone_id).await.ok();
     let queue = core_db::set_playback_queue_current_track(state.pool(), zone_id, track_id).await?;
@@ -3440,26 +3803,24 @@ async fn play_track_on_zone(
         }
         playback
     } else {
-        let renderer_id = state
-            .inner
-            .renderers
-            .renderer_id_for_output(zone_id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-        let command = RendererCommandPayload {
-            command_id: Uuid::now_v7(),
-            target_output_id: zone_id.to_string(),
-            action: "play".to_string(),
-            track_id: Some(detail.track.id),
-            track_title: Some(track_title.clone()),
-            stream_path: Some(format!("/tracks/{track_id}/stream")),
-            position_ms: Some(position_ms),
-            volume: None,
-            muted: None,
-        };
+        let (renderer_id, command) = create_renderer_command(
+            state,
+            zone_id,
+            "play",
+            Some(detail.track.id),
+            Some(track_title.clone()),
+            Some(format!("/tracks/{track_id}/stream")),
+            Some(position_ms),
+            None,
+            None,
+            context,
+            TRANSPORT_COMMAND_TTL_MS,
+        )
+        .await?;
         info!(
             event = "renderer_command_sent",
             command_id = %command.command_id,
+            command_sequence = command.sequence,
             renderer_id = %renderer_id,
             zone_id,
             track_id,
@@ -3475,17 +3836,17 @@ async fn play_track_on_zone(
                 track_title: Some(track_title),
                 position_ms,
                 queue_revision: queue.revision,
+                command_sequence: Some(command.sequence),
+                origin_client_id: command.origin_client_id.clone(),
+                intent_id: command.intent_id.clone(),
             })
             .await?;
-        state.emit(
-            "renderer.command",
-            json!({ "renderer_id": renderer_id, "command": command }),
-        );
+        state.emit_renderer_command(&renderer_id, &command);
         playback
     };
     playback.queue_revision = queue.revision;
     let volume = core_db::zone_volume(state.pool(), zone_id).await?;
-    apply_zone_volume(state, &volume).await?;
+    apply_zone_volume(state, &volume, &PlaybackCommandContext::default()).await?;
 
     if let Some(previous) = previous.as_ref() {
         if previous.track_id.is_some() {
@@ -3497,42 +3858,43 @@ async fn play_track_on_zone(
     Ok(playback)
 }
 
-async fn resume_zone_internal(state: &AppState, zone_id: &str) -> Result<PlaybackState> {
+async fn resume_zone_internal(
+    state: &AppState,
+    zone_id: &str,
+    context: &PlaybackCommandContext,
+) -> Result<PlaybackState> {
     let playback = if is_core_zone(zone_id) {
         if zone_id == "local" {
             core_db::set_zone_state(state.pool(), zone_id, "playing").await?;
         }
         state.inner.playback.resume_zone(zone_id).await
     } else {
-        let renderer_id = state
+        let mut playback = state
             .inner
             .renderers
-            .renderer_id_for_output(zone_id)
+            .state_for_output(zone_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-        let playback = remote_state_from_current(
-            &state.inner.renderers,
+        playback.state = PlaybackTransportState::Playing;
+        let (renderer_id, command) = create_renderer_command(
+            state,
             zone_id,
-            PlaybackTransportState::Playing,
-        )
-        .await?;
-        let command = RendererCommandPayload {
-            command_id: Uuid::now_v7(),
-            target_output_id: zone_id.to_string(),
-            action: "resume".to_string(),
-            track_id: playback.track_id,
-            track_title: playback.track_title.clone(),
-            stream_path: playback
+            "resume",
+            playback.track_id,
+            playback.track_title.clone(),
+            playback
                 .track_id
                 .map(|track_id| format!("/tracks/{track_id}/stream")),
-            position_ms: Some(playback.position_ms),
-            volume: None,
-            muted: None,
-        };
-        state.emit(
-            "renderer.command",
-            json!({ "renderer_id": renderer_id, "command": command }),
-        );
+            Some(playback.position_ms),
+            None,
+            None,
+            context,
+            TRANSPORT_COMMAND_TTL_MS,
+        )
+        .await?;
+        stamp_playback_command(&mut playback, &command);
+        let playback = state.inner.renderers.update_state(playback).await?;
+        state.emit_renderer_command(&renderer_id, &command);
         playback
     };
     record_playback_update(state, &playback, "resume").await;
@@ -3540,40 +3902,41 @@ async fn resume_zone_internal(state: &AppState, zone_id: &str) -> Result<Playbac
     Ok(playback)
 }
 
-async fn pause_zone_internal(state: &AppState, zone_id: &str) -> Result<PlaybackState> {
+async fn pause_zone_internal(
+    state: &AppState,
+    zone_id: &str,
+    context: &PlaybackCommandContext,
+) -> Result<PlaybackState> {
     let playback = if is_core_zone(zone_id) {
         if zone_id == "local" {
             core_db::set_zone_state(state.pool(), zone_id, "paused").await?;
         }
         state.inner.playback.pause_zone(zone_id).await
     } else {
-        let renderer_id = state
+        let mut playback = state
             .inner
             .renderers
-            .renderer_id_for_output(zone_id)
+            .state_for_output(zone_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-        let playback = remote_state_from_current(
-            &state.inner.renderers,
+        playback.state = PlaybackTransportState::Paused;
+        let (renderer_id, command) = create_renderer_command(
+            state,
             zone_id,
-            PlaybackTransportState::Paused,
+            "pause",
+            playback.track_id,
+            playback.track_title.clone(),
+            None,
+            None,
+            None,
+            None,
+            context,
+            TRANSPORT_COMMAND_TTL_MS,
         )
         .await?;
-        let command = RendererCommandPayload {
-            command_id: Uuid::now_v7(),
-            target_output_id: zone_id.to_string(),
-            action: "pause".to_string(),
-            track_id: playback.track_id,
-            track_title: playback.track_title.clone(),
-            stream_path: None,
-            position_ms: None,
-            volume: None,
-            muted: None,
-        };
-        state.emit(
-            "renderer.command",
-            json!({ "renderer_id": renderer_id, "command": command }),
-        );
+        stamp_playback_command(&mut playback, &command);
+        let playback = state.inner.renderers.update_state(playback).await?;
+        state.emit_renderer_command(&renderer_id, &command);
         playback
     };
     record_playback_update(state, &playback, "pause").await;
@@ -3581,8 +3944,12 @@ async fn pause_zone_internal(state: &AppState, zone_id: &str) -> Result<Playback
     Ok(playback)
 }
 
-async fn stop_zone_internal(state: &AppState, zone_id: &str) -> Result<PlaybackState> {
-    stop_zone_internal_with_reason(state, zone_id, "stopped", None).await
+async fn stop_zone_internal(
+    state: &AppState,
+    zone_id: &str,
+    context: &PlaybackCommandContext,
+) -> Result<PlaybackState> {
+    stop_zone_internal_with_reason(state, zone_id, "stopped", None, context).await
 }
 
 async fn stop_zone_internal_with_reason(
@@ -3590,6 +3957,7 @@ async fn stop_zone_internal_with_reason(
     zone_id: &str,
     reason: &str,
     related_zone_id: Option<&str>,
+    context: &PlaybackCommandContext,
 ) -> Result<PlaybackState> {
     let previous = playback_state_for_zone(state, zone_id).await.ok();
     let playback = if is_core_zone(zone_id) {
@@ -3598,12 +3966,20 @@ async fn stop_zone_internal_with_reason(
         }
         state.inner.playback.stop_zone(zone_id).await
     } else {
-        let renderer_id = state
-            .inner
-            .renderers
-            .renderer_id_for_output(zone_id)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
+        let (renderer_id, command) = create_renderer_command(
+            state,
+            zone_id,
+            "stop",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            context,
+            TRANSPORT_COMMAND_TTL_MS,
+        )
+        .await?;
         let playback = state
             .inner
             .renderers
@@ -3614,23 +3990,12 @@ async fn stop_zone_internal_with_reason(
                 track_title: None,
                 position_ms: 0,
                 queue_revision: 0,
+                command_sequence: Some(command.sequence),
+                origin_client_id: command.origin_client_id.clone(),
+                intent_id: command.intent_id.clone(),
             })
             .await?;
-        let command = RendererCommandPayload {
-            command_id: Uuid::now_v7(),
-            target_output_id: zone_id.to_string(),
-            action: "stop".to_string(),
-            track_id: None,
-            track_title: None,
-            stream_path: None,
-            position_ms: None,
-            volume: None,
-            muted: None,
-        };
-        state.emit(
-            "renderer.command",
-            json!({ "renderer_id": renderer_id, "command": command }),
-        );
+        state.emit_renderer_command(&renderer_id, &command);
         playback
     };
     if let Some(previous) = previous.as_ref() {
@@ -3644,47 +4009,38 @@ async fn seek_zone_internal(
     state: &AppState,
     zone_id: &str,
     position_ms: u64,
+    context: &PlaybackCommandContext,
 ) -> Result<PlaybackState> {
     let playback = if is_core_zone(zone_id) {
         state.inner.playback.seek_zone(zone_id, position_ms).await?
     } else {
-        let renderer_id = state
+        let mut playback = state
             .inner
             .renderers
-            .renderer_id_for_output(zone_id)
+            .state_for_output(zone_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-        let playback = remote_state_from_current(
-            &state.inner.renderers,
+        playback.state = PlaybackTransportState::Playing;
+        playback.position_ms = position_ms;
+        let (renderer_id, command) = create_renderer_command(
+            state,
             zone_id,
-            PlaybackTransportState::Playing,
-        )
-        .await?;
-        let playback = state
-            .inner
-            .renderers
-            .update_state(PlaybackState {
-                position_ms,
-                ..playback
-            })
-            .await?;
-        let command = RendererCommandPayload {
-            command_id: Uuid::now_v7(),
-            target_output_id: zone_id.to_string(),
-            action: "seek".to_string(),
-            track_id: playback.track_id,
-            track_title: playback.track_title.clone(),
-            stream_path: playback
+            "seek",
+            playback.track_id,
+            playback.track_title.clone(),
+            playback
                 .track_id
                 .map(|track_id| format!("/tracks/{track_id}/stream")),
-            position_ms: Some(position_ms),
-            volume: None,
-            muted: None,
-        };
-        state.emit(
-            "renderer.command",
-            json!({ "renderer_id": renderer_id, "command": command }),
-        );
+            Some(position_ms),
+            None,
+            None,
+            context,
+            TRANSPORT_COMMAND_TTL_MS,
+        )
+        .await?;
+        stamp_playback_command(&mut playback, &command);
+        let playback = state.inner.renderers.update_state(playback).await?;
+        state.emit_renderer_command(&renderer_id, &command);
         playback
     };
     record_playback_update(state, &playback, "seek").await;

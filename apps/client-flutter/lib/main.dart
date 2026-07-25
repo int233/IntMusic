@@ -64,6 +64,12 @@ final CacheManager _artworkCacheManager = CacheManager(
   ),
 );
 
+class _SupersededPlaybackIntent implements Exception {
+  const _SupersededPlaybackIntent(this.intentId);
+
+  final String intentId;
+}
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   if (_usesDesktopRendererBackend) {
@@ -132,11 +138,28 @@ class _CoreDashboardState extends State<CoreDashboard>
   Timer? _distributionTimer;
   Timer? _librarySyncTimer;
   Timer? _eventReconnectTimer;
+  Timer? _eventHealthTimer;
   int _zoneRefreshFailures = 0;
   Timer? _searchDebounce;
   WebSocket? _eventSocket;
   String? _eventSocketBaseUrl;
+  DateTime? _eventLastPongAt;
+  int _eventPingSequence = 0;
+  int _eventConnectionGeneration = 0;
+  bool _eventRestartBusy = false;
   String? _rendererRegisteredCoreUrl;
+  final Map<String, int> _rendererCommandSequenceByOutput = {};
+  final Map<String, DateTime> _latestRendererCommandIssuedAtByOutput = {};
+  final Map<String, int> _playbackStateSequenceByZone = {};
+  final Map<String, int> _rendererOperationGenerationByOutput = {};
+  final Map<String, Future<void>> _rendererCommandQueueByOutput = {};
+  final Map<String, Future<void>> _playbackRequestQueueByZone = {};
+  final Map<String, String> _latestPlaybackIntentByZone = {};
+  final Map<String, String> _latestVolumeIntentByZone = {};
+  final Map<String, DateTime> _latestPlaybackIntentAtByZone = {};
+  final Map<String, String> _desiredTransportStateByZone = {};
+  final Set<String> _locallyAppliedPlaybackIntents = {};
+  int _playbackIntentSequence = 0;
   SharedPreferences? _preferences;
   _AppRoute _currentRoute = const _AppRoute.home();
   final List<_AppRoute> _backStack = [];
@@ -251,6 +274,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     _distributionTimer?.cancel();
     _librarySyncTimer?.cancel();
     _eventReconnectTimer?.cancel();
+    _eventHealthTimer?.cancel();
     _searchDebounce?.cancel();
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
@@ -1556,7 +1580,10 @@ class _CoreDashboardState extends State<CoreDashboard>
     return items;
   }
 
-  Future<void> _sendRendererRegistration({bool resetPlayback = false}) async {
+  Future<void> _sendRendererRegistration({
+    bool resetPlayback = false,
+    bool requestPlaybackSync = false,
+  }) async {
     await _rendererAudioInitialization;
     final outputPrefix = 'renderer:$_clientId:';
     final rendererOutputs = _rendererAudioDevicesByOutput.entries
@@ -1582,6 +1609,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       'name': _clientAlias(),
       'platform': Platform.operatingSystem,
       'reset_playback': resetPlayback,
+      'request_playback_sync': requestPlaybackSync,
       'outputs': rendererOutputs,
     });
     _rendererStatus = 'Renderer online';
@@ -1724,7 +1752,7 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   void _startRendererPositionReporter() {
     _rendererPositionReporter?.cancel();
-    _rendererPositionReporter = Timer.periodic(const Duration(seconds: 2), (_) {
+    _rendererPositionReporter = Timer.periodic(const Duration(seconds: 5), (_) {
       if (_rendererPositionReportBusy) return;
       _rendererPositionReportBusy = true;
       unawaited(
@@ -1737,7 +1765,7 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   void _startZoneRefresh() {
     _zoneRefreshTimer?.cancel();
-    _zoneRefreshTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+    _zoneRefreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
       unawaited(_refreshZonesSilently());
     });
   }
@@ -2342,7 +2370,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
-  Future<void> _connectEventStream() async {
+  Future<void> _connectEventStream({bool requestPlaybackSync = false}) async {
     final baseUrl = _coreUrlController.text.trim();
     if (_eventSocket != null && _eventSocketBaseUrl == baseUrl) {
       return;
@@ -2355,31 +2383,65 @@ class _CoreDashboardState extends State<CoreDashboard>
       _eventReconnectTimer?.cancel();
       _eventSocket = null;
       _eventSocketBaseUrl = baseUrl;
-      final socket = await WebSocket.connect(_api.wsUrl('/ws/v1/events'));
+      final socket = await WebSocket.connect(
+        _api.wsUrl(
+          '/ws/v1/events'
+          '?renderer_id=${Uri.encodeQueryComponent(_clientId)}',
+        ),
+      ).timeout(const Duration(seconds: 8));
+      final connectionGeneration = ++_eventConnectionGeneration;
+      _rendererCommandSequenceByOutput.clear();
+      _latestRendererCommandIssuedAtByOutput.clear();
+      _playbackStateSequenceByZone.clear();
       _eventSocket = socket;
+      _eventLastPongAt = DateTime.now();
       _ClientLog.event(
         'core.websocket.connected',
-        data: <String, Object?>{'host': Uri.parse(baseUrl).host},
+        data: <String, Object?>{
+          'host': Uri.parse(baseUrl).host,
+          'generation': connectionGeneration,
+          'request_playback_sync': requestPlaybackSync,
+        },
       );
       socket.listen(
-        _handleCoreEvent,
+        (message) => _handleCoreEvent(
+          message,
+          connectionGeneration: connectionGeneration,
+        ),
         onDone: () {
           if (mounted && _eventSocket == socket) {
+            _eventHealthTimer?.cancel();
             setState(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
             _ClientLog.event('core.websocket.closed', level: 'warning');
-            _scheduleEventReconnect();
+            _scheduleEventReconnect(requestPlaybackSync: true);
           }
         },
         onError: (Object error) {
           if (mounted && _eventSocket == socket) {
+            _eventHealthTimer?.cancel();
             setState(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
             _ClientLog.error('core.websocket.error', error);
-            _scheduleEventReconnect();
+            _scheduleEventReconnect(requestPlaybackSync: true);
           }
         },
       );
+      _startEventHealthMonitor(socket, connectionGeneration);
+      if (requestPlaybackSync) {
+        unawaited(
+          _sendRendererRegistration(requestPlaybackSync: true).catchError((
+            Object error,
+            StackTrace stackTrace,
+          ) {
+            _ClientLog.error(
+              'renderer.resync.failed',
+              error,
+              stackTrace: stackTrace,
+            );
+          }),
+        );
+      }
     } catch (error, stackTrace) {
       _ClientLog.error(
         'core.websocket.connect_failed',
@@ -2388,17 +2450,82 @@ class _CoreDashboardState extends State<CoreDashboard>
       );
       _eventSocket = null;
       _rendererStatus = 'Renderer offline';
-      _scheduleEventReconnect();
+      _scheduleEventReconnect(requestPlaybackSync: true);
     } finally {
       _eventConnectBusy = false;
     }
   }
 
-  void _scheduleEventReconnect() {
+  void _startEventHealthMonitor(WebSocket socket, int connectionGeneration) {
+    _eventHealthTimer?.cancel();
+    _eventHealthTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!mounted ||
+          _eventSocket != socket ||
+          connectionGeneration != _eventConnectionGeneration) {
+        _eventHealthTimer?.cancel();
+        return;
+      }
+      final lastPongAt = _eventLastPongAt;
+      if (lastPongAt != null &&
+          DateTime.now().difference(lastPongAt) > const Duration(seconds: 9)) {
+        unawaited(_restartEventStream('pong_timeout'));
+        return;
+      }
+      try {
+        final pingId = '$connectionGeneration-${++_eventPingSequence}';
+        socket.add(
+          jsonEncode(<String, Object?>{
+            'type': 'client.ping',
+            'ping_id': pingId,
+            'client_time_ms': DateTime.now().millisecondsSinceEpoch,
+          }),
+        );
+      } catch (error, stackTrace) {
+        _ClientLog.error(
+          'core.websocket.ping_failed',
+          error,
+          stackTrace: stackTrace,
+        );
+        unawaited(_restartEventStream('ping_failed'));
+      }
+    });
+  }
+
+  Future<void> _restartEventStream(String reason) async {
+    if (_eventRestartBusy || !mounted) return;
+    _eventRestartBusy = true;
+    final socket = _eventSocket;
+    _eventSocket = null;
+    _eventHealthTimer?.cancel();
+    _eventConnectionGeneration += 1;
+    _ClientLog.event(
+      'core.websocket.restarting',
+      level: 'warning',
+      data: <String, Object?>{'reason': reason},
+    );
+    try {
+      await socket?.close(4000, reason).timeout(const Duration(seconds: 1));
+    } catch (_) {
+      // Closing a stalled socket is best effort.
+    } finally {
+      _eventRestartBusy = false;
+      _scheduleEventReconnect(
+        delay: const Duration(milliseconds: 250),
+        requestPlaybackSync: true,
+      );
+    }
+  }
+
+  void _scheduleEventReconnect({
+    Duration delay = const Duration(seconds: 3),
+    bool requestPlaybackSync = true,
+  }) {
     _eventReconnectTimer?.cancel();
-    _eventReconnectTimer = Timer(const Duration(seconds: 3), () {
+    _eventReconnectTimer = Timer(delay, () {
       if (!_offlineMode && mounted) {
-        unawaited(_connectEventStream());
+        unawaited(
+          _connectEventStream(requestPlaybackSync: requestPlaybackSync),
+        );
       }
     });
   }
@@ -2968,8 +3095,11 @@ class _CoreDashboardState extends State<CoreDashboard>
     });
   }
 
-  void _handleCoreEvent(dynamic message) {
+  void _handleCoreEvent(dynamic message, {required int connectionGeneration}) {
     if (message is! String) {
+      return;
+    }
+    if (connectionGeneration != _eventConnectionGeneration) {
       return;
     }
 
@@ -2977,6 +3107,22 @@ class _CoreDashboardState extends State<CoreDashboard>
       final envelope = _asMap(jsonDecode(message));
       final eventType = envelope['type']?.toString();
       final payload = envelope['payload'];
+
+      if (eventType == 'connection.pong') {
+        _eventLastPongAt = DateTime.now();
+        return;
+      }
+
+      if (eventType == 'renderer.resync_required') {
+        unawaited(_restartEventStream('renderer_resync_required'));
+        return;
+      }
+
+      if (eventType == 'connection.snapshot_required') {
+        unawaited(_refreshZonesSilently());
+        unawaited(_refreshPlaybackQueue());
+        return;
+      }
 
       if (eventType == 'renderer.command') {
         final commandEnvelope = _asMap(payload);
@@ -2988,16 +3134,28 @@ class _CoreDashboardState extends State<CoreDashboard>
         if (!_isClientOutputId(targetOutputId)) {
           return;
         }
+        final issuedAt = _rendererCommandIssuedAt(command);
+        final ageMs = issuedAt == null
+            ? null
+            : DateTime.now().toUtc().difference(issuedAt).inMilliseconds;
         _ClientLog.event(
           'renderer.command.received',
           data: <String, Object?>{
             'action': command['action']?.toString(),
             'command_id': command['command_id']?.toString(),
+            'sequence': _intValue(command['sequence']),
+            'issued_at': issuedAt?.toIso8601String(),
+            'age_ms': ageMs,
+            'expires_after_ms': _intValue(command['expires_after_ms']),
+            'origin_client_id': command['origin_client_id']?.toString(),
+            'intent_id': command['intent_id']?.toString(),
             'track_id': _intValue(command['track_id']),
             'output_id': targetOutputId,
           },
         );
-        unawaited(_handleRendererCommand(command));
+        if (_acceptRendererCommand(command)) {
+          _enqueueRendererCommand(command, connectionGeneration);
+        }
         return;
       }
 
@@ -3005,6 +3163,9 @@ class _CoreDashboardState extends State<CoreDashboard>
               eventType == 'playback.position') &&
           payload is Map) {
         final playback = payload.cast<String, dynamic>();
+        if (!_acceptIncomingPlayback(playback)) {
+          return;
+        }
         setState(() {
           _mergePlaybackEvent(playback);
         });
@@ -3064,6 +3225,234 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  bool _acceptRendererCommand(Map<String, dynamic> command) {
+    final outputId = command['target_output_id']?.toString();
+    if (!_isClientOutputId(outputId)) return false;
+
+    final issuedAt = _rendererCommandIssuedAt(command);
+    final ageMs = issuedAt == null
+        ? null
+        : DateTime.now().toUtc().difference(issuedAt).inMilliseconds;
+    final configuredTtl = _intValue(command['expires_after_ms']);
+    final effectiveTtl =
+        configuredTtl ??
+        (command['action']?.toString() == 'volume' ? 4000 : 8000);
+    if (ageMs != null && ageMs > effectiveTtl + 2000) {
+      _dropRendererCommand(
+        command,
+        'expired',
+        extra: <String, Object?>{
+          'age_ms': ageMs,
+          'expires_after_ms': effectiveTtl,
+          'legacy_ttl': configuredTtl == null,
+        },
+      );
+      unawaited(_restartEventStream('expired_renderer_command'));
+      return false;
+    }
+
+    final sequence = _intValue(command['sequence']) ?? 0;
+    final previousSequence = _rendererCommandSequenceByOutput[outputId];
+    final latestStateSequence = _playbackStateSequenceByZone[outputId];
+    final previousIssuedAt = _latestRendererCommandIssuedAtByOutput[outputId];
+    if (sequence <= 0 &&
+        issuedAt != null &&
+        previousIssuedAt != null &&
+        !issuedAt.isAfter(previousIssuedAt)) {
+      _dropRendererCommand(command, 'stale_legacy_timestamp');
+      return false;
+    }
+    if (sequence > 0) {
+      if (latestStateSequence != null && sequence < latestStateSequence) {
+        _dropRendererCommand(command, 'stale_state_sequence');
+        return false;
+      }
+      if (previousSequence != null && sequence <= previousSequence) {
+        _dropRendererCommand(
+          command,
+          'stale_sequence',
+          extra: <String, Object?>{'last_sequence': previousSequence},
+        );
+        return false;
+      }
+      if (previousSequence != null && sequence > previousSequence + 1) {
+        _ClientLog.event(
+          'renderer.command.sequence_gap',
+          level: 'warning',
+          data: <String, Object?>{
+            'output_id': outputId,
+            'sequence': sequence,
+            'last_sequence': previousSequence,
+          },
+        );
+        unawaited(_restartEventStream('renderer_command_gap'));
+        return false;
+      }
+      _rendererCommandSequenceByOutput[outputId!] = sequence;
+    }
+
+    if (!_rendererCommandMatchesLatestIntent(command)) {
+      _dropRendererCommand(command, 'superseded_local_intent');
+      return false;
+    }
+    if (issuedAt != null) {
+      _latestRendererCommandIssuedAtByOutput[outputId!] = issuedAt;
+    }
+    return true;
+  }
+
+  bool _rendererCommandMatchesLatestIntent(Map<String, dynamic> command) {
+    final outputId = command['target_output_id']?.toString();
+    if (outputId == null) return true;
+    final action = command['action']?.toString();
+    final intentId = command['intent_id']?.toString();
+    final originClientId = command['origin_client_id']?.toString();
+    final latestIntent = action == 'volume'
+        ? _latestVolumeIntentByZone[outputId]
+        : _latestPlaybackIntentByZone[outputId];
+    if (originClientId == _clientId &&
+        intentId != null &&
+        latestIntent != null) {
+      return intentId == latestIntent;
+    }
+
+    // Compatibility with an older Core which does not echo origin/intent:
+    // UUIDv7 still lets us reject a command issued before a newer local click.
+    if (action != 'volume') {
+      final localIntentAt = _latestPlaybackIntentAtByZone[outputId];
+      final issuedAt = _rendererCommandIssuedAt(command);
+      if (localIntentAt != null &&
+          issuedAt != null &&
+          issuedAt.isBefore(localIntentAt)) {
+        return false;
+      }
+      if (localIntentAt != null &&
+          issuedAt == null &&
+          DateTime.now().toUtc().difference(localIntentAt) <
+              const Duration(seconds: 10)) {
+        final desired = _desiredTransportStateByZone[outputId];
+        final commanded = _transportStateForAction(action);
+        if (desired != null && commanded != desired) return false;
+      }
+    }
+    return true;
+  }
+
+  String _transportStateForAction(String? action) => switch (action) {
+    'pause' => 'paused',
+    'stop' => 'stopped',
+    _ => 'playing',
+  };
+
+  DateTime? _rendererCommandIssuedAt(Map<String, dynamic> command) {
+    final explicit = DateTime.tryParse(
+      command['issued_at']?.toString() ?? '',
+    )?.toUtc();
+    if (explicit != null) return explicit;
+    final commandId = command['command_id']?.toString().replaceAll('-', '');
+    if (commandId == null || commandId.length < 12) return null;
+    final milliseconds = int.tryParse(commandId.substring(0, 12), radix: 16);
+    if (milliseconds == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+  }
+
+  void _dropRendererCommand(
+    Map<String, dynamic> command,
+    String reason, {
+    Map<String, Object?> extra = const <String, Object?>{},
+  }) {
+    _ClientLog.event(
+      'renderer.command.dropped',
+      level: 'warning',
+      data: <String, Object?>{
+        'reason': reason,
+        'action': command['action']?.toString(),
+        'command_id': command['command_id']?.toString(),
+        'output_id': command['target_output_id']?.toString(),
+        'sequence': _intValue(command['sequence']),
+        'intent_id': command['intent_id']?.toString(),
+        ...extra,
+      },
+    );
+  }
+
+  bool _acceptIncomingPlayback(Map<String, dynamic> playback) {
+    final zoneId = playback['zone_id']?.toString();
+    if (zoneId == null) return true;
+    final sequence = _intValue(playback['command_sequence']);
+    final previousSequence = _playbackStateSequenceByZone[zoneId];
+    final commandSequence = _rendererCommandSequenceByOutput[zoneId];
+    if (sequence != null &&
+        commandSequence != null &&
+        sequence < commandSequence) {
+      return false;
+    }
+    if (sequence != null &&
+        previousSequence != null &&
+        sequence < previousSequence) {
+      return false;
+    }
+    if (sequence != null &&
+        sequence > 0 &&
+        (previousSequence == null || sequence > previousSequence)) {
+      _playbackStateSequenceByZone[zoneId] = sequence;
+    }
+    if (playback['origin_client_id']?.toString() == _clientId) {
+      final intentId = playback['intent_id']?.toString();
+      final latestIntent = _latestPlaybackIntentByZone[zoneId];
+      if (intentId != null &&
+          latestIntent != null &&
+          intentId != latestIntent) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _enqueueRendererCommand(
+    Map<String, dynamic> command,
+    int connectionGeneration,
+  ) {
+    final outputId = command['target_output_id']?.toString();
+    if (outputId == null) return;
+    final action = command['action']?.toString();
+    final operationGeneration = action == 'volume'
+        ? _rendererOperationGenerationByOutput[outputId] ?? 0
+        : (_rendererOperationGenerationByOutput[outputId] ?? 0) + 1;
+    if (action != 'volume') {
+      _rendererOperationGenerationByOutput[outputId] = operationGeneration;
+    }
+    final previous =
+        _rendererCommandQueueByOutput[outputId] ?? Future<void>.value();
+    final execution = previous.catchError((Object _) {}).then<void>((_) async {
+      if (!mounted ||
+          connectionGeneration != _eventConnectionGeneration ||
+          !_rendererCommandStillExecutable(command)) {
+        _dropRendererCommand(command, 'superseded_while_queued');
+        return;
+      }
+      await _handleRendererCommand(command, operationGeneration);
+    });
+    late final Future<void> queued;
+    queued = execution.whenComplete(() {
+      if (identical(_rendererCommandQueueByOutput[outputId], queued)) {
+        _rendererCommandQueueByOutput.remove(outputId);
+      }
+    });
+    _rendererCommandQueueByOutput[outputId] = queued;
+  }
+
+  bool _rendererCommandStillExecutable(Map<String, dynamic> command) {
+    if (!_rendererCommandMatchesLatestIntent(command)) return false;
+    final issuedAt = _rendererCommandIssuedAt(command);
+    if (issuedAt == null) return true;
+    final ttl =
+        _intValue(command['expires_after_ms']) ??
+        (command['action']?.toString() == 'volume' ? 4000 : 8000);
+    return DateTime.now().toUtc().difference(issuedAt).inMilliseconds <=
+        ttl + 2000;
+  }
+
   Future<void> _refreshSettingsCache() async {
     try {
       final values = await Future.wait<dynamic>([
@@ -3090,10 +3479,18 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
-  Future<void> _handleRendererCommand(Map<String, dynamic> command) async {
+  Future<void> _handleRendererCommand(
+    Map<String, dynamic> command,
+    int operationGeneration,
+  ) async {
     final action = command['action']?.toString();
     final outputId = command['target_output_id']?.toString() ?? _clientOutputId;
     try {
+      final intentId = command['intent_id']?.toString();
+      if (intentId != null && _locallyAppliedPlaybackIntents.remove(intentId)) {
+        _acknowledgeLocallyAppliedRendererCommand(command, outputId);
+        return;
+      }
       final player = await _playerForOutput(outputId);
       switch (action) {
         case 'play':
@@ -3111,7 +3508,9 @@ class _CoreDashboardState extends State<CoreDashboard>
               optimisticStarted != null &&
               DateTime.now().difference(optimisticStarted) <
                   const Duration(seconds: 30) &&
-              _rendererLocalFileByOutput[outputId] == true;
+              _rendererLocalFileByOutput[outputId] == true &&
+              _desiredTransportStateByZone[outputId] == 'playing' &&
+              _rendererCommandStillExecutable(command);
           if (reuseOptimisticLocal) {
             _optimisticLocalTrackByOutput.remove(outputId);
             _optimisticLocalStartedAtByOutput.remove(outputId);
@@ -3125,7 +3524,7 @@ class _CoreDashboardState extends State<CoreDashboard>
                     .inMilliseconds,
               },
             );
-            await _reportRendererState(
+            _reportRendererStateInBackground(
               'playing',
               outputId: outputId,
               command: command,
@@ -3142,11 +3541,22 @@ class _CoreDashboardState extends State<CoreDashboard>
               'source': source.localFile ? 'local' : 'core_stream',
             },
           );
-          await player.stop();
+          await _runRendererAudioOperation(
+            outputId,
+            'stop_before_open',
+            player.stop,
+          );
           if (trackId != null) {
             _rendererLoadedTrackByOutput[outputId] = trackId;
           }
-          await player.open(source.uri, localFile: source.localFile);
+          await _runRendererAudioOperation(
+            outputId,
+            'open',
+            () => player.open(source.uri, localFile: source.localFile),
+            timeout: source.localFile
+                ? const Duration(seconds: 6)
+                : const Duration(seconds: 10),
+          );
           _rendererLocalFileByOutput[outputId] = source.localFile;
           _ClientLog.event(
             'renderer.player.open.end',
@@ -3158,9 +3568,19 @@ class _CoreDashboardState extends State<CoreDashboard>
             },
           );
           if (positionMs > 0) {
-            await player.seek(Duration(milliseconds: positionMs));
+            await _runRendererAudioOperation(
+              outputId,
+              'seek_after_open',
+              () => player.seek(Duration(milliseconds: positionMs)),
+            );
           }
-          await _reportRendererState(
+          if (_rendererOperationGenerationByOutput[outputId] !=
+                  operationGeneration ||
+              !_rendererCommandStillExecutable(command)) {
+            _dropRendererCommand(command, 'superseded_during_open');
+            break;
+          }
+          _reportRendererStateInBackground(
             'playing',
             outputId: outputId,
             command: command,
@@ -3176,9 +3596,15 @@ class _CoreDashboardState extends State<CoreDashboard>
             positionMs,
           );
           if (!loaded) {
-            await player.play();
+            await _runRendererAudioOperation(outputId, 'resume', player.play);
           }
-          await _reportRendererState(
+          if (_rendererOperationGenerationByOutput[outputId] !=
+                  operationGeneration ||
+              !_rendererCommandStillExecutable(command)) {
+            _dropRendererCommand(command, 'superseded_during_resume');
+            break;
+          }
+          _reportRendererStateInBackground(
             'playing',
             outputId: outputId,
             command: command,
@@ -3186,20 +3612,24 @@ class _CoreDashboardState extends State<CoreDashboard>
           );
           break;
         case 'pause':
-          await player.pause();
-          await _reportRendererState(
+          await _runRendererAudioOperation(outputId, 'pause', player.pause);
+          _reportRendererStateInBackground(
             'paused',
             outputId: outputId,
             command: command,
           );
           break;
         case 'stop':
-          await player.stop();
+          await _runRendererAudioOperation(outputId, 'stop', player.stop);
           _rendererLoadedTrackByOutput.remove(outputId);
           _rendererLocalFileByOutput.remove(outputId);
           _optimisticLocalTrackByOutput.remove(outputId);
           _optimisticLocalStartedAtByOutput.remove(outputId);
-          await _reportRendererState('stopped', outputId: outputId);
+          _reportRendererStateInBackground(
+            'stopped',
+            outputId: outputId,
+            command: command,
+          );
           break;
         case 'seek':
           final positionMs = _intValue(command['position_ms']) ?? 0;
@@ -3210,9 +3640,13 @@ class _CoreDashboardState extends State<CoreDashboard>
             positionMs,
           );
           if (!loaded) {
-            await player.seek(Duration(milliseconds: positionMs));
+            await _runRendererAudioOperation(
+              outputId,
+              'seek',
+              () => player.seek(Duration(milliseconds: positionMs)),
+            );
           }
-          await _reportRendererState(
+          _reportRendererStateInBackground(
             'playing',
             outputId: outputId,
             command: command,
@@ -3223,7 +3657,11 @@ class _CoreDashboardState extends State<CoreDashboard>
           final volume =
               (command['volume'] as num?)?.toDouble().clamp(0.0, 1.0) ?? 1.0;
           final muted = command['muted'] == true;
-          await player.setVolume(muted ? 0.0 : volume);
+          await _runRendererAudioOperation(
+            outputId,
+            'volume',
+            () => player.setVolume(muted ? 0.0 : volume),
+          );
           break;
       }
     } catch (error, stackTrace) {
@@ -3242,16 +3680,137 @@ class _CoreDashboardState extends State<CoreDashboard>
       if (mounted) {
         setState(() => _error = 'Renderer playback failed: $error');
       }
-      try {
-        await _reportRendererState('stopped', outputId: outputId);
-      } catch (reportError, reportStackTrace) {
-        _ClientLog.error(
-          'renderer.state_report.failed',
-          reportError,
-          stackTrace: reportStackTrace,
-          data: <String, Object?>{'output_id': outputId},
+      if (error is TimeoutException) {
+        await _disposeRendererPlayer(outputId);
+      }
+      _reportRendererStateInBackground('stopped', outputId: outputId);
+    }
+  }
+
+  Future<T> _runRendererAudioOperation<T>(
+    String outputId,
+    String operation,
+    Future<T> Function() run, {
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    final watch = Stopwatch()..start();
+    try {
+      final result = await run().timeout(timeout);
+      if (watch.elapsed >= const Duration(milliseconds: 500)) {
+        _ClientLog.event(
+          'renderer.player.operation.slow',
+          level: 'warning',
+          data: <String, Object?>{
+            'output_id': outputId,
+            'operation': operation,
+            'elapsed_ms': watch.elapsedMilliseconds,
+          },
         );
       }
+      return result;
+    } on TimeoutException {
+      _ClientLog.event(
+        'renderer.player.operation.timeout',
+        level: 'warning',
+        data: <String, Object?>{
+          'output_id': outputId,
+          'operation': operation,
+          'timeout_ms': timeout.inMilliseconds,
+        },
+      );
+      rethrow;
+    }
+  }
+
+  void _acknowledgeLocallyAppliedRendererCommand(
+    Map<String, dynamic> command,
+    String outputId,
+  ) {
+    final action = command['action']?.toString();
+    if (action == 'volume') return;
+    final state = switch (action) {
+      'pause' => 'paused',
+      'stop' => 'stopped',
+      _ => 'playing',
+    };
+    final previous = _rendererPlaybackByOutput[outputId];
+    final snapshot = _withPlaybackTimestamp(<String, dynamic>{
+      ...?previous,
+      'zone_id': outputId,
+      'state': state,
+      'track_id': state == 'stopped'
+          ? null
+          : command['track_id'] ?? previous?['track_id'],
+      'track_title': state == 'stopped'
+          ? null
+          : command['track_title'] ?? previous?['track_title'],
+      'position_ms': state == 'stopped'
+          ? 0
+          : _intValue(command['position_ms']) ??
+                _intValue(previous?['position_ms']) ??
+                0,
+      'command_sequence': _intValue(command['sequence']),
+      'origin_client_id': command['origin_client_id'],
+      'intent_id': command['intent_id'],
+    });
+    if (state == 'stopped') {
+      _rendererPlaybackByOutput.remove(outputId);
+    } else {
+      _rendererPlaybackByOutput[outputId] = snapshot;
+    }
+    _reportRendererStateInBackground(
+      state,
+      outputId: outputId,
+      command: command,
+      positionMs: _intValue(snapshot['position_ms']),
+    );
+    _ClientLog.event(
+      'renderer.command.local_intent_acknowledged',
+      data: <String, Object?>{
+        'action': action,
+        'output_id': outputId,
+        'sequence': _intValue(command['sequence']),
+        'intent_id': command['intent_id']?.toString(),
+      },
+    );
+  }
+
+  void _reportRendererStateInBackground(
+    String state, {
+    String? outputId,
+    Map<String, dynamic>? command,
+    int? positionMs,
+  }) {
+    unawaited(
+      _reportRendererStateSafely(
+        state,
+        outputId: outputId,
+        command: command,
+        positionMs: positionMs,
+      ),
+    );
+  }
+
+  Future<void> _reportRendererStateSafely(
+    String state, {
+    String? outputId,
+    Map<String, dynamic>? command,
+    int? positionMs,
+  }) async {
+    try {
+      await _reportRendererState(
+        state,
+        outputId: outputId,
+        command: command,
+        positionMs: positionMs,
+      );
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'renderer.state_report.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{'output_id': outputId},
+      );
     }
   }
 
@@ -3271,11 +3830,22 @@ class _CoreDashboardState extends State<CoreDashboard>
         'renderer has no loaded source and command has no stream path',
       );
     }
-    await player.stop();
+    await _runRendererAudioOperation(
+      outputId,
+      'stop_before_ensure_source',
+      player.stop,
+    );
     final source = await _rendererSource(trackId, streamPath);
     final openWatch = Stopwatch()..start();
     _rendererLoadedTrackByOutput[outputId] = trackId;
-    await player.open(source.uri, localFile: source.localFile);
+    await _runRendererAudioOperation(
+      outputId,
+      'ensure_source',
+      () => player.open(source.uri, localFile: source.localFile),
+      timeout: source.localFile
+          ? const Duration(seconds: 6)
+          : const Duration(seconds: 10),
+    );
     _rendererLocalFileByOutput[outputId] = source.localFile;
     _ClientLog.event(
       'renderer.player.ensure_source',
@@ -3288,7 +3858,11 @@ class _CoreDashboardState extends State<CoreDashboard>
     );
     _rendererLoadedTrackByOutput[outputId] = trackId;
     if (positionMs > 0) {
-      await player.seek(Duration(milliseconds: positionMs));
+      await _runRendererAudioOperation(
+        outputId,
+        'seek_after_ensure_source',
+        () => player.seek(Duration(milliseconds: positionMs)),
+      );
     }
     return true;
   }
@@ -3384,6 +3958,12 @@ class _CoreDashboardState extends State<CoreDashboard>
                 previous?['track_title'] ??
                 _playback?['track_title'],
       'position_ms': playerPosition,
+      'command_sequence':
+          _intValue(command?['sequence']) ??
+          _intValue(previous?['command_sequence']),
+      'origin_client_id':
+          command?['origin_client_id'] ?? previous?['origin_client_id'],
+      'intent_id': command?['intent_id'] ?? previous?['intent_id'],
     };
     final playback = _asMap(
       await _api.postJson(
@@ -3392,6 +3972,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       ),
     );
     final playbackSnapshot = _withPlaybackTimestamp(playback);
+    if (!_acceptIncomingPlayback(playbackSnapshot)) {
+      return;
+    }
     if (state == 'stopped') {
       _rendererPlaybackByOutput.remove(targetOutputId);
       _rendererLoadedTrackByOutput.remove(targetOutputId);
@@ -4199,10 +4782,10 @@ class _CoreDashboardState extends State<CoreDashboard>
     return _isClientOutputId(outputId) ? outputId : null;
   }
 
-  bool _hasActiveLocalSource(String zoneId) {
+  bool _hasActiveRendererSource(String zoneId) {
     final outputId = _clientOutputForZone(zoneId);
     return outputId != null &&
-        _rendererLocalFileByOutput[outputId] == true &&
+        _audioPlayers.containsKey(outputId) &&
         _rendererLoadedTrackByOutput[outputId] != null;
   }
 
@@ -4215,6 +4798,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     int trackId, {
     required String zoneId,
     List<int>? sourceTrackIds,
+    String? intentId,
   }) async {
     if (!_zoneUsesThisClient(zoneId)) return false;
     final copy = await _availableOfflineCopy(trackId);
@@ -4289,6 +4873,9 @@ class _CoreDashboardState extends State<CoreDashboard>
     _rendererLocalFileByOutput[outputId] = true;
     _optimisticLocalTrackByOutput[outputId] = trackId;
     _optimisticLocalStartedAtByOutput[outputId] = DateTime.now();
+    if (intentId != null) {
+      _markPlaybackIntentAppliedLocally(intentId);
+    }
 
     final summary = _findEntity(_tracks, trackId) ?? copy.toTrackSummary();
     final cachedDetail =
@@ -4303,6 +4890,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       'track_title': summary['title'],
       'position_ms': 0,
       'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
+      'origin_client_id': intentId == null ? null : _clientId,
+      'intent_id': intentId,
     });
     _rendererPlaybackByOutput[outputId] = playback;
     if (mounted) {
@@ -4406,7 +4995,9 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (path == null) return;
     final player = await _playerForOutput(_clientOutputId);
     await player.stop();
+    _rendererLoadedTrackByOutput[_clientOutputId] = trackId;
     await player.open(path, localFile: true);
+    _rendererLocalFileByOutput[_clientOutputId] = true;
     final measuredDuration = await player.durationMs();
     if ((_intValue(copy.metadata['duration_ms']) ?? 0) <= 0 &&
         measuredDuration != null &&
@@ -4533,6 +5124,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Future<void> _setOfflineStopped() async {
     final player = await _playerForOutput(_clientOutputId);
     await player.stop();
+    _rendererLoadedTrackByOutput.remove(_clientOutputId);
+    _rendererLocalFileByOutput.remove(_clientOutputId);
     if (!mounted) return;
     setState(() {
       _applyPlayback(<String, dynamic>{
@@ -4544,6 +5137,57 @@ class _CoreDashboardState extends State<CoreDashboard>
         'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
       });
     });
+  }
+
+  String _beginPlaybackIntent(String zoneId, String action) {
+    final intents = action == 'volume'
+        ? _latestVolumeIntentByZone
+        : _latestPlaybackIntentByZone;
+    final previousIntent = intents[zoneId];
+    if (previousIntent != null) {
+      _locallyAppliedPlaybackIntents.remove(previousIntent);
+    }
+    final intentId =
+        '$_clientId-${DateTime.now().microsecondsSinceEpoch}-'
+        '${++_playbackIntentSequence}';
+    intents[zoneId] = intentId;
+    if (action != 'volume') {
+      _latestPlaybackIntentAtByZone[zoneId] = DateTime.now().toUtc();
+      _desiredTransportStateByZone[zoneId] = switch (action) {
+        'pause' => 'paused',
+        'stop' => 'stopped',
+        _ => 'playing',
+      };
+      final outputId = _clientOutputForZone(zoneId);
+      if (outputId != null) {
+        _rendererOperationGenerationByOutput[outputId] =
+            (_rendererOperationGenerationByOutput[outputId] ?? 0) + 1;
+      }
+    }
+    _ClientLog.event(
+      'playback.intent.created',
+      data: <String, Object?>{
+        'action': action,
+        'zone_id': zoneId,
+        'intent_id': intentId,
+      },
+    );
+    return intentId;
+  }
+
+  Map<String, dynamic> _playbackCommandBody(
+    Map<String, dynamic> body, {
+    required String intentId,
+  }) {
+    return <String, dynamic>{
+      ...body,
+      'origin_client_id': _clientId,
+      'intent_id': intentId,
+    };
+  }
+
+  void _markPlaybackIntentAppliedLocally(String intentId) {
+    _locallyAppliedPlaybackIntents.add(intentId);
   }
 
   Future<void> _playTrack(int trackId) async {
@@ -4599,6 +5243,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final zoneId = _activeZoneId();
+    final intentId = _beginPlaybackIntent(zoneId, 'play_collection');
     final requestWatch = Stopwatch()..start();
     _ClientLog.event(
       'playback.user.play_collection',
@@ -4619,6 +5264,8 @@ class _CoreDashboardState extends State<CoreDashboard>
           'track_title': optimisticTrack?['title'],
           'position_ms': 0,
           'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
+          'origin_client_id': _clientId,
+          'intent_id': intentId,
         });
       });
     }
@@ -4626,17 +5273,21 @@ class _CoreDashboardState extends State<CoreDashboard>
       trackId,
       zoneId: zoneId,
       sourceTrackIds: trackIds,
+      intentId: intentId,
     );
     try {
       final result = _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(zoneId)}/play-collection',
-          <String, dynamic>{
-            'track_ids': trackIds,
-            'start_index': startIndex,
-            'mode': _PlaybackMode.sequential.nameForApi,
-          },
-          requestTimeout: const Duration(seconds: 8),
+        await _serializePlaybackRequest<dynamic>(
+          zoneId,
+          intentId,
+          () => _api.postControlJson(
+            '/zones/${Uri.encodeComponent(zoneId)}/play-collection',
+            _playbackCommandBody(<String, dynamic>{
+              'track_ids': trackIds,
+              'start_index': startIndex,
+              'mode': _PlaybackMode.sequential.nameForApi,
+            }, intentId: intentId),
+          ),
         ),
       );
       final queue = _asMap(result['queue']);
@@ -4644,7 +5295,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       if (mounted) {
         setState(() {
           if (queue.isNotEmpty) _applyPlaybackQueue(queue);
-          if (playback.isNotEmpty) _applyPlayback(playback);
+          if (playback.isNotEmpty && _acceptIncomingPlayback(playback)) {
+            _applyPlayback(playback);
+          }
         });
       }
       _ClientLog.event(
@@ -4655,6 +5308,15 @@ class _CoreDashboardState extends State<CoreDashboard>
           'elapsed_ms': requestWatch.elapsedMilliseconds,
           'local_fast_start': localStarted,
           'core_timing_ms': _asMap(result['timing_ms']),
+        },
+      );
+    } on _SupersededPlaybackIntent {
+      _ClientLog.event(
+        'playback.core.play_collection.superseded',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'intent_id': intentId,
         },
       );
     } on HttpException catch (error) {
@@ -4694,6 +5356,7 @@ class _CoreDashboardState extends State<CoreDashboard>
         trackId,
         zoneId,
         tryLocalFastStart: false,
+        intentId: intentId,
       );
       if (mounted && playback != null) {
         setState(() => _applyPlayback(playback));
@@ -4727,21 +5390,33 @@ class _CoreDashboardState extends State<CoreDashboard>
     int trackId,
     String zoneId, {
     bool tryLocalFastStart = true,
+    String? intentId,
   }) async {
     if (_offlineMode) {
       await _playOfflineTrack(trackId);
       return _playback;
     }
+    final playbackIntentId =
+        intentId ?? _beginPlaybackIntent(zoneId, 'play_track');
     final watch = Stopwatch()..start();
     final localStarted =
         tryLocalFastStart &&
-        await _tryStartLocalPlayback(trackId, zoneId: zoneId);
+        await _tryStartLocalPlayback(
+          trackId,
+          zoneId: zoneId,
+          intentId: playbackIntentId,
+        );
     try {
       final playback = _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(zoneId)}/play',
-          <String, dynamic>{'track_id': trackId},
-          requestTimeout: const Duration(seconds: 8),
+        await _serializePlaybackRequest<dynamic>(
+          zoneId,
+          playbackIntentId,
+          () => _api.postControlJson(
+            '/zones/${Uri.encodeComponent(zoneId)}/play',
+            _playbackCommandBody(<String, dynamic>{
+              'track_id': trackId,
+            }, intentId: playbackIntentId),
+          ),
         ),
       );
       _ClientLog.event(
@@ -4753,7 +5428,17 @@ class _CoreDashboardState extends State<CoreDashboard>
           'local_fast_start': localStarted,
         },
       );
-      return playback;
+      return _acceptIncomingPlayback(playback) ? playback : null;
+    } on _SupersededPlaybackIntent {
+      _ClientLog.event(
+        'playback.core.play_track.superseded',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'intent_id': playbackIntentId,
+        },
+      );
+      return null;
     } catch (error, stackTrace) {
       _ClientLog.error(
         'playback.core.play_track.failed',
@@ -4786,10 +5471,13 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playPreviousOfflineTrack();
       return;
     }
-    await _tryStartAdjacentLocalPlayback(next: false);
+    final zoneId = _activeZoneId();
+    final intentId = _beginPlaybackIntent(zoneId, 'previous');
+    await _tryStartAdjacentLocalPlayback(next: false, intentId: intentId);
     final playback = await _postPlaybackControl(
-      '/zones/${Uri.encodeComponent(_activeZoneId())}/previous',
-      const <String, dynamic>{},
+      zoneId,
+      '/zones/${Uri.encodeComponent(zoneId)}/previous',
+      _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
     );
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
@@ -4802,17 +5490,23 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playNextOfflineTrack();
       return;
     }
-    await _tryStartAdjacentLocalPlayback(next: true);
+    final zoneId = _activeZoneId();
+    final intentId = _beginPlaybackIntent(zoneId, 'next');
+    await _tryStartAdjacentLocalPlayback(next: true, intentId: intentId);
     final playback = await _postPlaybackControl(
-      '/zones/${Uri.encodeComponent(_activeZoneId())}/next',
-      const <String, dynamic>{},
+      zoneId,
+      '/zones/${Uri.encodeComponent(zoneId)}/next',
+      _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
     );
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
     }
   }
 
-  Future<bool> _tryStartAdjacentLocalPlayback({required bool next}) async {
+  Future<bool> _tryStartAdjacentLocalPlayback({
+    required bool next,
+    required String intentId,
+  }) async {
     if (_playbackMode == _PlaybackMode.shuffle ||
         _playbackMode == _PlaybackMode.repeatOne ||
         !_zoneUsesThisClient(_activeZoneId())) {
@@ -4835,7 +5529,11 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
     final trackId = _intValue(_asMap(items[index]['track'])['id']);
     if (trackId == null) return false;
-    return _tryStartLocalPlayback(trackId, zoneId: _activeZoneId());
+    return _tryStartLocalPlayback(
+      trackId,
+      zoneId: _activeZoneId(),
+      intentId: intentId,
+    );
   }
 
   Future<void> _refreshPlaybackQueue({String? zoneId}) async {
@@ -5276,37 +5974,56 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _postZoneAction(String zoneId, String action) async {
+    final intentId = _beginPlaybackIntent(zoneId, action);
     final outputId = _clientOutputForZone(zoneId);
-    if (outputId != null && _hasActiveLocalSource(zoneId)) {
+    if (outputId != null && _hasActiveRendererSource(zoneId)) {
       final player = await _playerForOutput(outputId);
       final position =
           await player.currentPositionMs() ??
           _estimatedPlaybackPositionMs(_playback);
       switch (action) {
         case 'pause':
-          await player.pause();
+          await _runRendererAudioOperation(
+            outputId,
+            'local_pause',
+            player.pause,
+          );
         case 'play':
-          await player.play();
+          await _runRendererAudioOperation(
+            outputId,
+            'local_resume',
+            player.play,
+          );
         case 'stop':
-          await player.stop();
+          await _runRendererAudioOperation(outputId, 'local_stop', player.stop);
           _rendererLoadedTrackByOutput.remove(outputId);
           _rendererLocalFileByOutput.remove(outputId);
           _optimisticLocalTrackByOutput.remove(outputId);
           _optimisticLocalStartedAtByOutput.remove(outputId);
       }
+      _markPlaybackIntentAppliedLocally(intentId);
+      final localPlayback = _withPlaybackTimestamp(<String, dynamic>{
+        ...?_playback,
+        'zone_id': zoneId,
+        'state': action == 'play'
+            ? 'playing'
+            : action == 'pause'
+            ? 'paused'
+            : 'stopped',
+        if (action == 'stop') 'track_id': null,
+        if (action == 'stop') 'track_title': null,
+        'position_ms': action == 'stop' ? 0 : position,
+        'origin_client_id': _clientId,
+        'intent_id': intentId,
+      });
+      if (action == 'stop') {
+        _rendererPlaybackByOutput.remove(outputId);
+      } else {
+        _rendererPlaybackByOutput[outputId] = localPlayback;
+      }
       if (mounted) {
         setState(() {
-          _applyPlayback(<String, dynamic>{
-            ...?_playback,
-            'state': action == 'play'
-                ? 'playing'
-                : action == 'pause'
-                ? 'paused'
-                : 'stopped',
-            if (action == 'stop') 'track_id': null,
-            if (action == 'stop') 'track_title': null,
-            'position_ms': action == 'stop' ? 0 : position,
-          });
+          _applyPlayback(localPlayback);
         });
       }
       _ClientLog.event(
@@ -5319,8 +6036,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       );
     }
     final playback = await _postPlaybackControl(
+      zoneId,
       '/zones/${Uri.encodeComponent(zoneId)}/$action',
-      const <String, dynamic>{},
+      _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
     );
     if (mounted && playback != null) {
       setState(() {
@@ -5412,23 +6130,35 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final zoneId = _activeZoneId();
+    final intentId = _beginPlaybackIntent(zoneId, 'seek');
     final outputId = _clientOutputForZone(zoneId);
-    if (outputId != null && _hasActiveLocalSource(zoneId)) {
-      await (await _playerForOutput(
+    if (outputId != null && _hasActiveRendererSource(zoneId)) {
+      final player = await _playerForOutput(outputId);
+      await _runRendererAudioOperation(
         outputId,
-      )).seek(Duration(milliseconds: positionMs));
+        'local_seek',
+        () => player.seek(Duration(milliseconds: positionMs)),
+      );
+      _markPlaybackIntentAppliedLocally(intentId);
+      final localPlayback = _withPlaybackTimestamp(<String, dynamic>{
+        ...?_playback,
+        'position_ms': positionMs,
+        'origin_client_id': _clientId,
+        'intent_id': intentId,
+      });
+      _rendererPlaybackByOutput[outputId] = localPlayback;
       if (mounted) {
         setState(() {
-          _applyPlayback(<String, dynamic>{
-            ...?_playback,
-            'position_ms': positionMs,
-          });
+          _applyPlayback(localPlayback);
         });
       }
     }
     final playback = await _postPlaybackControl(
+      zoneId,
       '/zones/${Uri.encodeComponent(zoneId)}/seek',
-      <String, dynamic>{'position_ms': positionMs},
+      _playbackCommandBody(<String, dynamic>{
+        'position_ms': positionMs,
+      }, intentId: intentId),
     );
     if (mounted && playback != null) {
       setState(() {
@@ -5437,7 +6167,42 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  Future<T> _serializePlaybackRequest<T>(
+    String zoneId,
+    String intentId,
+    Future<T> Function() request,
+  ) {
+    final previous =
+        _playbackRequestQueueByZone[zoneId] ?? Future<void>.value();
+    final completer = Completer<T>();
+    late final Future<void> queued;
+    queued =
+        (() async {
+          try {
+            try {
+              await previous;
+            } catch (_) {
+              // A failed older request must not block a newer user intent.
+            }
+            final latestIntent = _latestPlaybackIntentByZone[zoneId];
+            if (latestIntent != null && latestIntent != intentId) {
+              throw _SupersededPlaybackIntent(intentId);
+            }
+            completer.complete(await request());
+          } catch (error, stackTrace) {
+            completer.completeError(error, stackTrace);
+          }
+        })().whenComplete(() {
+          if (identical(_playbackRequestQueueByZone[zoneId], queued)) {
+            _playbackRequestQueueByZone.remove(zoneId);
+          }
+        });
+    _playbackRequestQueueByZone[zoneId] = queued;
+    return completer.future;
+  }
+
   Future<Map<String, dynamic>?> _postPlaybackControl(
+    String zoneId,
     String path,
     Map<String, dynamic> body,
   ) async {
@@ -5448,10 +6213,10 @@ class _CoreDashboardState extends State<CoreDashboard>
     );
     try {
       final result = _asMap(
-        await _api.postJson(
-          path,
-          body,
-          requestTimeout: const Duration(seconds: 8),
+        await _serializePlaybackRequest<dynamic>(
+          zoneId,
+          body['intent_id']?.toString() ?? '',
+          () => _api.postControlJson(path, body),
         ),
       );
       _ClientLog.event(
@@ -5461,7 +6226,17 @@ class _CoreDashboardState extends State<CoreDashboard>
           'elapsed_ms': watch.elapsedMilliseconds,
         },
       );
-      return result;
+      return _acceptIncomingPlayback(result) ? result : null;
+    } on _SupersededPlaybackIntent catch (error) {
+      _ClientLog.event(
+        'playback.control.superseded',
+        data: <String, Object?>{
+          'path': path,
+          'intent_id': error.intentId,
+          'elapsed_ms': watch.elapsedMilliseconds,
+        },
+      );
+      return null;
     } catch (error, stackTrace) {
       _ClientLog.error(
         'playback.control.failed',
@@ -5486,6 +6261,7 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   Future<void> _setActiveZoneVolume(double volume, {bool? muted}) async {
     final zoneId = _activeZoneId();
+    final intentId = _beginPlaybackIntent(zoneId, 'volume');
     final normalized = volume.clamp(0.0, 1.0);
     final effectiveMuted = muted ?? (normalized <= 0.001);
     if (_offlineMode) {
@@ -5508,10 +6284,14 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final localOutputId = _clientOutputForZone(zoneId);
-    if (localOutputId != null && _hasActiveLocalSource(zoneId)) {
-      await (await _playerForOutput(
+    if (localOutputId != null && _hasActiveRendererSource(zoneId)) {
+      final player = await _playerForOutput(localOutputId);
+      await _runRendererAudioOperation(
         localOutputId,
-      )).setVolume(effectiveMuted ? 0 : normalized);
+        'local_volume',
+        () => player.setVolume(effectiveMuted ? 0 : normalized),
+      );
+      _markPlaybackIntentAppliedLocally(intentId);
       if (mounted) {
         setState(() {
           _zones = _zones
@@ -5530,9 +6310,12 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
     final result = await _run<Map<String, dynamic>>(
       () async => _asMap(
-        await _api.postJson(
+        await _api.postControlJson(
           '/zones/${Uri.encodeComponent(zoneId)}/volume',
-          <String, dynamic>{'volume': normalized, 'muted': effectiveMuted},
+          _playbackCommandBody(<String, dynamic>{
+            'volume': normalized,
+            'muted': effectiveMuted,
+          }, intentId: intentId),
         ),
       ),
     );
@@ -5698,7 +6481,9 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   void _syncPlaybackFromZone(Map<String, dynamic> zone) {
     final playback = _playbackFromZone(zone);
-    _applyPlayback(playback, syncZone: false);
+    if (_acceptIncomingPlayback(playback)) {
+      _applyPlayback(playback, syncZone: false);
+    }
   }
 
   Map<String, dynamic> _playbackFromZone(Map<String, dynamic> zone) {
@@ -5725,6 +6510,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       'track_title': zone['track_title'],
       'position_ms': positionMs,
       'queue_revision': 0,
+      'command_sequence': zone['command_sequence'],
+      'origin_client_id': zone['origin_client_id'],
+      'intent_id': zone['intent_id'],
     };
   }
 
@@ -5746,6 +6534,9 @@ class _CoreDashboardState extends State<CoreDashboard>
             'track_id': playback['track_id'],
             'track_title': playback['track_title'],
             'position_ms': playback['position_ms'] ?? 0,
+            'command_sequence': playback['command_sequence'],
+            'origin_client_id': playback['origin_client_id'],
+            'intent_id': playback['intent_id'],
           };
         })
         .toList(growable: false);
@@ -6189,8 +6980,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       playbackMode: _playbackMode,
       volume: _activeZoneVolume(),
       muted: _activeZoneMuted(),
-      onResume: _resumeZone,
-      onPause: _pauseZone,
+      onResume: (_) => _resumePlayback(),
+      onPause: (_) => _pausePlayback(),
       onPrevious: _playPreviousTrack,
       onNext: _playNextTrack,
       onSeek: _seekPlayback,

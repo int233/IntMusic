@@ -65,6 +65,7 @@ packaging\dist\installer\IntMusic-Windows-Setup.exe
 
 - 向正在运行的客户端发送正常退出请求；旧版客户端不响应时，仅终止安装目录中的 `IntMusic.exe`。
 - 停止 `IntMusicCore` 服务并等待服务确实进入 `Stopped` 状态。
+- 遇到旧 Core 的 Windows 1061 控制通道故障时，临时关闭服务恢复策略，并只按已核验的安装目录和服务 PID 终止旧 daemon；新服务安装后会恢复自动启动与故障恢复。
 - 清理安装目录中残留的 Core CLI/daemon 进程，避免新文件被旧进程锁定。
 
 停止过程最多等待 45 秒；失败时安装会中止，而不是在程序仍运行时继续覆盖文件。诊断日志位于：

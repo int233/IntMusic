@@ -83,6 +83,101 @@ function Stop-IntMusicProcesses {
     }
 }
 
+function Invoke-IntMusicServiceControl {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $output = & sc.exe @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+    foreach ($line in $output) {
+        Write-IntMusicStopLog "[SC] $line"
+    }
+    if ($exitCode -ne 0) {
+        throw "sc.exe $($Arguments -join ' ') failed with exit code $exitCode"
+    }
+}
+
+function Format-IntMusicException {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        $description = $exception.Message
+        if ($exception.PSObject.Properties.Name -contains "NativeErrorCode") {
+            $description += " (Win32 $($exception.NativeErrorCode))"
+        }
+        $parts.Add($description)
+        $exception = $exception.InnerException
+    }
+    return $parts -join " -> "
+}
+
+function Wait-IntMusicServiceStopped {
+    param([int]$TimeoutSeconds = 20)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+        if ($null -eq $service -or
+            $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "The $serviceName service did not reach the Stopped state within $TimeoutSeconds seconds."
+}
+
+function Stop-IntMusicCoreService {
+    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
+    if ($null -eq $service -or
+        $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
+        return
+    }
+
+    Write-IntMusicStopLog "Stopping the $serviceName service."
+    try {
+        if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::StopPending) {
+            Stop-Service -Name $serviceName -Force -ErrorAction Stop
+        }
+        Wait-IntMusicServiceStopped -TimeoutSeconds 20
+        Write-IntMusicStopLog "The $serviceName service stopped gracefully."
+        return
+    } catch {
+        Write-IntMusicStopLog "Graceful service stop failed: $(Format-IntMusicException -ErrorRecord $_)"
+    }
+
+    # Older Core builds could accept the first STOP request and then wait
+    # forever for open WebSocket/audio connections. Their control handler was
+    # already released, so all subsequent controls fail with Win32 1061 even
+    # though SCM still reports Running/STOPPABLE. Disable automatic recovery
+    # before terminating only the verified process under InstallDir; otherwise
+    # SCM could restart the old executable while Setup is replacing it.
+    Write-IntMusicStopLog "Disabling Core recovery temporarily for legacy-service termination."
+    Invoke-IntMusicServiceControl -Arguments @(
+        "config",
+        $serviceName,
+        "start=",
+        "disabled"
+    )
+    Invoke-IntMusicServiceControl -Arguments @(
+        "failure",
+        $serviceName,
+        "reset=",
+        "0",
+        "actions=",
+        "none/0"
+    )
+    Stop-IntMusicProcesses -Names @("local-music-core-daemon.exe")
+    Wait-IntMusicServiceStopped -TimeoutSeconds 20
+    Write-IntMusicStopLog "The legacy Core service process was terminated safely."
+}
+
 function Request-IntMusicClientShutdown {
     if (-not ("IntMusicInstallerNativeMethods" -as [type])) {
         Add-Type -TypeDefinition @"
@@ -136,26 +231,13 @@ try {
     }
 
     if ($StopCore) {
-        $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($null -ne $service -and
-            $service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-            Write-IntMusicStopLog "Stopping the $serviceName service."
-            if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::StopPending) {
-                Stop-Service -Name $serviceName -Force -ErrorAction Stop
-            }
-            $service.WaitForStatus(
-                [System.ServiceProcess.ServiceControllerStatus]::Stopped,
-                [TimeSpan]::FromSeconds(45)
-            )
-        }
+        Stop-IntMusicCoreService
         Stop-IntMusicProcesses -Names @(
             "local-music-core-daemon.exe",
             "local-music-core.exe"
         )
         Write-IntMusicStopLog "IntMusic Core is stopped."
     }
-
-    exit 0
 } catch {
     try {
         Write-IntMusicStopLog "ERROR: $($_.Exception.Message)"

@@ -18,6 +18,13 @@ class CoreApiClient {
       ..idleTimeout = const Duration(seconds: 75)
       ..maxConnectionsPerHost = 8
       ..autoUncompress = true;
+    // Keep time-sensitive playback commands away from slow metadata,
+    // artwork, heartbeat, and synchronization requests.
+    _controlClient = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 4)
+      ..idleTimeout = const Duration(seconds: 30)
+      ..maxConnectionsPerHost = 4
+      ..autoUncompress = true;
   }
 
   static final Map<String, CoreApiClient> _instances =
@@ -26,6 +33,7 @@ class CoreApiClient {
   final String baseUrl;
   final Duration timeout;
   late final HttpClient _client;
+  late final HttpClient _controlClient;
 
   Future<dynamic> getJson(String path, {Duration? requestTimeout}) =>
       _request('GET', path, requestTimeout: requestTimeout);
@@ -35,6 +43,18 @@ class CoreApiClient {
     Map<String, dynamic> body, {
     Duration? requestTimeout,
   }) => _request('POST', path, body: body, requestTimeout: requestTimeout);
+
+  Future<dynamic> postControlJson(
+    String path,
+    Map<String, dynamic> body, {
+    Duration requestTimeout = const Duration(seconds: 5),
+  }) => _request(
+    'POST',
+    path,
+    body: body,
+    requestTimeout: requestTimeout,
+    control: true,
+  );
 
   Future<dynamic> deleteJson(String path, {Duration? requestTimeout}) =>
       _request('DELETE', path, requestTimeout: requestTimeout);
@@ -96,6 +116,7 @@ class CoreApiClient {
     String path, {
     Map<String, dynamic>? body,
     Duration? requestTimeout,
+    bool control = false,
   }) async {
     final attempts = method == 'GET' ? 2 : 1;
     Object? lastError;
@@ -106,6 +127,7 @@ class CoreApiClient {
           path,
           body: body,
           requestTimeout: requestTimeout,
+          control: control,
         );
       } on SocketException catch (error) {
         lastError = error;
@@ -126,23 +148,46 @@ class CoreApiClient {
     String path, {
     Map<String, dynamic>? body,
     Duration? requestTimeout,
+    bool control = false,
   }) async {
     final effectiveTimeout = requestTimeout ?? timeout;
     final uri = Uri.parse(apiUrl(path));
     final stopwatch = Stopwatch()..start();
+    Duration remainingTimeout() {
+      final remaining = effectiveTimeout - stopwatch.elapsed;
+      if (remaining <= Duration.zero) {
+        throw TimeoutException(
+          '$method ${uri.path} exceeded '
+          '${effectiveTimeout.inMilliseconds} ms',
+          effectiveTimeout,
+        );
+      }
+      return remaining;
+    }
+
     _ClientLog.event(
       'core.http.start',
       data: <String, Object?>{
         'method': method,
         'path': uri.path,
         'timeout_ms': effectiveTimeout.inMilliseconds,
+        'channel': control ? 'playback_control' : 'background',
       },
     );
     try {
       final request = switch (method) {
-        'POST' => await _client.postUrl(uri).timeout(effectiveTimeout),
-        'DELETE' => await _client.deleteUrl(uri).timeout(effectiveTimeout),
-        _ => await _client.getUrl(uri).timeout(effectiveTimeout),
+        'POST' =>
+          await (control ? _controlClient : _client)
+              .postUrl(uri)
+              .timeout(remainingTimeout()),
+        'DELETE' =>
+          await (control ? _controlClient : _client)
+              .deleteUrl(uri)
+              .timeout(remainingTimeout()),
+        _ =>
+          await (control ? _controlClient : _client)
+              .getUrl(uri)
+              .timeout(remainingTimeout()),
       };
       request.headers.contentType = ContentType.json;
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
@@ -150,11 +195,11 @@ class CoreApiClient {
       if (body != null) {
         request.write(jsonEncode(body));
       }
-      final response = await request.close().timeout(effectiveTimeout);
+      final response = await request.close().timeout(remainingTimeout());
       final text = await response
           .transform(utf8.decoder)
           .join()
-          .timeout(effectiveTimeout);
+          .timeout(remainingTimeout());
       _ClientLog.event(
         'core.http.end',
         data: <String, Object?>{
@@ -163,6 +208,7 @@ class CoreApiClient {
           'status': response.statusCode,
           'elapsed_ms': stopwatch.elapsedMilliseconds,
           'response_bytes': utf8.encode(text).length,
+          'channel': control ? 'playback_control' : 'background',
         },
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -181,6 +227,7 @@ class CoreApiClient {
           'method': method,
           'path': uri.path,
           'elapsed_ms': stopwatch.elapsedMilliseconds,
+          'channel': control ? 'playback_control' : 'background',
         },
       );
       rethrow;

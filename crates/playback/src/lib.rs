@@ -149,6 +149,9 @@ impl PlaybackController {
             track_title: Some(title),
             position_ms: snapshot.position_ms,
             queue_revision: 0,
+            command_sequence: None,
+            origin_client_id: None,
+            intent_id: None,
         };
         self.states
             .write()
@@ -510,6 +513,9 @@ fn stopped_state(zone_id: &str) -> PlaybackState {
         track_title: None,
         position_ms: 0,
         queue_revision: 0,
+        command_sequence: None,
+        origin_client_id: None,
+        intent_id: None,
     }
 }
 

@@ -12,10 +12,11 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     panic,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
-#[cfg(windows)]
-use tokio::sync::oneshot;
 #[cfg(windows)]
 use windows_service::{
     define_windows_service,
@@ -23,7 +24,7 @@ use windows_service::{
         ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
         ServiceType,
     },
-    service_control_handler::{self, ServiceControlHandlerResult},
+    service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle},
     service_dispatcher,
 };
 
@@ -107,25 +108,28 @@ fn append_service_log(options: &RunOptions, message: &str) {
 #[cfg(windows)]
 fn run_windows_service() -> Result<()> {
     let options = RUN_OPTIONS.get().cloned().unwrap_or_default();
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-    let shutdown_tx = Arc::new(Mutex::new(Some(shutdown_tx)));
-    let event_handler_tx = Arc::clone(&shutdown_tx);
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let event_handler_shutdown = Arc::clone(&shutdown_requested);
+    let status_handle_slot = Arc::new(OnceLock::<ServiceStatusHandle>::new());
+    let event_handler_status = Arc::clone(&status_handle_slot);
 
     let status_handle =
         service_control_handler::register(
             SERVICE_NAME,
             move |control_event| match control_event {
                 ServiceControl::Stop | ServiceControl::Shutdown => {
-                    if let Some(sender) = event_handler_tx.lock().ok().and_then(|mut tx| tx.take())
-                    {
-                        let _ = sender.send(());
+                    if let Some(handle) = event_handler_status.get() {
+                        let _ =
+                            handle.set_service_status(service_status(ServiceState::StopPending, 0));
                     }
+                    event_handler_shutdown.store(true, Ordering::Release);
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 _ => ServiceControlHandlerResult::NotImplemented,
             },
         )?;
+    let _ = status_handle_slot.set(status_handle);
 
     status_handle.set_service_status(service_status(ServiceState::StartPending, 0))?;
     init_logging("info");
@@ -136,8 +140,10 @@ fn run_windows_service() -> Result<()> {
 
     status_handle.set_service_status(service_status(ServiceState::Running, 0))?;
     let log_options = options.clone();
-    let result = runtime.block_on(run_core(options, async {
-        let _ = shutdown_rx.await;
+    let result = runtime.block_on(run_core(options, async move {
+        while !shutdown_requested.load(Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }));
     match &result {
         Ok(()) => append_service_log(&log_options, "Core shut down cleanly"),
@@ -155,6 +161,10 @@ fn run_windows_service() -> Result<()> {
 
 #[cfg(windows)]
 fn service_status(state: ServiceState, exit_code: u32) -> ServiceStatus {
+    let pending = matches!(
+        state,
+        ServiceState::StartPending | ServiceState::StopPending
+    );
     ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: state,
@@ -167,8 +177,12 @@ fn service_status(state: ServiceState, exit_code: u32) -> ServiceStatus {
         } else {
             ServiceExitCode::ServiceSpecific(exit_code)
         },
-        checkpoint: 0,
-        wait_hint: std::time::Duration::from_secs(10),
+        checkpoint: u32::from(pending),
+        wait_hint: if pending {
+            std::time::Duration::from_secs(15)
+        } else {
+            std::time::Duration::default()
+        },
         process_id: None,
     }
 }

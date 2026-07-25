@@ -126,11 +126,12 @@ try {
 
     if ($existingService) {
         if ($existingService.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Stopped) {
-            Stop-Service -Name $serviceName -Force
-            $existingService.WaitForStatus(
-                [System.ServiceProcess.ServiceControllerStatus]::Stopped,
-                [TimeSpan]::FromSeconds(30)
-            )
+            $stopHelper = Join-Path $InstallDir "Stop-IntMusicForUpdate.ps1"
+            if (-not (Test-Path -LiteralPath $stopHelper)) {
+                throw "The Core service is still running and the stop helper was not found at $stopHelper"
+            }
+            & $stopHelper -InstallDir $InstallDir -StopCore
+            $existingService = Get-Service -Name $serviceName -ErrorAction Stop
         }
         Set-IntMusicServiceConfiguration -PathName $binaryPath
     } else {
