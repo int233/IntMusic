@@ -44,16 +44,17 @@ use lofty::{
 use playback::PlaybackController;
 use protocol::{
     AddPlaybackQueueItems, ApiErrorBody, ClientLibraryManifestRequest, ClientMutationBatchRequest,
-    CoreStatus, CreateDistributionRequest, DistributionTaskProgress, EventEnvelope,
-    FavoriteSettingsUpdate, LibraryChangedPayload, LinkTrackRecordingRequest,
-    MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest, MusicBrainzArtistPreview,
-    MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist, PlayRequest, PlaybackEvent,
-    PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState, PlaybackStats,
-    PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation, RendererCommandPayload,
-    RendererRegistration, RendererStateReport, ReplacePlaybackQueue, ScanProgressPayload,
-    SearchResponse, SeekRequest, ServerSettingsUpdate, TrackFavoriteUpdate, TrackMetadataUpdate,
-    UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, ZoneAliasUpdate,
-    ZoneTransferRequest, ZoneVolume, ZoneVolumeUpdate, API_PREFIX, EVENTS_WS_PATH,
+    ClientSyncChanges, ClientSyncSnapshot, CoreStatus, CreateDistributionRequest,
+    DistributionTaskProgress, EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload,
+    LinkTrackRecordingRequest, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
+    MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
+    PlayRequest, PlaybackEvent, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
+    PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
+    RendererCommandPayload, RendererRegistration, RendererStateReport, ReplacePlaybackQueue,
+    ScanProgressPayload, SearchResponse, SeekRequest, ServerSettingsUpdate, TrackFavoriteUpdate,
+    TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual,
+    UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, ZoneVolumeUpdate, API_PREFIX,
+    EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -63,7 +64,7 @@ use tokio::{
     sync::{broadcast, mpsc},
 };
 use tokio_util::io::ReaderStream;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info};
 use transcoder::{TranscodeProfile, Transcoder, TranscoderSettings};
 use uuid::Uuid;
@@ -146,8 +147,18 @@ impl AppState {
             .send(EventEnvelope::new(event_type, payload));
     }
 
-    fn bump_library_revision(&self, reason: &str) -> u64 {
-        let revision = self.inner.library_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    async fn bump_library_revision(&self, reason: &str) -> u64 {
+        let scope = sync_scope_for_reason(reason);
+        let revision = match core_db::append_sync_change(self.pool(), scope, reason).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                error!(%error, reason, "failed to persist Client sync change");
+                self.inner.library_revision.fetch_add(1, Ordering::SeqCst) + 1
+            }
+        };
+        self.inner
+            .library_revision
+            .fetch_max(revision, Ordering::SeqCst);
         self.emit(
             "library.changed",
             LibraryChangedPayload {
@@ -156,6 +167,24 @@ impl AppState {
             },
         );
         revision
+    }
+}
+
+fn sync_scope_for_reason(reason: &str) -> &'static str {
+    let normalized = reason.to_ascii_lowercase();
+    if normalized.contains("artist") {
+        "artists"
+    } else if normalized.contains("playlist") {
+        "playlists"
+    } else if normalized.contains("track")
+        || normalized.contains("favorite")
+        || normalized.contains("recording")
+        || normalized.contains("metadata")
+        || normalized.contains("mutation")
+    {
+        "tracks"
+    } else {
+        "library"
     }
 }
 
@@ -173,7 +202,8 @@ where
     S: Future<Output = ()> + Send + 'static,
 {
     let (listener, bind_addr) = bind_core_listener(&config).await?;
-    let server_id = Uuid::new_v4();
+    let server_id = Uuid::parse_str(&core_db::sync_server_id(&pool).await?)
+        .context("stored Core server ID is invalid")?;
     let runtime_endpoint_file = write_runtime_endpoint(&paths, bind_addr, server_id).await?;
     let discovery_name = core_display_name(&config);
     let discovery_publisher = if config.server.advertise_mdns {
@@ -216,6 +246,10 @@ where
         bind_addr,
         discovery_service,
         transcoder,
+    );
+    state.inner.library_revision.store(
+        core_db::sync_cursor(state.pool()).await?.max(1),
+        Ordering::SeqCst,
     );
     state.emit("core.ready", json!({ "api_prefix": API_PREFIX }));
     start_renderer_expiry_monitor(state.clone());
@@ -374,6 +408,9 @@ pub fn build_router(state: AppState) -> Router {
             delete(remove_client_library_root),
         )
         .route("/client-sync/mutations", post(apply_client_mutations))
+        .route("/client-sync/snapshot", get(client_sync_snapshot))
+        .route("/client-sync/changes", get(client_sync_changes))
+        .route("/client-sync/details", get(client_sync_details))
         .route(
             "/distributions",
             get(list_distributions).post(create_distribution),
@@ -472,6 +509,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/zones", get(list_zones))
         .route("/zones/play-many", post(play_many_zones))
         .route("/zones/{zone_id}/play", post(play_zone))
+        .route(
+            "/zones/{zone_id}/play-collection",
+            post(play_zone_collection),
+        )
         .route("/zones/{zone_id}/pause", post(pause_zone))
         .route("/zones/{zone_id}/stop", post(stop_zone))
         .route("/zones/{zone_id}/seek", post(seek_zone))
@@ -515,6 +556,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .nest(API_PREFIX, api)
         .route(EVENTS_WS_PATH, get(events_ws))
+        .layer(CompressionLayer::new())
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(256 * 1024 * 1024))
@@ -558,7 +600,7 @@ async fn add_root(
     Json(payload): Json<NewLibraryRoot>,
 ) -> ApiResult<protocol::LibraryRoot> {
     let root = core_db::add_library_root(state.pool(), payload.path.as_ref()).await?;
-    state.bump_library_revision("library_root_added");
+    state.bump_library_revision("library_root_added").await;
     Ok(Json(root))
 }
 
@@ -567,7 +609,7 @@ async fn remove_root(
     Path(id): Path<i64>,
 ) -> ApiResult<serde_json::Value> {
     core_db::remove_library_root(state.pool(), id).await?;
-    state.bump_library_revision("library_root_removed");
+    state.bump_library_revision("library_root_removed").await;
     Ok(Json(json!({ "removed": true })))
 }
 
@@ -587,7 +629,9 @@ async fn upsert_client_library_manifest(
     let root_external_id = payload.root.external_id.clone();
     let scan_id = payload.scan_id.clone();
     let result = core_db::upsert_client_library_manifest(state.pool(), &payload).await?;
-    state.bump_library_revision("client library manifest updated");
+    state
+        .bump_library_revision("client library manifest updated")
+        .await;
     state.emit(
         "library.client_manifest_changed",
         json!({
@@ -607,7 +651,9 @@ async fn remove_client_library_root(
     Path((device_id, root_external_id)): Path<(String, String)>,
 ) -> ApiResult<serde_json::Value> {
     core_db::remove_client_library_root(state.pool(), &device_id, &root_external_id).await?;
-    state.bump_library_revision("client library root removed");
+    state
+        .bump_library_revision("client library root removed")
+        .await;
     state.emit(
         "library.client_manifest_changed",
         json!({
@@ -625,16 +671,181 @@ async fn apply_client_mutations(
 ) -> ApiResult<protocol::ClientMutationBatchResult> {
     let result = core_db::apply_client_mutations(state.pool(), &payload).await?;
     if !result.applied_ids.is_empty() {
-        state.bump_library_revision("offline client mutations applied");
+        let favorite_changed = payload.mutations.iter().any(|mutation| {
+            mutation.kind == "favorite"
+                && result.applied_ids.iter().any(|id| id == mutation.id.trim())
+        });
+        if favorite_changed {
+            state
+                .bump_library_revision("offline favorite mutations applied")
+                .await;
+        }
         state.emit(
             "client.mutations_applied",
             json!({
                 "device_id": payload.device_id,
                 "applied_ids": result.applied_ids,
+                "library_changed": favorite_changed,
             }),
         );
     }
     Ok(Json(result))
+}
+
+async fn client_sync_snapshot(State(state): State<AppState>) -> ApiResult<ClientSyncSnapshot> {
+    // Read the cursor first. Any write racing with this snapshot will therefore
+    // remain visible to the next /changes request instead of being skipped.
+    let cursor = core_db::sync_cursor(state.pool()).await?;
+    let config = state.config();
+    let mut albums = Vec::new();
+    let mut artists = Vec::new();
+    let mut tracks = Vec::new();
+    let mut offset = 0;
+    const PAGE_SIZE: u32 = 1_000;
+    loop {
+        let page = core_db::list_albums(state.pool(), PAGE_SIZE, offset).await?;
+        let count = page.len();
+        albums.extend(page);
+        if count < PAGE_SIZE as usize {
+            break;
+        }
+        offset += PAGE_SIZE;
+    }
+    offset = 0;
+    loop {
+        let page = core_db::list_artists(state.pool(), PAGE_SIZE, offset).await?;
+        let count = page.len();
+        artists.extend(page);
+        if count < PAGE_SIZE as usize {
+            break;
+        }
+        offset += PAGE_SIZE;
+    }
+    offset = 0;
+    loop {
+        let mut page = core_db::list_tracks(state.pool(), PAGE_SIZE, offset).await?;
+        let count = page.len();
+        apply_favorite_settings_to_tracks(&config.favorites, &mut page);
+        tracks.extend(page);
+        if count < PAGE_SIZE as usize {
+            break;
+        }
+        offset += PAGE_SIZE;
+    }
+    let playlists =
+        core_db::list_playlists(state.pool(), config.favorites.treat_max_rating_as_favorite)
+            .await?;
+    Ok(Json(ClientSyncSnapshot {
+        server_id: state.inner.server_id.to_string(),
+        cursor,
+        generated_at: Utc::now(),
+        albums,
+        artists,
+        tracks,
+        playlists,
+        playback_history: core_db::list_playback_events(state.pool(), 250, 0, None, None).await?,
+        playback_stats: core_db::playback_stats(state.pool(), None, None, 50).await?,
+        library_roots: core_db::list_library_roots(state.pool()).await?,
+        client_library_roots: core_db::list_client_library_roots(state.pool()).await?,
+        settings: serde_json::to_value(config).map_err(anyhow::Error::from)?,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientSyncChangesQuery {
+    after: Option<u64>,
+    limit: Option<u32>,
+}
+
+async fn client_sync_changes(
+    State(state): State<AppState>,
+    Query(query): Query<ClientSyncChangesQuery>,
+) -> ApiResult<ClientSyncChanges> {
+    let after = query.after.unwrap_or(0);
+    let changes =
+        core_db::client_sync_changes(state.pool(), after, query.limit.unwrap_or(500)).await?;
+    let cursor = core_db::sync_cursor(state.pool()).await?;
+    Ok(Json(ClientSyncChanges {
+        server_id: state.inner.server_id.to_string(),
+        after,
+        cursor,
+        requires_snapshot: !changes.is_empty(),
+        changes,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientSyncDetailsQuery {
+    kind: String,
+    after_id: Option<i64>,
+    limit: Option<u32>,
+}
+
+async fn client_sync_details(
+    State(state): State<AppState>,
+    Query(query): Query<ClientSyncDetailsQuery>,
+) -> ApiResult<serde_json::Value> {
+    let kind = query.kind.trim().to_ascii_lowercase();
+    let after_id = query.after_id.unwrap_or(0).max(0);
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let table = match kind.as_str() {
+        "track" => "tracks",
+        "album" => "albums",
+        "artist" => "artists",
+        "playlist" => "playlists",
+        _ => return Err(anyhow::anyhow!("unsupported Client sync detail kind").into()),
+    };
+    let ids = sqlx::query_scalar::<_, i64>(
+        format!("SELECT id FROM {table} WHERE id > ?1 ORDER BY id LIMIT ?2").as_str(),
+    )
+    .bind(after_id)
+    .bind(i64::from(limit))
+    .fetch_all(state.pool())
+    .await
+    .map_err(anyhow::Error::from)?;
+    let config = state.config();
+    let mut items = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let detail = match kind.as_str() {
+            "track" => {
+                let mut detail = core_db::track_detail(state.pool(), *id).await?;
+                apply_favorite_settings_to_track(&config.favorites, &mut detail.track);
+                serde_json::to_value(detail)
+            }
+            "album" => {
+                let mut detail = core_db::album_detail(state.pool(), *id).await?;
+                apply_favorite_settings_to_tracks(&config.favorites, &mut detail.tracks);
+                serde_json::to_value(detail)
+            }
+            "artist" => {
+                let mut detail = core_db::artist_detail(state.pool(), *id).await?;
+                apply_favorite_settings_to_tracks(&config.favorites, &mut detail.tracks);
+                serde_json::to_value(detail)
+            }
+            "playlist" => {
+                let mut detail = core_db::playlist_detail(
+                    state.pool(),
+                    *id,
+                    config.favorites.treat_max_rating_as_favorite,
+                )
+                .await?;
+                apply_favorite_settings_to_playlist(&config.favorites, &mut detail);
+                serde_json::to_value(detail)
+            }
+            _ => unreachable!(),
+        }
+        .map_err(anyhow::Error::from)?;
+        items.push(json!({ "id": id, "detail": detail }));
+    }
+    let next_after_id = ids.last().copied().unwrap_or(after_id);
+    Ok(Json(json!({
+        "server_id": state.inner.server_id.to_string(),
+        "cursor": core_db::sync_cursor(state.pool()).await?,
+        "kind": kind,
+        "items": items,
+        "next_after_id": next_after_id,
+        "has_more": ids.len() == limit as usize,
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1127,7 +1338,7 @@ async fn start_scan(State(state): State<AppState>) -> ApiResult<serde_json::Valu
                 }
                 ScannerEvent::Finished(summary) => {
                     event_state.emit("scan.finished", ScanProgressPayload::from(&summary));
-                    event_state.bump_library_revision("scan_finished");
+                    event_state.bump_library_revision("scan_finished").await;
                 }
                 ScannerEvent::Problem { path, message } => event_state.emit(
                     "scan.problem_found",
@@ -1211,7 +1422,7 @@ async fn update_artist_profile(
     core_db::update_artist_profile(state.pool(), artist_id, &update).await?;
     let mut detail = core_db::artist_detail(state.pool(), artist_id).await?;
     apply_favorite_settings_to_tracks(&state.config().favorites, &mut detail.tracks);
-    state.bump_library_revision("artist profile updated");
+    state.bump_library_revision("artist profile updated").await;
     state.emit(
         "artist.updated",
         json!({"artist_id": artist_id, "kind": "profile"}),
@@ -1325,7 +1536,7 @@ async fn upload_artist_assets(
             .await?;
         }
     }
-    state.bump_library_revision("artist artwork uploaded");
+    state.bump_library_revision("artist artwork uploaded").await;
     state.emit(
         "artist.asset.ready",
         json!({
@@ -1374,6 +1585,9 @@ async fn update_artist_asset(
     Json(update): Json<UpdateArtistAsset>,
 ) -> ApiResult<protocol::ArtistAsset> {
     let asset = core_db::update_artist_asset(state.pool(), artist_id, asset_id, &update).await?;
+    state
+        .bump_library_revision("artist artwork metadata updated")
+        .await;
     state.emit(
         "artist.updated",
         json!({"artist_id": artist_id, "kind": "asset"}),
@@ -1386,7 +1600,7 @@ async fn delete_artist_asset(
     Path((artist_id, asset_id)): Path<(i64, i64)>,
 ) -> ApiResult<serde_json::Value> {
     core_db::delete_artist_asset(state.pool(), artist_id, asset_id).await?;
-    state.bump_library_revision("artist artwork removed");
+    state.bump_library_revision("artist artwork removed").await;
     state.emit(
         "artist.visual.updated",
         json!({"artist_id": artist_id, "removed_asset_id": asset_id}),
@@ -1400,7 +1614,7 @@ async fn update_artist_visual(
     Json(update): Json<UpdateArtistVisual>,
 ) -> ApiResult<protocol::ArtistVisual> {
     let visual = core_db::save_artist_visual(state.pool(), artist_id, &slot, &update).await?;
-    state.bump_library_revision("artist visual updated");
+    state.bump_library_revision("artist visual updated").await;
     state.emit(
         "artist.visual.updated",
         json!({"artist_id": artist_id, "slot": slot, "revision": visual.revision}),
@@ -1570,7 +1784,9 @@ async fn link_track_recording(
 ) -> ApiResult<protocol::TrackMediaProfile> {
     let media =
         core_db::link_track_to_recording(state.pool(), track_id, request.source_track_id).await?;
-    state.bump_library_revision("release track linked to recording");
+    state
+        .bump_library_revision("release track linked to recording")
+        .await;
     state.emit(
         "track.recording_changed",
         json!({
@@ -1587,7 +1803,9 @@ async fn detach_track_recording(
     Path(track_id): Path<i64>,
 ) -> ApiResult<protocol::TrackMediaProfile> {
     let media = core_db::detach_track_recording(state.pool(), track_id).await?;
-    state.bump_library_revision("release track detached from recording");
+    state
+        .bump_library_revision("release track detached from recording")
+        .await;
     state.emit(
         "track.recording_changed",
         json!({
@@ -1629,7 +1847,7 @@ async fn update_track_metadata(
         core_db::update_track_metadata(state.pool(), track_id, &update, parsed.as_deref()).await?;
     enrich_lyrics(&mut snapshot.detail);
     apply_favorite_settings_to_track(&state.config().favorites, &mut snapshot.detail.track);
-    state.bump_library_revision("track metadata updated");
+    state.bump_library_revision("track metadata updated").await;
     state.emit(
         "track.metadata_changed",
         json!({
@@ -2327,7 +2545,7 @@ async fn create_playlist(
     )
     .await?;
     apply_favorite_settings_to_playlist(&config.favorites, &mut detail);
-    state.bump_library_revision("playlist_created");
+    state.bump_library_revision("playlist_created").await;
     Ok(Json(detail))
 }
 
@@ -2360,7 +2578,7 @@ async fn update_playlist(
     )
     .await?;
     apply_favorite_settings_to_playlist(&config.favorites, &mut detail);
-    state.bump_library_revision("playlist_updated");
+    state.bump_library_revision("playlist_updated").await;
     Ok(Json(detail))
 }
 
@@ -2369,7 +2587,7 @@ async fn delete_playlist(
     Path(playlist_id): Path<i64>,
 ) -> ApiResult<serde_json::Value> {
     core_db::delete_playlist(state.pool(), playlist_id).await?;
-    state.bump_library_revision("playlist_deleted");
+    state.bump_library_revision("playlist_deleted").await;
     Ok(Json(json!({ "deleted": true })))
 }
 
@@ -2387,7 +2605,7 @@ async fn add_playlist_track(
     )
     .await?;
     apply_favorite_settings_to_playlist(&config.favorites, &mut detail);
-    state.bump_library_revision("playlist_track_added");
+    state.bump_library_revision("playlist_track_added").await;
     Ok(Json(detail))
 }
 
@@ -2404,7 +2622,7 @@ async fn remove_playlist_track(
     )
     .await?;
     apply_favorite_settings_to_playlist(&config.favorites, &mut detail);
-    state.bump_library_revision("playlist_track_removed");
+    state.bump_library_revision("playlist_track_removed").await;
     Ok(Json(detail))
 }
 
@@ -2428,7 +2646,7 @@ async fn update_track_favorite(
 
     let mut detail = core_db::set_track_favorite(state.pool(), track_id, payload).await?;
     apply_favorite_settings_to_track(&config.favorites, &mut detail.track);
-    state.bump_library_revision("track_favorite_updated");
+    state.bump_library_revision("track_favorite_updated").await;
     Ok(Json(detail))
 }
 
@@ -2612,6 +2830,23 @@ async fn play_zone(
         resume_zone_internal(&state, &zone_id).await?
     };
     Ok(Json(playback))
+}
+
+async fn play_zone_collection(
+    State(state): State<AppState>,
+    Path(zone_id): Path<String>,
+    Json(payload): Json<ReplacePlaybackQueue>,
+) -> ApiResult<serde_json::Value> {
+    let start_index = payload.start_index.unwrap_or(0);
+    let index = usize::try_from(start_index)
+        .ok()
+        .filter(|index| *index < payload.track_ids.len())
+        .ok_or_else(|| anyhow::anyhow!("collection start_index is out of range"))?;
+    let track_id = payload.track_ids[index];
+    let queue = core_db::replace_playback_queue(state.pool(), &zone_id, payload).await?;
+    state.emit("playback.queue_changed", &queue);
+    let playback = play_track_on_zone(&state, &zone_id, track_id, 0).await?;
+    Ok(Json(json!({ "queue": queue, "playback": playback })))
 }
 
 async fn play_many_zones(
@@ -2844,19 +3079,26 @@ async fn update_favorite_settings(
     State(state): State<AppState>,
     Json(payload): Json<FavoriteSettingsUpdate>,
 ) -> ApiResult<FavoritesConfig> {
-    let mut config = state
-        .inner
-        .config
-        .write()
-        .map_err(|_| anyhow::anyhow!("config lock is poisoned"))?;
-    if let Some(value) = payload.treat_max_rating_as_favorite {
-        config.favorites.treat_max_rating_as_favorite = value;
-    }
-    if let Some(value) = payload.write_rating_on_favorite {
-        config.favorites.write_rating_on_favorite = value;
-    }
-    config.save(&state.inner.paths)?;
-    Ok(Json(config.favorites.clone()))
+    let favorites = {
+        let mut config = state
+            .inner
+            .config
+            .write()
+            .map_err(|_| anyhow::anyhow!("config lock is poisoned"))?;
+        if let Some(value) = payload.treat_max_rating_as_favorite {
+            config.favorites.treat_max_rating_as_favorite = value;
+        }
+        if let Some(value) = payload.write_rating_on_favorite {
+            config.favorites.write_rating_on_favorite = value;
+        }
+        config.save(&state.inner.paths)?;
+        config.favorites.clone()
+    };
+    state
+        .bump_library_revision("favorite settings updated")
+        .await;
+    state.emit("core.settings_changed", json!({ "section": "favorites" }));
+    Ok(Json(favorites))
 }
 
 async fn update_metadata_settings(
@@ -2875,7 +3117,10 @@ async fn update_metadata_settings(
         config.metadata.genre_separators = normalize_separators(values);
     }
     config.save(&state.inner.paths)?;
-    Ok(Json(config.metadata.clone()))
+    let metadata = config.metadata.clone();
+    drop(config);
+    state.emit("core.settings_changed", json!({ "section": "metadata" }));
+    Ok(Json(metadata))
 }
 
 fn normalize_separators(values: Vec<String>) -> Vec<String> {

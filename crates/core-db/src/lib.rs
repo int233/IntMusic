@@ -12,7 +12,7 @@ use protocol::{
     ArtistVisual, ArtistVisualRegion, AudioMasterSummary, CatalogRecordingSummary,
     CatalogWorkSummary, ClientLibraryFileBinding, ClientLibraryManifestRequest,
     ClientLibraryManifestResult, ClientLibraryRootStatus, ClientMutationBatchRequest,
-    ClientMutationBatchResult, ClientTrackManifest, CreateDistributionRequest,
+    ClientMutationBatchResult, ClientSyncChange, ClientTrackManifest, CreateDistributionRequest,
     DistributionContentSource, DistributionJobSummary, DistributionSourceTaskAssignment,
     DistributionTaskAssignment, DistributionTaskProgress, DistributionTranscodeTask, LibraryCounts,
     LibraryRoot, LyricPayload, MediaReplicaSummary, MediaVariantSummary, NewPlaylist,
@@ -68,6 +68,98 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
         .await
         .context("failed to run database migrations")?;
     Ok(())
+}
+
+pub async fn sync_server_id(pool: &DbPool) -> Result<String> {
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT server_id FROM core_sync_state WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    if let Some(server_id) = existing.filter(|value| !value.trim().is_empty()) {
+        return Ok(server_id);
+    }
+
+    let server_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO core_sync_state (id, server_id, created_at, updated_at)
+        VALUES (1, ?1, ?2, ?2)
+        ON CONFLICT(id) DO UPDATE SET
+            server_id = COALESCE(NULLIF(core_sync_state.server_id, ''), excluded.server_id),
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&server_id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(
+        sqlx::query_scalar("SELECT server_id FROM core_sync_state WHERE id = 1")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
+pub async fn sync_cursor(pool: &DbPool) -> Result<u64> {
+    let cursor: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(cursor), 0) FROM client_sync_changes")
+            .fetch_one(pool)
+            .await?;
+    Ok(u64::try_from(cursor.max(0))?)
+}
+
+pub async fn append_sync_change(pool: &DbPool, scope: &str, reason: &str) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO client_sync_changes (scope, reason, created_at)
+        VALUES (?1, ?2, ?3)
+        "#,
+    )
+    .bind(scope)
+    .bind(reason)
+    .bind(Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    let cursor = result.last_insert_rowid();
+    if cursor % 1_000 == 0 {
+        sqlx::query("DELETE FROM client_sync_changes WHERE cursor < ?1")
+            .bind(cursor.saturating_sub(50_000))
+            .execute(pool)
+            .await?;
+    }
+    Ok(u64::try_from(cursor)?)
+}
+
+pub async fn client_sync_changes(
+    pool: &DbPool,
+    after: u64,
+    limit: u32,
+) -> Result<Vec<ClientSyncChange>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT cursor, scope, reason, created_at
+        FROM client_sync_changes
+        WHERE cursor > ?1
+        ORDER BY cursor
+        LIMIT ?2
+        "#,
+    )
+    .bind(i64::try_from(after)?)
+    .bind(i64::from(limit.clamp(1, 2_000)))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ClientSyncChange {
+                cursor: u64::try_from(row.try_get::<i64, _>("cursor")?)?,
+                scope: row.try_get("scope")?,
+                reason: row.try_get("reason")?,
+                created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
+            })
+        })
+        .collect()
 }
 
 async fn repair_line_ending_migration_checksums(pool: &DbPool) -> Result<()> {
@@ -7338,6 +7430,33 @@ mod tests {
         let _ = tokio::fs::remove_file(&path).await;
         let _ = tokio::fs::remove_file(path.with_extension("sqlite-shm")).await;
         let _ = tokio::fs::remove_file(path.with_extension("sqlite-wal")).await;
+    }
+
+    #[tokio::test]
+    async fn client_sync_identity_and_cursor_are_durable() {
+        let (pool, path) = test_pool().await;
+        let first_server_id = sync_server_id(&pool).await.expect("server ID");
+        assert_eq!(
+            sync_server_id(&pool).await.expect("stable server ID"),
+            first_server_id
+        );
+        let baseline = sync_cursor(&pool).await.expect("baseline cursor");
+        assert!(baseline > 0);
+        let first = append_sync_change(&pool, "tracks", "favorite updated")
+            .await
+            .expect("first change");
+        let second = append_sync_change(&pool, "artists", "profile updated")
+            .await
+            .expect("second change");
+        assert!(first > baseline);
+        assert!(second > first);
+        let changes = client_sync_changes(&pool, first, 50)
+            .await
+            .expect("changes after cursor");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].cursor, second);
+        assert_eq!(changes[0].scope, "artists");
+        close_test_pool(pool, path).await;
     }
 
     async fn ingest_test_track(pool: &DbPool, filename: &str, album: &str, title: &str) -> i64 {

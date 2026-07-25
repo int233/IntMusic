@@ -175,6 +175,43 @@ pub struct ClientMutationBatchResult {
     pub duplicate_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientSyncChange {
+    pub cursor: u64,
+    pub scope: String,
+    pub reason: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientSyncChanges {
+    pub server_id: String,
+    pub after: u64,
+    pub cursor: u64,
+    #[serde(default)]
+    pub changes: Vec<ClientSyncChange>,
+    pub requires_snapshot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientSyncSnapshot {
+    pub server_id: String,
+    pub cursor: u64,
+    pub generated_at: DateTime<Utc>,
+    pub albums: Vec<AlbumSummary>,
+    pub artists: Vec<ArtistSummary>,
+    pub tracks: Vec<TrackSummary>,
+    pub playlists: Vec<PlaylistSummary>,
+    pub playback_history: Vec<PlaybackEvent>,
+    pub playback_stats: PlaybackStats,
+    #[serde(default)]
+    pub library_roots: Vec<LibraryRoot>,
+    #[serde(default)]
+    pub client_library_roots: Vec<ClientLibraryRootStatus>,
+    #[serde(default)]
+    pub settings: Value,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateDistributionRequest {
     pub target_device_id: String,

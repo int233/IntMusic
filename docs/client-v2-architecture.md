@@ -36,7 +36,8 @@ flowchart LR
 
 | 状态 | 唯一来源 | 持久化 | 分发方式 |
 | --- | --- | --- | --- |
-| 媒体库、收藏、播放列表 | Rust Core / SQLite | 是 | REST + Core event |
+| 媒体库、收藏、播放列表 | Rust Core / SQLite；Client 为只读镜像 | Core 与 Client 均持久化 | cursor + 后台 snapshot |
+| 专辑、艺术家、曲目、歌单详情与歌词 | Rust Core；Client SQLite 缓存 | 是 | 后台分批预热 + 按需静默刷新 |
 | 本机媒体副本与离线目录快照 | Flutter client | 是 | Client manifest + SharedPreferences |
 | 离线收藏与播放历史 outbox | Flutter client，重连后 Core | 是 | 幂等 mutation batch |
 | 播放队列与当前索引 | Rust Core / SQLite | 是 | REST + `playback.queue_changed` |
@@ -55,6 +56,18 @@ flowchart LR
 - 目标 Client 使用临时文件、断点下载、大小与 quick hash 校验和原子替换写入音乐文件夹；Android 通过 SAF 持久权限读写。
 
 Flutter 不根据本地曲目列表推算下一首；平台媒体中心也不自行跳转。所有入口最终调用同一组 Core queue API，因此 UI 按钮、键盘媒体键、macOS 控制中心、Windows SMTC 和 Android 锁屏不会产生不同状态。
+
+## Client 离线优先缓存
+
+- Client 启动时先读取本地 SQLite 镜像并立即呈现媒体库、搜索、历史、设置、设备与上次播放状态；连接 Core 不能阻塞页面导航。
+- Core 在数据库中保存稳定 `server_id` 和单调递增的同步 cursor。Client 先查询 `/api/v1/client-sync/changes`，只有 cursor 发生变化时才在后台获取 `/api/v1/client-sync/snapshot`。
+- 首次同步或相关作用域失效后，Client 通过 `/api/v1/client-sync/details` 分批预热曲目、专辑、艺术家和歌单详情，包括艺术家简介、媒体参数与歌词。进度持久化，应用重启后从上一个 ID 继续。
+- 页面始终采用 stale-while-revalidate：先显示 SQLite 中的详情或由摘要构造的占位详情，再静默刷新当前实体。搜索只读取本地索引。
+- 收藏先乐观更新本地列表、详情和 outbox，再尝试上传；失败不会回滚 UI，重连后通过幂等 mutation batch 写回 Core。离线播放历史采用同一 outbox。
+- HTTP Client 按 Core 地址复用连接并接受 gzip；播放集合通过单个 `/zones/{zone_id}/play-collection` 请求原子替换队列并开始播放，避免高延迟网络上的多次串行往返。
+- 封面与艺术家图片使用独立磁盘缓存。媒体音频不进入元数据 SQLite；本机已有副本时 renderer 直接打开该文件。
+
+缓存镜像不是新的事实来源。Core 的 snapshot 总能覆盖 Client 摘要，新的 `server_id` 会清空旧 Core 的详情与搜索缓存；后台预热使用目标 cursor 防止旧任务覆盖较新的快照。
 
 ## 平台能力矩阵
 

@@ -49,6 +49,7 @@ dependencies:
   multicast_dns: ^0.3.3
   path_provider: ^2.1.5
   shared_preferences: ^2.5.3
+  sqflite_common_ffi: ^2.4.2
 dev_dependencies:
   flutter_test:
     sdk: flutter

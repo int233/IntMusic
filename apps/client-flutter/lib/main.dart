@@ -15,6 +15,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'src/app_theme.dart';
 
@@ -35,6 +36,7 @@ part 'src/core_api_client.dart';
 part 'src/core_discovery.dart';
 part 'src/client_library.dart';
 part 'src/offline_library.dart';
+part 'src/client_cache.dart';
 part 'src/distribution.dart';
 part 'src/i18n.dart';
 part 'src/platform_integration.dart';
@@ -125,6 +127,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Timer? _zoneRefreshTimer;
   Timer? _offlineReconnectTimer;
   Timer? _distributionTimer;
+  Timer? _librarySyncTimer;
+  Timer? _eventReconnectTimer;
   int _zoneRefreshFailures = 0;
   Timer? _searchDebounce;
   WebSocket? _eventSocket;
@@ -169,6 +173,18 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Set<String> _distributionDirtyRootIds = <String>{};
   bool _distributionWorkerBusy = false;
   _OfflineLibrarySnapshot _offlineLibrary = _OfflineLibrarySnapshot();
+  String? _cacheServerId;
+  int _cacheCursor = 0;
+  bool _backgroundSyncBusy = false;
+  bool _detailWarmupBusy = false;
+  bool _rendererHeartbeatBusy = false;
+  bool _rendererPositionReportBusy = false;
+  bool _zoneRefreshBusy = false;
+  bool _eventConnectBusy = false;
+  int _backgroundSyncTicks = 0;
+  final Set<String> _detailRefreshScopes = <String>{};
+  final Map<String, int> _detailWarmAfterIds = <String, int>{};
+  final Map<String, int> _detailWarmTargetCursors = <String, int>{};
   bool _offlineMode = false;
   DateTime? _offlinePlaybackStartedAt;
   int _offlinePlaybackStartPositionMs = 0;
@@ -224,6 +240,8 @@ class _CoreDashboardState extends State<CoreDashboard>
     _zoneRefreshTimer?.cancel();
     _offlineReconnectTimer?.cancel();
     _distributionTimer?.cancel();
+    _librarySyncTimer?.cancel();
+    _eventReconnectTimer?.cancel();
     _searchDebounce?.cancel();
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
@@ -259,23 +277,201 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _refreshAll() async {
-    final connected = await _run<bool>(() async {
-      await _refreshAllInner(allowDiscovery: true);
-      return true;
-    });
+    bool connected;
+    if (_tracks.isNotEmpty || _albums.isNotEmpty || _artists.isNotEmpty) {
+      try {
+        await _refreshAllInner(allowDiscovery: true);
+        connected = true;
+        if (mounted) setState(() => _error = null);
+      } catch (error) {
+        connected = false;
+        await _ClientCacheStore.recordError(_coreUrlController.text, error);
+        if (mounted) {
+          setState(() {
+            _rendererStatus = 'Using cached library';
+            _error = null;
+          });
+        }
+      }
+    } else {
+      connected =
+          await _run<bool>(() async {
+            await _refreshAllInner(allowDiscovery: true);
+            return true;
+          }) ??
+          false;
+    }
     if (connected != true && _offlineLibrary.copies.isNotEmpty) {
       await _activateOfflineMode();
     }
   }
 
   Future<void> _initializeAndRefresh() async {
-    await _rendererAudioInitialization;
     await _IntMusicPlatform.instance.initialize(
       onCommand: _handlePlatformCommand,
       onSeek: _seekPlayback,
     );
     await _loadSavedCoreUrl();
+    await _loadClientCache();
+    await _rendererAudioInitialization;
     await _refreshAll();
+  }
+
+  Future<void> _loadClientCache() async {
+    final cached = await _ClientCacheStore.load(_coreUrlController.text);
+    if (cached.isEmpty || !mounted) return;
+    setState(() {
+      _cacheServerId = cached.serverId;
+      _cacheCursor = cached.cursor;
+      _applyCachedValues(cached.values);
+      _trackDetailCache.addAll(cached.trackDetails);
+      _albumDetailCache.addAll(cached.albumDetails);
+      _artistDetailCache.addAll(cached.artistDetails);
+      _playlistDetailCache.addAll(cached.playlistDetails);
+      _detailWarmAfterIds.addAll(cached.pendingDetailRefresh);
+      _detailWarmTargetCursors.addAll(cached.pendingDetailTargetCursors);
+      _detailRefreshScopes.addAll(cached.pendingDetailRefresh.keys);
+      _reconcileTrackSummariesInDetails();
+      _rendererStatus = 'Cached library ready';
+    });
+  }
+
+  void _applyCachedValues(Map<String, dynamic> values) {
+    _albums = (values['albums'] as List?) ?? _albums;
+    _artists = (values['artists'] as List?) ?? _artists;
+    _tracks = (values['tracks'] as List?) ?? _tracks;
+    _playlists = (values['playlists'] as List?) ?? _playlists;
+    _outputs = (values['outputs'] as List?) ?? _outputs;
+    _zones = (values['zones'] as List?) ?? _zones;
+    if (values['playback'] is Map) {
+      _playback = _withPlaybackTimestamp(_asMap(values['playback']));
+    }
+    if (values['playback_queue'] is Map) {
+      _playbackQueue = _asMap(values['playback_queue']);
+    }
+    _playbackHistory =
+        (values['playback_history'] as List?) ?? _playbackHistory;
+    if (values['playback_stats'] is Map) {
+      _playbackStats = _asMap(values['playback_stats']);
+    }
+    _libraryRoots = (values['library_roots'] as List?) ?? _libraryRoots;
+    _clientLibraryStatuses =
+        (values['client_library_roots'] as List?) ?? _clientLibraryStatuses;
+    final settings = _asMap(values['settings']);
+    if (settings.isNotEmpty) {
+      _serverSettings = _asMap(settings['server']);
+      _favoriteSettings = _asMap(settings['favorites']);
+      _metadataSettings = _asMap(settings['metadata']);
+    }
+    if (values['status'] is Map) {
+      _status = _asMap(values['status']);
+    }
+    if (values['diagnostics'] is Map) {
+      _diagnostics = _asMap(values['diagnostics']);
+    }
+  }
+
+  void _applySyncSnapshot(
+    Map<String, dynamic> snapshot, {
+    Map<String, dynamic>? status,
+    Map<String, dynamic>? diagnostics,
+  }) {
+    final nextServerId = snapshot['server_id']?.toString();
+    final serverChanged =
+        _cacheServerId != null &&
+        nextServerId != null &&
+        _cacheServerId != nextServerId;
+    if (serverChanged) {
+      _trackDetailCache.clear();
+      _albumDetailCache.clear();
+      _artistDetailCache.clear();
+      _playlistDetailCache.clear();
+      _searchResultCache.clear();
+      _detailWarmAfterIds.clear();
+      _detailWarmTargetCursors.clear();
+      _activeTrackDetail = null;
+      _activeTrackDetailId = null;
+    }
+    _cacheServerId = nextServerId;
+    _cacheCursor = _intValue(snapshot['cursor']) ?? _cacheCursor;
+    _albums = (snapshot['albums'] as List?) ?? const <dynamic>[];
+    _artists = (snapshot['artists'] as List?) ?? const <dynamic>[];
+    _tracks = (snapshot['tracks'] as List?) ?? const <dynamic>[];
+    _playlists = (snapshot['playlists'] as List?) ?? const <dynamic>[];
+    _playbackHistory =
+        (snapshot['playback_history'] as List?) ?? const <dynamic>[];
+    _playbackStats = _asMap(snapshot['playback_stats']);
+    _libraryRoots = (snapshot['library_roots'] as List?) ?? const <dynamic>[];
+    _clientLibraryStatuses =
+        (snapshot['client_library_roots'] as List?) ?? const <dynamic>[];
+    final settings = _asMap(snapshot['settings']);
+    _serverSettings = _asMap(settings['server']);
+    _favoriteSettings = _asMap(settings['favorites']);
+    _metadataSettings = _asMap(settings['metadata']);
+    final trackIds = _entityIds(_tracks);
+    final albumIds = _entityIds(_albums);
+    final artistIds = _entityIds(_artists);
+    final playlistIds = _entityIds(_playlists);
+    _trackDetailCache.removeWhere((id, _) => !trackIds.contains(id));
+    _albumDetailCache.removeWhere((id, _) => !albumIds.contains(id));
+    _artistDetailCache.removeWhere((id, _) => !artistIds.contains(id));
+    _playlistDetailCache.removeWhere((id, _) => !playlistIds.contains(id));
+    _reconcileTrackSummariesInDetails();
+    if (status != null) _status = status;
+    if (diagnostics != null) _diagnostics = diagnostics;
+  }
+
+  Set<int> _entityIds(List<dynamic> values) => <int>{
+    for (final value in values)
+      if (value is Map && _intValue(value['id']) != null)
+        _intValue(value['id'])!,
+  };
+
+  void _reconcileTrackSummariesInDetails() {
+    final tracksById = <int, Map<String, dynamic>>{
+      for (final value in _tracks)
+        if (value is Map && _intValue(value['id']) != null)
+          _intValue(value['id'])!: value.cast<String, dynamic>(),
+    };
+    for (final entry in _trackDetailCache.entries.toList(growable: false)) {
+      final summary = tracksById[entry.key];
+      if (summary != null) {
+        _trackDetailCache[entry.key] = <String, dynamic>{
+          ...entry.value,
+          'track': summary,
+        };
+      }
+    }
+    for (final cache in <Map<int, Map<String, dynamic>>>[
+      _albumDetailCache,
+      _artistDetailCache,
+      _playlistDetailCache,
+    ]) {
+      for (final entry in cache.entries.toList(growable: false)) {
+        final detailTracks = (entry.value['tracks'] as List?) ?? const [];
+        cache[entry.key] = <String, dynamic>{
+          ...entry.value,
+          'tracks': detailTracks
+              .map((value) {
+                if (value is! Map) return value;
+                final id = _intValue(value['id']);
+                return id == null ? value : tracksById[id] ?? value;
+              })
+              .toList(growable: false),
+        };
+      }
+    }
+  }
+
+  Map<String, dynamic> _snapshotForStorage(
+    Map<String, dynamic> snapshot, {
+    Map<String, dynamic>? status,
+    Map<String, dynamic>? diagnostics,
+  }) {
+    final stored = <String, dynamic>{...snapshot};
+    if (status != null) stored['status'] = status;
+    if (diagnostics != null) stored['diagnostics'] = diagnostics;
+    return stored;
   }
 
   Future<void> _handlePlatformCommand(_PlatformCommand command) async {
@@ -657,6 +853,8 @@ class _CoreDashboardState extends State<CoreDashboard>
     _rendererPositionReporter?.cancel();
     _zoneRefreshTimer?.cancel();
     _distributionTimer?.cancel();
+    _librarySyncTimer?.cancel();
+    _eventReconnectTimer?.cancel();
     await _eventSocket?.close();
     _eventSocket = null;
     final tracks = _offlineTrackSummaries(_offlineLibrary);
@@ -765,45 +963,78 @@ class _CoreDashboardState extends State<CoreDashboard>
     );
     _rendererRegisteredCoreUrl = coreUrl;
     await _connectEventStream();
-    final results = await Future.wait([
-      _loadPagedList('/albums'),
-      _loadPagedList('/artists'),
-      _loadPagedList('/tracks'),
+    final serverId = status['server_id']?.toString() ?? '';
+    final syncSnapshot = await _fetchSyncSnapshot(
+      status,
+      force: _cacheServerId != serverId || _tracks.isEmpty,
+    );
+    final results = await Future.wait<dynamic>([
       _api.getJson('/outputs'),
       _api.getJson('/zones'),
       _api.getJson('/diagnostics'),
       _api.getJson('/settings/server'),
       _api.getJson('/playback/stats?top_limit=20'),
-      _api.getJson('/playback/history?limit=100'),
-      _api.getJson('/playlists'),
+      _api.getJson('/playback/history?limit=250'),
       _api.getJson('/settings/favorites'),
       _api.getJson('/settings/metadata'),
-      _api.getJson('/library/roots'),
-      _api.getJson('/client-library/manifests'),
       _api
           .getJson('/transcoding/status')
           .catchError((_) => const <String, dynamic>{}),
     ]);
     _status = status;
-    _albums = results[0] as List<dynamic>;
-    _artists = results[1] as List<dynamic>;
-    _tracks = results[2] as List<dynamic>;
-    _outputs = results[3] as List<dynamic>;
-    _zones = results[4] as List<dynamic>;
-    _diagnostics = _asMap(results[5]);
-    _serverSettings = _asMap(results[6]);
+    _outputs = results[0] as List<dynamic>;
+    _zones = results[1] as List<dynamic>;
+    _diagnostics = _asMap(results[2]);
+    _serverSettings = _asMap(results[3]);
     _serverAliasController.text =
         _serverSettings?['alias']?.toString() ??
         status['display_name']?.toString() ??
         'Core local';
-    _playbackStats = _asMap(results[7]);
-    _playbackHistory = results[8] as List<dynamic>;
-    _playlists = results[9] as List<dynamic>;
-    _favoriteSettings = _asMap(results[10]);
-    _metadataSettings = _asMap(results[11]);
-    _libraryRoots = results[12] as List<dynamic>;
-    _clientLibraryStatuses = results[13] as List<dynamic>;
-    _transcodingStatus = _asMap(results[14]);
+    _playbackStats = _asMap(results[4]);
+    _playbackHistory = results[5] as List<dynamic>;
+    _favoriteSettings = _asMap(results[6]);
+    _metadataSettings = _asMap(results[7]);
+    _transcodingStatus = _asMap(results[8]);
+    if (syncSnapshot != null) {
+      final settings = <String, dynamic>{
+        ..._asMap(syncSnapshot['settings']),
+        'server': _serverSettings,
+        'favorites': _favoriteSettings,
+        'metadata': _metadataSettings,
+      };
+      final storageSnapshot = <String, dynamic>{
+        ...syncSnapshot,
+        'settings': settings,
+        'playback_stats': _playbackStats,
+        'playback_history': _playbackHistory,
+      };
+      _applySyncSnapshot(
+        storageSnapshot,
+        status: status,
+        diagnostics: _diagnostics,
+      );
+      await _ClientCacheStore.replaceSnapshot(
+        coreUrl,
+        _snapshotForStorage(
+          storageSnapshot,
+          status: status,
+          diagnostics: _diagnostics,
+        ),
+      );
+      await _markPendingDetailRefresh();
+    } else {
+      await _persistOverviewValues(<String, dynamic>{
+        'status': status,
+        'diagnostics': _diagnostics,
+        'playback_stats': _playbackStats,
+        'playback_history': _playbackHistory,
+        'settings': <String, dynamic>{
+          'server': _serverSettings,
+          'favorites': _favoriteSettings,
+          'metadata': _metadataSettings,
+        },
+      });
+    }
     if (_offlineMode) {
       await _finishOfflinePlayback('reconnected');
       await (await _playerForOutput(_clientOutputId)).stop();
@@ -814,18 +1045,13 @@ class _CoreDashboardState extends State<CoreDashboard>
     _startRendererPositionReporter();
     _startZoneRefresh();
     _startDistributionWorker();
+    _startLibrarySync();
     unawaited(_refreshDistributionJobs());
     _offlineLibrary.serverId = status['server_id']?.toString();
     final flushedOfflineMutations = await _flushOfflineMutations();
     if (flushedOfflineMutations) {
-      final refreshed = await Future.wait([
-        _loadPagedList('/tracks'),
-        _api.getJson('/playback/stats?top_limit=20'),
-        _api.getJson('/playback/history?limit=100'),
-      ]);
-      _tracks = refreshed[0] as List<dynamic>;
-      _playbackStats = _asMap(refreshed[1]);
-      _playbackHistory = refreshed[2] as List<dynamic>;
+      await _backgroundLibrarySync();
+      unawaited(_refreshHistoryCache());
     }
     final onlineTracks = <int, Map<String, dynamic>>{
       for (final value in _tracks.whereType<Map>())
@@ -847,6 +1073,320 @@ class _CoreDashboardState extends State<CoreDashboard>
     _syncPlaybackFromSelectedZone();
     await _refreshPlaybackQueue();
     _scheduleActiveTrackDetailLoad(_playback);
+    await _persistOverviewValues(<String, dynamic>{
+      'outputs': _outputs,
+      'zones': _zones,
+      if (_playback != null) 'playback': _playback,
+      if (_playbackQueue != null) 'playback_queue': _playbackQueue,
+    });
+    unawaited(_warmDetailCache());
+  }
+
+  Future<Map<String, dynamic>?> _fetchSyncSnapshot(
+    Map<String, dynamic> status, {
+    bool force = false,
+  }) async {
+    final serverId = status['server_id']?.toString() ?? '';
+    try {
+      if (force) {
+        _detailRefreshScopes.addAll(const <String>{
+          'track',
+          'album',
+          'artist',
+          'playlist',
+        });
+      }
+      if (!force && _cacheServerId == serverId) {
+        final changes = _asMap(
+          await _api.getJson(
+            '/client-sync/changes?after=$_cacheCursor&limit=500',
+          ),
+        );
+        if (changes['server_id']?.toString() == serverId &&
+            changes['requires_snapshot'] != true) {
+          _cacheCursor = _intValue(changes['cursor']) ?? _cacheCursor;
+          return null;
+        }
+        for (final value
+            in ((changes['changes'] as List?) ?? const <dynamic>[])) {
+          if (value is! Map) continue;
+          final reason = value['reason']?.toString().toLowerCase() ?? '';
+          switch (value['scope']?.toString()) {
+            case 'tracks':
+              if (!reason.contains('favorite') &&
+                  !reason.contains('mutation')) {
+                _detailRefreshScopes.addAll(const <String>{
+                  'track',
+                  'album',
+                  'artist',
+                  'playlist',
+                });
+              }
+            case 'albums':
+              _detailRefreshScopes.add('album');
+            case 'artists':
+              _detailRefreshScopes.add('artist');
+            case 'playlists':
+              _detailRefreshScopes.add('playlist');
+            default:
+              _detailRefreshScopes.addAll(const <String>{
+                'track',
+                'album',
+                'artist',
+                'playlist',
+              });
+          }
+        }
+      }
+      return _asMap(
+        await _api.getJson(
+          '/client-sync/snapshot',
+          requestTimeout: const Duration(seconds: 60),
+        ),
+      );
+    } on HttpException {
+      return _loadLegacySyncSnapshot(status);
+    }
+  }
+
+  Future<Map<String, dynamic>> _loadLegacySyncSnapshot(
+    Map<String, dynamic> status,
+  ) async {
+    final values = await Future.wait<dynamic>([
+      _loadPagedList('/albums'),
+      _loadPagedList('/artists'),
+      _loadPagedList('/tracks'),
+      _api.getJson('/playlists'),
+      _api.getJson('/playback/history?limit=250'),
+      _api.getJson('/playback/stats?top_limit=50'),
+      _api.getJson('/library/roots'),
+      _api.getJson('/client-library/manifests'),
+      _api.getJson('/settings'),
+    ]);
+    return <String, dynamic>{
+      'server_id': status['server_id']?.toString() ?? '',
+      'cursor': _intValue(status['library_revision']) ?? 0,
+      'generated_at': DateTime.now().toUtc().toIso8601String(),
+      'albums': values[0],
+      'artists': values[1],
+      'tracks': values[2],
+      'playlists': values[3],
+      'playback_history': values[4],
+      'playback_stats': values[5],
+      'library_roots': values[6],
+      'client_library_roots': values[7],
+      'settings': values[8],
+    };
+  }
+
+  void _startLibrarySync() {
+    _librarySyncTimer?.cancel();
+    _librarySyncTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      unawaited(_backgroundLibrarySync());
+      _backgroundSyncTicks += 1;
+      if (_backgroundSyncTicks % 4 == 0) {
+        unawaited(_refreshHistoryCache());
+      }
+    });
+  }
+
+  Future<void> _refreshHistoryCache() async {
+    if (_offlineMode || _cacheServerId == null) return;
+    try {
+      final values = await Future.wait<dynamic>([
+        _api.getJson('/playback/history?limit=250'),
+        _api.getJson('/playback/stats?top_limit=50'),
+        _api.getJson('/settings'),
+      ]);
+      final settings = _asMap(values[2]);
+      if (mounted) {
+        setState(() {
+          _playbackHistory = values[0] as List<dynamic>;
+          _playbackStats = _asMap(values[1]);
+          _serverSettings = _asMap(settings['server']);
+          _favoriteSettings = _asMap(settings['favorites']);
+          _metadataSettings = _asMap(settings['metadata']);
+        });
+      }
+      await _persistOverviewValues(<String, dynamic>{
+        'playback_history': values[0],
+        'playback_stats': values[1],
+        'settings': settings,
+      });
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    }
+  }
+
+  Future<void> _backgroundLibrarySync({bool force = false}) async {
+    if (_backgroundSyncBusy ||
+        _offlineMode ||
+        _rendererRegisteredCoreUrl == null) {
+      return;
+    }
+    _backgroundSyncBusy = true;
+    try {
+      final status = _asMap(await _api.getJson('/status'));
+      if (!_isIntMusicCoreStatus(status)) return;
+      final snapshot = await _fetchSyncSnapshot(status, force: force);
+      if (snapshot == null) return;
+      final storageSnapshot = <String, dynamic>{
+        ...snapshot,
+        'settings': <String, dynamic>{
+          ..._asMap(snapshot['settings']),
+          if (_serverSettings != null) 'server': _serverSettings,
+          if (_favoriteSettings != null) 'favorites': _favoriteSettings,
+          if (_metadataSettings != null) 'metadata': _metadataSettings,
+        },
+      };
+      if (mounted) {
+        setState(() {
+          _applySyncSnapshot(
+            storageSnapshot,
+            status: status,
+            diagnostics: _diagnostics,
+          );
+          _error = null;
+        });
+      } else {
+        _applySyncSnapshot(
+          storageSnapshot,
+          status: status,
+          diagnostics: _diagnostics,
+        );
+      }
+      await _ClientCacheStore.replaceSnapshot(
+        _coreUrlController.text,
+        _snapshotForStorage(
+          storageSnapshot,
+          status: status,
+          diagnostics: _diagnostics,
+        ),
+      );
+      await _markPendingDetailRefresh();
+      unawaited(_warmDetailCache());
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    } finally {
+      _backgroundSyncBusy = false;
+    }
+  }
+
+  Future<void> _warmDetailCache() async {
+    if (_detailWarmupBusy || _offlineMode || _cacheServerId == null) return;
+    _detailWarmupBusy = true;
+    final serverId = _cacheServerId!;
+    var retryPending = false;
+    try {
+      for (final kind in const <String>[
+        'artist',
+        'album',
+        'playlist',
+        'track',
+      ]) {
+        if (!_detailRefreshScopes.contains(kind)) continue;
+        final target = switch (kind) {
+          'artist' => _artistDetailCache,
+          'album' => _albumDetailCache,
+          'playlist' => _playlistDetailCache,
+          _ => _trackDetailCache,
+        };
+        var afterId = _detailWarmAfterIds[kind] ?? 0;
+        final targetCursor = _detailWarmTargetCursors[kind] ?? _cacheCursor;
+        var superseded = false;
+        while (!_offlineMode && _cacheServerId == serverId) {
+          final response = _asMap(
+            await _api.getJson(
+              '/client-sync/details?kind=$kind&after_id=$afterId&limit=100',
+              requestTimeout: const Duration(seconds: 60),
+            ),
+          );
+          if (response['server_id']?.toString() != serverId) return;
+          if ((_detailWarmTargetCursors[kind] ?? targetCursor) !=
+              targetCursor) {
+            superseded = true;
+            break;
+          }
+          final batch = <int, Map<String, dynamic>>{};
+          for (final value
+              in ((response['items'] as List?) ?? const <dynamic>[])) {
+            if (value is! Map) continue;
+            final id = _intValue(value['id']);
+            final detail = _asMap(value['detail']);
+            if (id == null || detail.isEmpty) continue;
+            target[id] = detail;
+            batch[id] = detail;
+          }
+          await _ClientCacheStore.putDetails(
+            _coreUrlController.text,
+            serverId,
+            kind,
+            batch,
+          );
+          final next = _intValue(response['next_after_id']) ?? afterId;
+          final complete = response['has_more'] != true || next <= afterId;
+          _detailWarmAfterIds[kind] = next;
+          await _ClientCacheStore.updateDetailWarmProgress(
+            _coreUrlController.text,
+            kind,
+            next,
+            targetCursor: targetCursor,
+            complete: complete,
+          );
+          if ((_detailWarmTargetCursors[kind] ?? targetCursor) !=
+              targetCursor) {
+            superseded = true;
+            break;
+          }
+          if (complete) break;
+          afterId = next;
+          await Future<void>.delayed(const Duration(milliseconds: 20));
+        }
+        if (superseded ||
+            (_detailWarmTargetCursors[kind] ?? targetCursor) != targetCursor) {
+          retryPending = true;
+          continue;
+        }
+        _detailWarmAfterIds.remove(kind);
+        _detailWarmTargetCursors.remove(kind);
+        _detailRefreshScopes.remove(kind);
+      }
+      if (mounted) setState(() {});
+    } on HttpException catch (error) {
+      // A 404 means an older Core: details are then cached on first visit.
+      // Transient HTTP failures keep their durable cursor and retry later.
+      retryPending = !error.message.startsWith('HTTP 404');
+      if (retryPending) {
+        await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      }
+    } catch (error) {
+      retryPending = true;
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    } finally {
+      _detailWarmupBusy = false;
+      if (retryPending && _detailRefreshScopes.isNotEmpty && !_offlineMode) {
+        unawaited(
+          Future<void>.delayed(const Duration(seconds: 3), () {
+            if (mounted && !_offlineMode) unawaited(_warmDetailCache());
+          }),
+        );
+      }
+    }
+  }
+
+  Future<void> _markPendingDetailRefresh() async {
+    final serverId = _cacheServerId;
+    if (serverId == null || _detailRefreshScopes.isEmpty) return;
+    for (final kind in _detailRefreshScopes) {
+      _detailWarmAfterIds[kind] = 0;
+      _detailWarmTargetCursors[kind] = _cacheCursor;
+    }
+    await _ClientCacheStore.markDetailsForRefresh(
+      _coreUrlController.text,
+      serverId,
+      _cacheCursor,
+      _detailRefreshScopes,
+    );
   }
 
   Future<bool> _flushOfflineMutations() async {
@@ -1057,12 +1597,16 @@ class _CoreDashboardState extends State<CoreDashboard>
   void _startRendererHeartbeat() {
     _rendererHeartbeat?.cancel();
     _rendererHeartbeat = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (_rendererHeartbeatBusy) return;
+      _rendererHeartbeatBusy = true;
       unawaited(
-        _sendRendererRegistration().catchError((Object error) {
-          if (mounted) {
-            setState(() => _rendererStatus = 'Renderer offline');
-          }
-        }),
+        _sendRendererRegistration()
+            .catchError((Object error) {
+              if (mounted) {
+                setState(() => _rendererStatus = 'Renderer offline');
+              }
+            })
+            .whenComplete(() => _rendererHeartbeatBusy = false),
       );
     });
   }
@@ -1070,7 +1614,13 @@ class _CoreDashboardState extends State<CoreDashboard>
   void _startRendererPositionReporter() {
     _rendererPositionReporter?.cancel();
     _rendererPositionReporter = Timer.periodic(const Duration(seconds: 2), (_) {
-      unawaited(_reportRendererPositions().catchError((_) {}));
+      if (_rendererPositionReportBusy) return;
+      _rendererPositionReportBusy = true;
+      unawaited(
+        _reportRendererPositions()
+            .catchError((_) {})
+            .whenComplete(() => _rendererPositionReportBusy = false),
+      );
     });
   }
 
@@ -1656,6 +2206,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _refreshZonesSilently() async {
+    if (_zoneRefreshBusy) return;
+    _zoneRefreshBusy = true;
     try {
       final zones = await _api.getJson('/zones') as List<dynamic>;
       _zoneRefreshFailures = 0;
@@ -1674,6 +2226,8 @@ class _CoreDashboardState extends State<CoreDashboard>
           _offlineLibrary.copies.isNotEmpty) {
         await _activateOfflineMode();
       }
+    } finally {
+      _zoneRefreshBusy = false;
     }
   }
 
@@ -1682,12 +2236,14 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (_eventSocket != null && _eventSocketBaseUrl == baseUrl) {
       return;
     }
-
-    await _eventSocket?.close();
-    _eventSocket = null;
-    _eventSocketBaseUrl = baseUrl;
+    if (_eventConnectBusy) return;
+    _eventConnectBusy = true;
 
     try {
+      await _eventSocket?.close();
+      _eventReconnectTimer?.cancel();
+      _eventSocket = null;
+      _eventSocketBaseUrl = baseUrl;
       final socket = await WebSocket.connect(_api.wsUrl('/ws/v1/events'));
       _eventSocket = socket;
       socket.listen(
@@ -1696,19 +2252,33 @@ class _CoreDashboardState extends State<CoreDashboard>
           if (mounted && _eventSocket == socket) {
             setState(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
+            _scheduleEventReconnect();
           }
         },
         onError: (Object error) {
           if (mounted && _eventSocket == socket) {
             setState(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
+            _scheduleEventReconnect();
           }
         },
       );
     } catch (_) {
       _eventSocket = null;
       _rendererStatus = 'Renderer offline';
+      _scheduleEventReconnect();
+    } finally {
+      _eventConnectBusy = false;
     }
+  }
+
+  void _scheduleEventReconnect() {
+    _eventReconnectTimer?.cancel();
+    _eventReconnectTimer = Timer(const Duration(seconds: 3), () {
+      if (!_offlineMode && mounted) {
+        unawaited(_connectEventStream());
+      }
+    });
   }
 
   Future<_RendererAudioPlayer> _playerForOutput(String outputId) async {
@@ -2078,46 +2648,53 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<Map<String, dynamic>> _loadSearch(String query, {int limit = 25}) {
-    if (_offlineMode) {
-      final normalized = query.trim().toLowerCase();
-      bool matches(Map<String, dynamic> value, Iterable<String> keys) => keys
+    final normalizedTerms = query
+        .trim()
+        .toLowerCase()
+        .split(RegExp(r'\s+'))
+        .where((value) => value.isNotEmpty)
+        .toList(growable: false);
+    bool matches(Map<String, dynamic> value, Iterable<String> keys) {
+      final searchable = keys
           .map((key) => value[key]?.toString().toLowerCase() ?? '')
-          .any((value) => value.contains(normalized));
-      return Future<Map<String, dynamic>>.value(<String, dynamic>{
-        'query': query,
-        'tracks': _tracks
-            .whereType<Map>()
-            .map((value) => value.cast<String, dynamic>())
-            .where(
-              (value) => matches(value, const [
-                'title',
-                'artist_display',
-                'album_title',
-              ]),
-            )
-            .take(limit)
-            .toList(growable: false),
-        'albums': _albums
-            .whereType<Map>()
-            .map((value) => value.cast<String, dynamic>())
-            .where(
-              (value) =>
-                  matches(value, const ['title', 'album_artist_display']),
-            )
-            .take(limit)
-            .toList(growable: false),
-        'artists': _artists
-            .whereType<Map>()
-            .map((value) => value.cast<String, dynamic>())
-            .where((value) => matches(value, const ['name', 'sort_name']))
-            .take(limit)
-            .toList(growable: false),
-        'playlists': const <dynamic>[],
-      });
+          .join(' ');
+      return normalizedTerms.every(searchable.contains);
     }
-    return _api
-        .getJson('/search?q=${Uri.encodeQueryComponent(query)}&limit=$limit')
-        .then(_asMap);
+
+    List<dynamic> filter(List<dynamic> values, Iterable<String> keys) => values
+        .whereType<Map>()
+        .map((value) => value.cast<String, dynamic>())
+        .where((value) => matches(value, keys))
+        .take(limit)
+        .toList(growable: false);
+
+    final memoryResult = <String, dynamic>{
+      'query': query,
+      'tracks': filter(_tracks, const [
+        'title',
+        'artist_display',
+        'album_title',
+      ]),
+      'albums': filter(_albums, const [
+        'title',
+        'album_artist_display',
+        'year',
+      ]),
+      'artists': filter(_artists, const ['name', 'sort_name']),
+      'playlists': filter(_playlists, const ['name', 'description']),
+    };
+    return _ClientCacheStore.search(
+      _coreUrlController.text,
+      query,
+      limit: limit,
+    ).then((cached) {
+      final cachedCount =
+          const <String>['tracks', 'albums', 'artists', 'playlists'].fold<int>(
+            0,
+            (count, key) => count + ((cached[key] as List?)?.length ?? 0),
+          );
+      return cachedCount == 0 ? memoryResult : cached;
+    });
   }
 
   void _onSearchChanged(String value) {
@@ -2186,8 +2763,10 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     _rememberSearch(query);
-    await _run<void>(() async {
-      _searchResultCache[query] = await _loadSearch(query, limit: 120);
+    final result = await _loadSearch(query, limit: 120);
+    if (!mounted) return;
+    setState(() {
+      _searchResultCache[query] = result;
       _searchQuery = query;
       _searchScopeByQuery.putIfAbsent(query, () => _SearchScope.all);
       _searchSortByQuery.putIfAbsent(query, () => _SearchSort.relevance);
@@ -2289,6 +2868,9 @@ class _CoreDashboardState extends State<CoreDashboard>
         final queue = payload.cast<String, dynamic>();
         if (queue['zone_id']?.toString() == _activeZoneId()) {
           setState(() => _applyPlaybackQueue(queue));
+          unawaited(
+            _persistOverviewValues(<String, dynamic>{'playback_queue': queue}),
+          );
         }
         return;
       }
@@ -2320,10 +2902,43 @@ class _CoreDashboardState extends State<CoreDashboard>
         unawaited(_refreshDistributionJobs());
         unawaited(_pollDistributionTasks());
       }
+      if (eventType == 'library.changed' ||
+          eventType == 'client.mutations_applied') {
+        unawaited(_backgroundLibrarySync());
+      }
+      if (eventType == 'core.settings_changed') {
+        unawaited(_refreshSettingsCache());
+      }
     } catch (error) {
       if (mounted) {
         setState(() => _rendererStatus = 'Renderer event error');
       }
+    }
+  }
+
+  Future<void> _refreshSettingsCache() async {
+    try {
+      final values = await Future.wait<dynamic>([
+        _api.getJson('/settings/server'),
+        _api.getJson('/settings/favorites'),
+        _api.getJson('/settings/metadata'),
+      ]);
+      if (mounted) {
+        setState(() {
+          _serverSettings = _asMap(values[0]);
+          _favoriteSettings = _asMap(values[1]);
+          _metadataSettings = _asMap(values[2]);
+        });
+      }
+      await _persistOverviewValues(<String, dynamic>{
+        'settings': <String, dynamic>{
+          'server': values[0],
+          'favorites': values[1],
+          'metadata': values[2],
+        },
+      });
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
     }
   }
 
@@ -2451,6 +3066,13 @@ class _CoreDashboardState extends State<CoreDashboard>
     String streamPath,
   ) async {
     if (trackId != null && _clientLibraryRoots.isNotEmpty) {
+      final cachedCopy = await _availableOfflineCopy(trackId);
+      final cachedPath = cachedCopy == null
+          ? null
+          : _offlineCopyPath(cachedCopy, _clientLibraryRoots);
+      if (cachedPath != null && await File(cachedPath).exists()) {
+        return (uri: cachedPath, localFile: true);
+      }
       try {
         final media = _asMap(await _api.getJson('/tracks/$trackId/media'));
         final localPath = _resolveClientReplicaPath(
@@ -2601,17 +3223,40 @@ class _CoreDashboardState extends State<CoreDashboard>
       }
       return;
     }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.getJson('/albums/$albumId')),
-    );
-    if (!mounted || detail == null) {
-      return;
-    }
-
+    final detail =
+        _albumDetailCache[albumId] ?? _albumDetailFromOverview(albumId);
+    if (detail == null || !mounted) return;
     setState(() {
       _albumDetailCache[albumId] = detail;
       _navigateToInState(_AppRoute.album(albumId));
     });
+    unawaited(_refreshAlbumDetail(albumId));
+  }
+
+  Map<String, dynamic>? _albumDetailFromOverview(int albumId) {
+    final album = _findEntity(_albums, albumId);
+    if (album == null) return null;
+    return <String, dynamic>{
+      'album': album,
+      'tracks': _tracks
+          .whereType<Map>()
+          .map((value) => value.cast<String, dynamic>())
+          .where((track) => _intValue(track['album_id']) == albumId)
+          .toList(growable: false),
+    };
+  }
+
+  Future<void> _refreshAlbumDetail(int albumId) async {
+    try {
+      final detail = _asMap(await _api.getJson('/albums/$albumId'));
+      _albumDetailCache[albumId] = detail;
+      await _persistDetail('album', albumId, detail);
+      if (mounted && _currentRoute == _AppRoute.album(albumId)) {
+        setState(() {});
+      }
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    }
   }
 
   void _closeAlbumDetail() => _closeDetailPage();
@@ -2627,17 +3272,46 @@ class _CoreDashboardState extends State<CoreDashboard>
       }
       return;
     }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.getJson('/artists/$artistId')),
-    );
-    if (!mounted || detail == null) {
-      return;
-    }
-
+    final detail =
+        _artistDetailCache[artistId] ?? _artistDetailFromOverview(artistId);
+    if (detail == null || !mounted) return;
     setState(() {
       _artistDetailCache[artistId] = detail;
       _navigateToInState(_AppRoute.artist(artistId));
     });
+    unawaited(_refreshArtistDetail(artistId));
+  }
+
+  Map<String, dynamic>? _artistDetailFromOverview(int artistId) {
+    final artist = _findEntity(_artists, artistId);
+    if (artist == null) return null;
+    return <String, dynamic>{
+      'artist': artist,
+      'profile': <String, dynamic>{
+        'display_name': artist['name'],
+        'sort_name': artist['sort_name'],
+        'aliases': const <String>[],
+        'genres': const <String>[],
+        'links': const <dynamic>[],
+      },
+      'assets': const <dynamic>[],
+      'visuals': const <dynamic>[],
+      'albums': const <dynamic>[],
+      'tracks': const <dynamic>[],
+    };
+  }
+
+  Future<void> _refreshArtistDetail(int artistId) async {
+    try {
+      final detail = _asMap(await _api.getJson('/artists/$artistId'));
+      _artistDetailCache[artistId] = detail;
+      await _persistDetail('artist', artistId, detail);
+      if (mounted && _currentRoute == _AppRoute.artist(artistId)) {
+        setState(() {});
+      }
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    }
   }
 
   void _closeArtistDetail() => _closeDetailPage();
@@ -2664,14 +3338,20 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (!mounted || refreshed == null) {
       return;
     }
-    final artists = await _loadPagedList('/artists');
-    if (!mounted) {
-      return;
-    }
     setState(() {
       _artistDetailCache[artistId] = refreshed;
-      _artists = artists;
+      final artist = _asMap(refreshed['artist']);
+      _artists = _artists
+          .map(
+            (value) => value is Map && _intValue(value['id']) == artistId
+                ? artist
+                : value,
+          )
+          .toList(growable: false);
     });
+    unawaited(_persistDetail('artist', artistId, refreshed));
+    unawaited(_persistOverviewValues(<String, dynamic>{'artists': _artists}));
+    unawaited(_backgroundLibrarySync());
   }
 
   Future<void> _openTrackDetail(int trackId) async {
@@ -2689,17 +3369,49 @@ class _CoreDashboardState extends State<CoreDashboard>
       }
       return;
     }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.getJson('/tracks/$trackId')),
-    );
-    if (!mounted || detail == null) {
-      return;
-    }
-
+    final detail =
+        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+    if (detail == null || !mounted) return;
     setState(() {
       _trackDetailCache[trackId] = detail;
       _navigateToInState(_AppRoute.track(trackId));
     });
+    unawaited(_refreshTrackDetail(trackId));
+  }
+
+  Map<String, dynamic>? _trackDetailFromOverview(int trackId) {
+    final track = _findEntity(_tracks, trackId);
+    if (track == null) return null;
+    return <String, dynamic>{
+      'track': track,
+      'file_path': '',
+      'relative_path': '',
+      'extension': '',
+      'size_bytes': _intValue(track['size_bytes']) ?? 0,
+      'modified_at': track['added_at'],
+      'scan_status': 'cached_summary',
+      'genres': const <String>[],
+      'composers': const <String>[],
+      'lyricists': const <String>[],
+      'lyrics': null,
+      'media': null,
+    };
+  }
+
+  Future<void> _refreshTrackDetail(int trackId) async {
+    try {
+      final detail = _asMap(await _api.getJson('/tracks/$trackId'));
+      _trackDetailCache[trackId] = detail;
+      await _persistDetail('track', trackId, detail);
+      if (_activeTrackDetailId == trackId) _activeTrackDetail = detail;
+      if (mounted &&
+          (_currentRoute == _AppRoute.track(trackId) ||
+              _activeTrackDetailId == trackId)) {
+        setState(() {});
+      }
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    }
   }
 
   Future<void> _editTrack(int trackId) async {
@@ -2725,22 +3437,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final detail = _asMap(updated['detail']);
-    final results = await Future.wait([
-      _loadPagedList('/albums'),
-      _loadPagedList('/artists'),
-      _loadPagedList('/tracks'),
-    ]);
-    if (!mounted) {
-      return;
-    }
     setState(() {
       _trackDetailCache[trackId] = detail;
-      _albums = results[0];
-      _artists = results[1];
-      _tracks = results[2];
-      _albumDetailCache.clear();
-      _artistDetailCache.clear();
-      _playlistDetailCache.clear();
       _searchResultCache.clear();
       final updatedTrack = _asMap(detail['track']);
       _replaceTrackInCollections(updatedTrack);
@@ -2748,6 +3446,9 @@ class _CoreDashboardState extends State<CoreDashboard>
         _activeTrackDetail = detail;
       }
     });
+    unawaited(_persistDetail('track', trackId, detail));
+    unawaited(_persistOverviewValues(<String, dynamic>{'tracks': _tracks}));
+    unawaited(_backgroundLibrarySync());
   }
 
   Future<void> _manageTrackVersions(int trackId) async {
@@ -2777,28 +3478,75 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     setState(() {
-      _trackDetailCache.clear();
       _trackDetailCache[trackId] = refreshed;
       if (_activeTrackDetailId == trackId) {
         _activeTrackDetail = refreshed;
       }
     });
+    unawaited(_persistDetail('track', trackId, refreshed));
+    unawaited(_backgroundLibrarySync());
   }
 
   void _closeTrackDetail() => _closeDetailPage();
 
   Future<void> _openPlaylistDetail(int playlistId) async {
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.getJson('/playlists/$playlistId')),
-    );
-    if (!mounted || detail == null) {
-      return;
-    }
-
+    final detail =
+        _playlistDetailCache[playlistId] ??
+        _playlistDetailFromOverview(playlistId);
+    if (detail == null || !mounted) return;
     setState(() {
       _playlistDetailCache[playlistId] = detail;
       _navigateToInState(_AppRoute.playlist(playlistId));
     });
+    unawaited(_refreshPlaylistDetail(playlistId));
+  }
+
+  Map<String, dynamic>? _playlistDetailFromOverview(int playlistId) {
+    final playlist = _findEntity(_playlists, playlistId);
+    if (playlist == null) return null;
+    return <String, dynamic>{
+      'playlist': playlist,
+      'rules': null,
+      'tracks': const <dynamic>[],
+    };
+  }
+
+  Future<void> _refreshPlaylistDetail(int playlistId) async {
+    try {
+      final detail = _asMap(await _api.getJson('/playlists/$playlistId'));
+      _playlistDetailCache[playlistId] = detail;
+      await _persistDetail('playlist', playlistId, detail);
+      if (mounted && _currentRoute == _AppRoute.playlist(playlistId)) {
+        setState(() {});
+      }
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+    }
+  }
+
+  Map<String, dynamic>? _findEntity(List<dynamic> values, int id) {
+    for (final value in values) {
+      if (value is Map && _intValue(value['id']) == id) {
+        return value.cast<String, dynamic>();
+      }
+    }
+    return null;
+  }
+
+  Future<void> _persistDetail(
+    String kind,
+    int id,
+    Map<String, dynamic> detail,
+  ) {
+    final serverId = _cacheServerId ?? _status?['server_id']?.toString();
+    if (serverId == null || serverId.isEmpty) return Future<void>.value();
+    return _ClientCacheStore.putDetail(
+      _coreUrlController.text,
+      serverId,
+      kind,
+      id,
+      detail,
+    );
   }
 
   Future<void> _createManualPlaylist() async {
@@ -2854,6 +3602,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     await _reloadPlaylists();
     if (mounted) {
       setState(() => _playlistDetailCache[playlistId] = updated);
+      unawaited(_persistDetail('playlist', playlistId, updated));
     }
   }
 
@@ -2871,6 +3620,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (mounted) {
       setState(() => _playlists = playlists);
     }
+    await _persistOverviewValues(<String, dynamic>{'playlists': playlists});
   }
 
   Future<void> _addTrackToPlaylist(int trackId) async {
@@ -2901,6 +3651,11 @@ class _CoreDashboardState extends State<CoreDashboard>
     );
     if (mounted && detail != null) {
       await _reloadPlaylists();
+      final playlistId = _intValue(_asMap(detail['playlist'])['id']);
+      if (playlistId != null) {
+        _playlistDetailCache[playlistId] = detail;
+        unawaited(_persistDetail('playlist', playlistId, detail));
+      }
     }
   }
 
@@ -2919,6 +3674,7 @@ class _CoreDashboardState extends State<CoreDashboard>
         return;
       }
       setState(() => _playlistDetailCache[playlistId] = detail);
+      unawaited(_persistDetail('playlist', playlistId, detail));
     }
   }
 
@@ -2927,43 +3683,61 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (trackId == null) {
       return;
     }
-    if (_offlineMode) {
-      final favorite = track['is_favorite'] != true;
-      _offlineLibrary.setFavorite(trackId, favorite);
-      _offlineLibrary.outbox.add(
-        _OfflineMutation(
-          id: _newClientMutationId(),
-          kind: 'favorite',
-          trackId: trackId,
-          occurredAt: DateTime.now().toUtc(),
-          payload: <String, dynamic>{'is_favorite': favorite},
-        ),
+    final favorite = track['is_favorite'] != true;
+    final mutation = _OfflineMutation(
+      id: _newClientMutationId(),
+      kind: 'favorite',
+      trackId: trackId,
+      occurredAt: DateTime.now().toUtc(),
+      payload: <String, dynamic>{'is_favorite': favorite},
+    );
+    _offlineLibrary.setFavorite(trackId, favorite);
+    _offlineLibrary.outbox.add(mutation);
+    final optimisticTrack = <String, dynamic>{
+      ...track,
+      'is_favorite': favorite,
+      if (favorite && track['user_rating'] == null) 'user_rating': 100,
+    };
+    if (mounted) {
+      setState(() {
+        _replaceTrackInCollections(optimisticTrack);
+        _replaceTrackInDetailCache(_albumDetailCache, optimisticTrack);
+        _replaceTrackInDetailCache(_artistDetailCache, optimisticTrack);
+        _replaceTrackInDetailCache(_playlistDetailCache, optimisticTrack);
+        final detail = _trackDetailCache[trackId];
+        if (detail != null) {
+          _trackDetailCache[trackId] = <String, dynamic>{
+            ...detail,
+            'track': optimisticTrack,
+          };
+        }
+        if (_activeTrackDetailId == trackId && _activeTrackDetail != null) {
+          _activeTrackDetail = <String, dynamic>{
+            ...?_activeTrackDetail,
+            'track': optimisticTrack,
+          };
+        }
+      });
+    }
+    await _OfflineLibraryStore.save(_offlineLibrary);
+    await _persistOverviewValues(<String, dynamic>{'tracks': _tracks});
+    if (_offlineMode) return;
+    Map<String, dynamic> detail;
+    try {
+      detail = _asMap(
+        await _api.postJson('/tracks/$trackId/favorite', <String, dynamic>{
+          'is_favorite': favorite,
+        }),
       );
-      final updated = _offlineLibrary.track(trackId)?.toTrackSummary();
-      if (updated != null && mounted) {
-        setState(() {
-          _replaceTrackInCollections(updated);
-          _replaceTrackInDetailCache(_albumDetailCache, updated);
-          _replaceTrackInDetailCache(_artistDetailCache, updated);
-          if (_activeTrackDetailId == trackId && _activeTrackDetail != null) {
-            _activeTrackDetail = <String, dynamic>{
-              ...?_activeTrackDetail,
-              'track': updated,
-            };
-          }
-        });
+      _offlineLibrary.outbox.removeWhere((value) => value.id == mutation.id);
+      unawaited(_OfflineLibraryStore.save(_offlineLibrary));
+    } catch (_) {
+      if (mounted) {
+        setState(() => _rendererStatus = 'Change queued for synchronization');
       }
-      await _OfflineLibraryStore.save(_offlineLibrary);
       return;
     }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson('/tracks/$trackId/favorite', <String, dynamic>{
-          'is_favorite': track['is_favorite'] != true,
-        }),
-      ),
-    );
-    if (!mounted || detail == null) {
+    if (!mounted) {
       return;
     }
     final updatedTrack = _asMap(detail['track']);
@@ -2979,6 +3753,18 @@ class _CoreDashboardState extends State<CoreDashboard>
       _replaceTrackInDetailCache(_artistDetailCache, updatedTrack);
       _replaceTrackInDetailCache(_playlistDetailCache, updatedTrack);
     });
+    unawaited(_persistDetail('track', trackId, detail));
+    unawaited(_persistOverviewValues(<String, dynamic>{'tracks': _tracks}));
+  }
+
+  Future<void> _persistOverviewValues(Map<String, dynamic> values) {
+    final serverId = _cacheServerId ?? _status?['server_id']?.toString();
+    if (serverId == null || serverId.isEmpty) return Future<void>.value();
+    return _ClientCacheStore.putOverviewValues(
+      _coreUrlController.text,
+      serverId,
+      values,
+    );
   }
 
   void _replaceTrackInDetailCache(
@@ -3275,28 +4061,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       return _intValue(track?['id']) == trackId;
     });
     if (!queued) {
-      final trackIds = _tracks
-          .map((track) => _intValue((track as Map)['id']))
-          .whereType<int>()
-          .toList(growable: false);
-      final startIndex = trackIds.indexOf(trackId);
-      if (startIndex >= 0) {
-        final queue = await _run<Map<String, dynamic>>(
-          () async => _asMap(
-            await _api.postJson(
-              '/zones/${Uri.encodeComponent(_selectedZoneId)}/queue',
-              <String, dynamic>{
-                'track_ids': trackIds,
-                'start_index': startIndex,
-                'mode': _playbackMode.nameForApi,
-              },
-            ),
-          ),
-        );
-        if (queue != null) {
-          _applyPlaybackQueue(queue);
-        }
-      }
+      await _playTrackFromCollection(trackId, _tracks);
+      return;
     }
     final playback = await _playTrackOnZone(trackId, _selectedZoneId);
     if (mounted && playback != null) {
@@ -3323,17 +4089,53 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playTrack(trackId);
       return;
     }
-    final queue = await _replaceQueue(
-      trackIds,
-      startIndex: startIndex,
-      mode: _PlaybackMode.sequential,
-    );
-    if (queue == null) {
-      return;
+    final zoneId = _activeZoneId();
+    final optimisticTrack = _findEntity(_tracks, trackId);
+    if (mounted) {
+      setState(() {
+        _applyPlayback(<String, dynamic>{
+          'zone_id': zoneId,
+          'state': 'loading',
+          'track_id': trackId,
+          'track_title': optimisticTrack?['title'],
+          'position_ms': 0,
+          'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
+        });
+      });
     }
-    final playback = await _playTrackOnZone(trackId, _activeZoneId());
-    if (mounted && playback != null) {
-      setState(() => _applyPlayback(playback));
+    try {
+      final result = _asMap(
+        await _api.postJson(
+          '/zones/${Uri.encodeComponent(zoneId)}/play-collection',
+          <String, dynamic>{
+            'track_ids': trackIds,
+            'start_index': startIndex,
+            'mode': _PlaybackMode.sequential.nameForApi,
+          },
+          requestTimeout: const Duration(seconds: 8),
+        ),
+      );
+      final queue = _asMap(result['queue']);
+      final playback = _asMap(result['playback']);
+      if (mounted) {
+        setState(() {
+          if (queue.isNotEmpty) _applyPlaybackQueue(queue);
+          if (playback.isNotEmpty) _applyPlayback(playback);
+        });
+      }
+    } on HttpException {
+      final queue = await _replaceQueue(
+        trackIds,
+        startIndex: startIndex,
+        mode: _PlaybackMode.sequential,
+      );
+      if (queue == null) return;
+      final playback = await _playTrackOnZone(trackId, zoneId);
+      if (mounted && playback != null) {
+        setState(() => _applyPlayback(playback));
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
     }
   }
 
@@ -3345,14 +4147,18 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playOfflineTrack(trackId);
       return _playback;
     }
-    return _run<Map<String, dynamic>>(
-      () async => _asMap(
+    try {
+      return _asMap(
         await _api.postJson(
           '/zones/${Uri.encodeComponent(zoneId)}/play',
           <String, dynamic>{'track_id': trackId},
+          requestTimeout: const Duration(seconds: 8),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+      return null;
+    }
   }
 
   Future<void> _playPreviousTrack() async {
@@ -3361,13 +4167,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playPreviousOfflineTrack();
       return;
     }
-    final playback = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/previous',
-          const <String, dynamic>{},
-        ),
-      ),
+    final playback = await _postPlaybackControl(
+      '/zones/${Uri.encodeComponent(_activeZoneId())}/previous',
+      const <String, dynamic>{},
     );
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
@@ -3380,13 +4182,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playNextOfflineTrack();
       return;
     }
-    final playback = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/next',
-          const <String, dynamic>{},
-        ),
-      ),
+    final playback = await _postPlaybackControl(
+      '/zones/${Uri.encodeComponent(_activeZoneId())}/next',
+      const <String, dynamic>{},
     );
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
@@ -3403,6 +4201,9 @@ class _CoreDashboardState extends State<CoreDashboard>
         return;
       }
       setState(() => _applyPlaybackQueue(queue));
+      unawaited(
+        _persistOverviewValues(<String, dynamic>{'playback_queue': queue}),
+      );
     } catch (_) {
       // Zone refresh and the event stream will retry the queue snapshot.
     }
@@ -3828,13 +4629,9 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _postZoneAction(String zoneId, String action) async {
-    final playback = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(zoneId)}/$action',
-          <String, dynamic>{},
-        ),
-      ),
+    final playback = await _postPlaybackControl(
+      '/zones/${Uri.encodeComponent(zoneId)}/$action',
+      const <String, dynamic>{},
     );
     if (mounted && playback != null) {
       setState(() {
@@ -3925,18 +4722,32 @@ class _CoreDashboardState extends State<CoreDashboard>
       }
       return;
     }
-    final playback = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/seek',
-          <String, dynamic>{'position_ms': positionMs},
-        ),
-      ),
+    final playback = await _postPlaybackControl(
+      '/zones/${Uri.encodeComponent(_activeZoneId())}/seek',
+      <String, dynamic>{'position_ms': positionMs},
     );
     if (mounted && playback != null) {
       setState(() {
         _applyPlayback(playback);
       });
+    }
+  }
+
+  Future<Map<String, dynamic>?> _postPlaybackControl(
+    String path,
+    Map<String, dynamic> body,
+  ) async {
+    try {
+      return _asMap(
+        await _api.postJson(
+          path,
+          body,
+          requestTimeout: const Duration(seconds: 8),
+        ),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _rendererStatus = 'Playback link is slow');
+      return null;
     }
   }
 
@@ -4292,12 +5103,23 @@ class _CoreDashboardState extends State<CoreDashboard>
       _syncSystemPlayback();
       return;
     }
+    final cached =
+        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+    if (cached != null && _activeTrackDetailId == trackId) {
+      _activeTrackDetail = cached;
+      if (mounted) setState(() {});
+      _syncSystemPlayback();
+    }
     try {
       final detail = _asMap(await _api.getJson('/tracks/$trackId'));
       if (!mounted || _activeTrackDetailId != trackId) {
         return;
       }
-      setState(() => _activeTrackDetail = detail);
+      setState(() {
+        _activeTrackDetail = detail;
+        _trackDetailCache[trackId] = detail;
+      });
+      unawaited(_persistDetail('track', trackId, detail));
       _syncSystemPlayback();
     } catch (_) {
       // Track detail loading is secondary to playback control.
