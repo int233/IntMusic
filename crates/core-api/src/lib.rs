@@ -50,10 +50,11 @@ use protocol::{
     MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
     PlaybackEvent, PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
     PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
-    RendererCommandPayload, RendererRegistration, RendererStateReport, ReplacePlaybackQueue,
-    ScanProgressPayload, SearchResponse, ServerSettingsUpdate, TrackFavoriteUpdate,
-    TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual,
-    UpdatePlaylist, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
+    RendererCommandPayload, RendererRegistration, RendererStateReport, RendererVolumeStateReport,
+    ReplacePlaybackQueue, ScanProgressPayload, SearchResponse, ServerSettingsUpdate,
+    TrackFavoriteUpdate, TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile,
+    UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneAliasUpdate, ZoneTransferRequest,
+    ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -556,6 +557,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/renderers", get(list_renderers))
         .route("/renderers/register", post(register_renderer))
         .route("/renderers/{client_id}/state", post(report_renderer_state))
+        .route(
+            "/renderers/{client_id}/volume-state",
+            post(report_renderer_volume_state),
+        )
         .route("/zones", get(list_zones))
         .route("/zones/play-many", post(play_many_zones))
         .route("/zones/{zone_id}/play", post(play_zone))
@@ -2721,7 +2726,23 @@ async fn register_renderer(
     Json(payload): Json<RendererRegistration>,
 ) -> ApiResult<protocol::RegisteredRenderer> {
     let request_playback_sync = payload.request_playback_sync;
+    let reported_system_volumes = payload
+        .outputs
+        .iter()
+        .filter_map(|output| {
+            Some((
+                renderers::remote_output_id(&payload.client_id, &output.id),
+                output.system_volume?,
+                output.system_muted.unwrap_or(false),
+            ))
+        })
+        .collect::<Vec<_>>();
     let (renderer, reset_states) = state.inner.renderers.register(payload).await;
+    for (zone_id, volume, muted) in reported_system_volumes {
+        let current =
+            core_db::set_zone_system_volume_state(state.pool(), &zone_id, volume, muted).await?;
+        state.emit("zone.volume_changed", &current);
+    }
     for (previous, current) in reset_states {
         record_playback_finish(
             &state,
@@ -2764,6 +2785,10 @@ async fn register_renderer(
             )
             .await?;
             state.emit_renderer_command(&renderer_id, &command);
+            let volume = core_db::zone_volume(state.pool(), &output.id).await?;
+            if volume.mode == VolumeControlMode::Player || output.system_volume_writable {
+                apply_zone_volume(&state, &volume, &PlaybackCommandContext::default()).await?;
+            }
         }
     }
     Ok(Json(renderer))
@@ -2829,6 +2854,39 @@ async fn report_renderer_state(
     Ok(Json(playback))
 }
 
+async fn report_renderer_volume_state(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    Json(payload): Json<RendererVolumeStateReport>,
+) -> ApiResult<ZoneVolume> {
+    state
+        .inner
+        .renderers
+        .update_system_volume_capability(
+            &client_id,
+            &payload.output_id,
+            payload.supported,
+            payload.readable,
+            payload.writable,
+            payload.steps,
+        )
+        .await?;
+    let zone_id = if payload.output_id.starts_with("renderer:") {
+        payload.output_id
+    } else {
+        renderers::remote_output_id(&client_id, &payload.output_id)
+    };
+    let volume = core_db::set_zone_system_volume_state(
+        state.pool(),
+        &zone_id,
+        payload.volume,
+        payload.muted,
+    )
+    .await?;
+    state.emit("zone.volume_changed", &volume);
+    Ok(Json(volume))
+}
+
 async fn list_zones(State(state): State<AppState>) -> ApiResult<Vec<protocol::ZoneSummary>> {
     let core_name = core_display_name(&state.config());
     let mut zones = core_db::list_zones(state.pool()).await?;
@@ -2863,6 +2921,15 @@ async fn list_zones(State(state): State<AppState>) -> ApiResult<Vec<protocol::Zo
             state: playback.state,
             volume: 1.0,
             muted: false,
+            volume_mode: protocol::VolumeControlMode::Player,
+            player_volume: 1.0,
+            player_muted: false,
+            system_volume: None,
+            system_muted: None,
+            system_volume_supported: false,
+            system_volume_readable: false,
+            system_volume_writable: false,
+            system_volume_steps: None,
             track_id: None,
             track_title: None,
             position_ms: 0,
@@ -2918,6 +2985,11 @@ async fn apply_zone_preferences(
         let preference = core_db::zone_volume(state.pool(), &zone.id).await?;
         zone.volume = preference.volume;
         zone.muted = preference.muted;
+        zone.volume_mode = preference.mode;
+        zone.player_volume = preference.player_volume;
+        zone.player_muted = preference.player_muted;
+        zone.system_volume = preference.system_volume;
+        zone.system_muted = preference.system_muted;
     }
     Ok(())
 }
@@ -3187,8 +3259,26 @@ async fn update_zone_volume(
 ) -> ApiResult<ZoneVolume> {
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
-    let volume =
-        core_db::set_zone_volume(state.pool(), &zone_id, payload.volume, payload.muted).await?;
+    if payload.mode == VolumeControlMode::System
+        && (is_core_zone(&zone_id)
+            || !state
+                .inner
+                .renderers
+                .system_volume_writable_for_output(&zone_id)
+                .await)
+    {
+        return Err(
+            anyhow::anyhow!("system volume is not writable for playback zone {zone_id}").into(),
+        );
+    }
+    let volume = core_db::set_zone_volume(
+        state.pool(),
+        &zone_id,
+        payload.mode,
+        payload.volume,
+        payload.muted,
+    )
+    .await?;
     apply_zone_volume(&state, &volume, &payload.command).await?;
     state.emit("zone.volume_changed", &volume);
     Ok(Json(volume))
@@ -3551,6 +3641,8 @@ struct SeekControlRequest {
 struct VolumeControlRequest {
     volume: f32,
     muted: Option<bool>,
+    #[serde(default)]
+    mode: VolumeControlMode,
     #[serde(flatten)]
     command: PlaybackCommandContext,
 }
@@ -3596,6 +3688,7 @@ async fn create_renderer_command(
             position_ms,
             volume,
             muted,
+            volume_mode: VolumeControlMode::Player,
         },
     ))
 }
@@ -3727,6 +3820,9 @@ async fn apply_zone_volume(
 ) -> Result<()> {
     let effective_volume = if volume.muted { 0.0 } else { volume.volume };
     if is_core_zone(&volume.zone_id) {
+        if volume.mode == VolumeControlMode::System {
+            anyhow::bail!("system volume is unavailable for Core-owned outputs");
+        }
         state
             .inner
             .playback
@@ -3739,7 +3835,7 @@ async fn apply_zone_volume(
         .renderers
         .state_for_output(&volume.zone_id)
         .await;
-    let (renderer_id, command) = create_renderer_command(
+    let (renderer_id, mut command) = create_renderer_command(
         state,
         &volume.zone_id,
         "volume",
@@ -3753,6 +3849,7 @@ async fn apply_zone_volume(
         VOLUME_COMMAND_TTL_MS,
     )
     .await?;
+    command.volume_mode = volume.mode;
     state.emit_renderer_command(&renderer_id, &command);
     Ok(())
 }

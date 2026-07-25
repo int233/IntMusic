@@ -1,8 +1,16 @@
 #include "flutter_window.h"
 
 #include <dwmapi.h>
+#include <endpointvolume.h>
 #include <flutter/standard_method_codec.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <mmdeviceapi.h>
+#include <propsys.h>
+#include <wrl/client.h>
+#include <cwctype>
 #include <cwchar>
+#include <algorithm>
+#include <iterator>
 #include <optional>
 #include <string>
 
@@ -47,6 +55,188 @@ const std::string* StringArgument(const flutter::EncodableMap& map,
     return nullptr;
   }
   return std::get_if<std::string>(&value->second);
+}
+
+std::optional<double> DoubleArgument(const flutter::EncodableMap& map,
+                                     const char* name) {
+  auto value = map.find(flutter::EncodableValue(name));
+  if (value == map.end()) {
+    return std::nullopt;
+  }
+  if (const auto* number = std::get_if<double>(&value->second)) {
+    return *number;
+  }
+  if (const auto* number = std::get_if<int32_t>(&value->second)) {
+    return static_cast<double>(*number);
+  }
+  if (const auto* number = std::get_if<int64_t>(&value->second)) {
+    return static_cast<double>(*number);
+  }
+  return std::nullopt;
+}
+
+bool BoolArgument(const flutter::EncodableMap& map, const char* name,
+                  bool fallback = false) {
+  auto value = map.find(flutter::EncodableValue(name));
+  if (value == map.end()) {
+    return fallback;
+  }
+  if (const auto* boolean = std::get_if<bool>(&value->second)) {
+    return *boolean;
+  }
+  return fallback;
+}
+
+std::wstring Utf8ToWide(const std::string& value) {
+  if (value.empty()) {
+    return {};
+  }
+  const int size = MultiByteToWideChar(CP_UTF8, 0, value.data(),
+                                       static_cast<int>(value.size()), nullptr, 0);
+  std::wstring result(size, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, value.data(),
+                      static_cast<int>(value.size()), result.data(), size);
+  return result;
+}
+
+std::wstring Lower(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](wchar_t character) { return std::towlower(character); });
+  return value;
+}
+
+flutter::EncodableValue UnsupportedSystemVolume() {
+  return flutter::EncodableValue(flutter::EncodableMap{
+      {flutter::EncodableValue("supported"), flutter::EncodableValue(false)},
+      {flutter::EncodableValue("readable"), flutter::EncodableValue(false)},
+      {flutter::EncodableValue("writable"), flutter::EncodableValue(false)},
+      {flutter::EncodableValue("volume"), flutter::EncodableValue(1.0)},
+      {flutter::EncodableValue("muted"), flutter::EncodableValue(false)},
+  });
+}
+
+Microsoft::WRL::ComPtr<IMMDevice> ResolveAudioEndpoint(
+    const flutter::EncodableMap& arguments) {
+  using Microsoft::WRL::ComPtr;
+  ComPtr<IMMDeviceEnumerator> enumerator;
+  if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr,
+                              CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
+    return nullptr;
+  }
+  if (BoolArgument(arguments, "isDefault", true)) {
+    ComPtr<IMMDevice> endpoint;
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(
+            eRender, eMultimedia, &endpoint))) {
+      return endpoint;
+    }
+    return nullptr;
+  }
+
+  std::wstring selector;
+  if (const auto* raw = StringArgument(arguments, "outputName")) {
+    selector = Lower(Utf8ToWide(*raw));
+    constexpr wchar_t prefix[] = L"wasapi/";
+    if (selector.rfind(prefix, 0) == 0) {
+      selector.erase(0, std::size(prefix) - 1);
+    }
+  }
+  std::wstring description;
+  if (const auto* raw = StringArgument(arguments, "outputDescription")) {
+    description = Lower(Utf8ToWide(*raw));
+  }
+  if (selector.empty() && description.empty()) {
+    return nullptr;
+  }
+
+  ComPtr<IMMDeviceCollection> endpoints;
+  if (FAILED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE,
+                                             &endpoints))) {
+    return nullptr;
+  }
+  UINT count = 0;
+  endpoints->GetCount(&count);
+  for (UINT index = 0; index < count; ++index) {
+    ComPtr<IMMDevice> endpoint;
+    if (FAILED(endpoints->Item(index, &endpoint))) {
+      continue;
+    }
+    LPWSTR raw_id = nullptr;
+    std::wstring endpoint_id;
+    if (SUCCEEDED(endpoint->GetId(&raw_id)) && raw_id != nullptr) {
+      endpoint_id = Lower(raw_id);
+      CoTaskMemFree(raw_id);
+    }
+    std::wstring friendly_name;
+    ComPtr<IPropertyStore> properties;
+    if (SUCCEEDED(endpoint->OpenPropertyStore(STGM_READ, &properties))) {
+      PROPVARIANT value;
+      PropVariantInit(&value);
+      if (SUCCEEDED(properties->GetValue(PKEY_Device_FriendlyName, &value)) &&
+          value.vt == VT_LPWSTR && value.pwszVal != nullptr) {
+        friendly_name = Lower(value.pwszVal);
+      }
+      PropVariantClear(&value);
+    }
+    if ((!selector.empty() &&
+         (endpoint_id == selector ||
+          endpoint_id.find(selector) != std::wstring::npos)) ||
+        (!description.empty() && friendly_name == description)) {
+      return endpoint;
+    }
+  }
+  return nullptr;
+}
+
+flutter::EncodableValue SystemVolumeState(
+    const flutter::EncodableMap& arguments, bool apply) {
+  const HRESULT initialized =
+      CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  const bool should_uninitialize = SUCCEEDED(initialized);
+  auto endpoint = ResolveAudioEndpoint(arguments);
+  Microsoft::WRL::ComPtr<IAudioEndpointVolume> volume_control;
+  if (!endpoint ||
+      FAILED(endpoint->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL,
+                                nullptr, &volume_control))) {
+    if (should_uninitialize) {
+      CoUninitialize();
+    }
+    return UnsupportedSystemVolume();
+  }
+  bool writable = true;
+  if (apply) {
+    const auto requested = DoubleArgument(arguments, "volume").value_or(1.0);
+    const float scalar =
+        static_cast<float>(std::clamp(requested, 0.0, 1.0));
+    writable =
+        SUCCEEDED(volume_control->SetMasterVolumeLevelScalar(scalar, nullptr)) &&
+        SUCCEEDED(
+            volume_control->SetMute(BoolArgument(arguments, "muted"), nullptr));
+  }
+  float scalar = 1.0f;
+  BOOL muted = FALSE;
+  UINT step = 0;
+  UINT step_count = 0;
+  const bool readable =
+      SUCCEEDED(volume_control->GetMasterVolumeLevelScalar(&scalar)) &&
+      SUCCEEDED(volume_control->GetMute(&muted));
+  volume_control->GetVolumeStepInfo(&step, &step_count);
+  flutter::EncodableMap state{
+      {flutter::EncodableValue("supported"), flutter::EncodableValue(true)},
+      {flutter::EncodableValue("readable"), flutter::EncodableValue(readable)},
+      {flutter::EncodableValue("writable"), flutter::EncodableValue(writable)},
+      {flutter::EncodableValue("volume"),
+       flutter::EncodableValue(static_cast<double>(scalar))},
+      {flutter::EncodableValue("muted"),
+       flutter::EncodableValue(muted != FALSE)},
+  };
+  if (step_count > 0) {
+    state[flutter::EncodableValue("steps")] =
+        flutter::EncodableValue(static_cast<int64_t>(step_count));
+  }
+  if (should_uninitialize) {
+    CoUninitialize();
+  }
+  return flutter::EncodableValue(std::move(state));
 }
 
 }  // namespace
@@ -375,8 +565,16 @@ void FlutterWindow::ConfigurePlatformChannel() {
           result->Success();
           return;
         }
-        if (call.method_name() == "updateVolume") {
-          result->Success();
+        if (call.method_name() == "getSystemVolume" ||
+            call.method_name() == "setSystemVolume") {
+          const auto* arguments =
+              std::get_if<flutter::EncodableMap>(call.arguments());
+          if (arguments == nullptr) {
+            result->Success(UnsupportedSystemVolume());
+            return;
+          }
+          result->Success(SystemVolumeState(
+              *arguments, call.method_name() == "setSystemVolume"));
           return;
         }
         result->NotImplemented();

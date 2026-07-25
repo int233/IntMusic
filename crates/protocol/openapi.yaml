@@ -219,6 +219,12 @@ paths:
       responses:
         "200":
           description: Playback state.
+  /renderers/{client_id}/volume-state:
+    post:
+      summary: Report the actual system endpoint volume and its capabilities.
+      responses:
+        "200":
+          description: Updated dual-layer zone volume state.
   /tracks/{track_id}/stream:
     get:
       summary: Stream an audio file to a renderer.

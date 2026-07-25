@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.media.AudioManager
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
@@ -76,7 +77,11 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
 
-                "updateVolume" -> result.success(null)
+                "getSystemVolume" -> result.success(systemVolumeState())
+                "setSystemVolume" -> {
+                    val arguments = call.arguments as? Map<*, *> ?: emptyMap<String, Any>()
+                    setSystemVolume(arguments, result)
+                }
                 "selectClientLibraryFolder" -> selectClientLibraryFolder(result)
                 "restoreClientLibraryFolder" -> restoreClientLibraryFolder(call.arguments, result)
                 "downloadDistributionTask" ->
@@ -110,6 +115,63 @@ class MainActivity : FlutterActivity() {
                     result.notImplemented()
                 }
         }
+    }
+
+    private fun systemVolumeState(): Map<String, Any> {
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        val maximum = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val minimum =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+            } else {
+                0
+            }
+        val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        val fixed = audioManager.isVolumeFixed
+        val range = (maximum - minimum).coerceAtLeast(1)
+        return mapOf(
+            "supported" to !fixed,
+            "readable" to true,
+            "writable" to !fixed,
+            "volume" to ((current - minimum).toDouble() / range.toDouble()).coerceIn(0.0, 1.0),
+            "muted" to
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    audioManager.isStreamMute(AudioManager.STREAM_MUSIC)
+                } else {
+                    current <= minimum
+                },
+            "steps" to range,
+        )
+    }
+
+    private fun setSystemVolume(arguments: Map<*, *>, result: MethodChannel.Result) {
+        val audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        if (audioManager.isVolumeFixed) {
+            result.success(systemVolumeState())
+            return
+        }
+        val maximum = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        val minimum =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+            } else {
+                0
+            }
+        val requested = (arguments["volume"] as? Number)?.toDouble()?.coerceIn(0.0, 1.0) ?: 1.0
+        val muted = arguments["muted"] == true
+        val target =
+            (minimum + requested * (maximum - minimum)).toInt().coerceIn(minimum, maximum)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioManager.adjustStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                if (muted) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE,
+                0,
+            )
+        } else if (muted) {
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, minimum, 0)
+        }
+        result.success(systemVolumeState())
     }
 
     private fun selectClientLibraryFolder(result: MethodChannel.Result) {

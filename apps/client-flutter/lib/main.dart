@@ -126,12 +126,14 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, StreamSubscription<bool>> _audioCompleteSubscriptions = {};
   final Map<String, StreamSubscription<bool>> _audioPlayingSubscriptions = {};
   final Map<String, AudioDevice> _rendererAudioDevicesByOutput = {};
+  final Map<String, _SystemVolumeState> _rendererSystemVolumeByOutput = {};
   final Map<String, Map<String, dynamic>> _rendererPlaybackByOutput = {};
   final Map<String, int> _rendererLoadedTrackByOutput = {};
   Player? _rendererDeviceProbe;
   StreamSubscription<List<AudioDevice>>? _rendererDeviceSubscription;
   Future<void>? _rendererAudioInitialization;
   Timer? _rendererHeartbeat;
+  Timer? _systemVolumeMonitor;
   Timer? _rendererPositionReporter;
   Timer? _zoneRefreshTimer;
   Timer? _offlineReconnectTimer;
@@ -204,6 +206,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   bool _backgroundSyncBusy = false;
   bool _detailWarmupBusy = false;
   bool _rendererHeartbeatBusy = false;
+  bool _systemVolumeMonitorBusy = false;
   bool _rendererPositionReportBusy = false;
   bool _zoneRefreshBusy = false;
   bool _eventConnectBusy = false;
@@ -268,6 +271,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _rendererHeartbeat?.cancel();
+    _systemVolumeMonitor?.cancel();
     _rendererPositionReporter?.cancel();
     _zoneRefreshTimer?.cancel();
     _offlineReconnectTimer?.cancel();
@@ -1586,24 +1590,26 @@ class _CoreDashboardState extends State<CoreDashboard>
   }) async {
     await _rendererAudioInitialization;
     final outputPrefix = 'renderer:$_clientId:';
-    final rendererOutputs = _rendererAudioDevicesByOutput.entries
-        .map((entry) {
-          final device = entry.value;
-          final localOutputId = entry.key.startsWith(outputPrefix)
-              ? entry.key.substring(outputPrefix.length)
-              : entry.key;
-          return <String, dynamic>{
-            'id': localOutputId,
-            'name': _rendererAudioDeviceLabel(device),
-            'backend': _usesDesktopRendererBackend
-                ? 'media-kit-libmpv'
-                : 'flutter-audioplayers',
-            'is_default': localOutputId == 'default',
-            'sample_rates': <int>[],
-            'channels': <int>[],
-          };
-        })
-        .toList(growable: false);
+    final rendererOutputs = await Future.wait(
+      _rendererAudioDevicesByOutput.entries.map((entry) async {
+        final device = entry.value;
+        final localOutputId = entry.key.startsWith(outputPrefix)
+            ? entry.key.substring(outputPrefix.length)
+            : entry.key;
+        final systemVolume = await _readSystemVolumeForOutput(entry.key);
+        return <String, dynamic>{
+          'id': localOutputId,
+          'name': _rendererAudioDeviceLabel(device),
+          'backend': _usesDesktopRendererBackend
+              ? 'media-kit-libmpv'
+              : 'flutter-audioplayers',
+          'is_default': localOutputId == 'default',
+          'sample_rates': <int>[],
+          'channels': <int>[],
+          ...systemVolume.toJson(),
+        };
+      }),
+    );
     await _api.postJson('/renderers/register', <String, dynamic>{
       'client_id': _clientId,
       'name': _clientAlias(),
@@ -1684,6 +1690,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       unawaited(_disposeRendererPlayer(outputId));
       _rendererPlaybackByOutput.remove(outputId);
       _rendererLoadedTrackByOutput.remove(outputId);
+      _rendererSystemVolumeByOutput.remove(outputId);
     }
 
     if (_rendererRegisteredCoreUrl != null) {
@@ -1733,8 +1740,66 @@ class _CoreDashboardState extends State<CoreDashboard>
     return description.isEmpty ? device.name : description;
   }
 
+  Future<_SystemVolumeState> _readSystemVolumeForOutput(String outputId) async {
+    final device = _rendererAudioDevicesByOutput[outputId];
+    if (device == null) {
+      return const _SystemVolumeState.unsupported();
+    }
+    final state = await _IntMusicPlatform.instance.getSystemVolume(
+      outputName: device.name,
+      outputDescription: device.description,
+      isDefault: device.name == 'auto' || outputId == _clientOutputId,
+    );
+    _rendererSystemVolumeByOutput[outputId] = state;
+    return state;
+  }
+
+  Future<_SystemVolumeState> _setSystemVolumeForOutput(
+    String outputId,
+    double volume,
+    bool muted,
+  ) async {
+    final device = _rendererAudioDevicesByOutput[outputId];
+    if (device == null) {
+      return const _SystemVolumeState.unsupported();
+    }
+    final state = await _IntMusicPlatform.instance.setSystemVolume(
+      outputName: device.name,
+      outputDescription: device.description,
+      isDefault: device.name == 'auto' || outputId == _clientOutputId,
+      volume: volume,
+      muted: muted,
+    );
+    _rendererSystemVolumeByOutput[outputId] = state;
+    return state;
+  }
+
+  Future<void> _reportRendererSystemVolume(
+    String outputId,
+    _SystemVolumeState state, {
+    int? commandSequence,
+  }) async {
+    final localOutputId = outputId.startsWith(_clientZonePrefix)
+        ? outputId.substring(_clientZonePrefix.length)
+        : outputId;
+    await _api.postJson(
+      '/renderers/${Uri.encodeComponent(_clientId)}/volume-state',
+      <String, dynamic>{
+        'output_id': localOutputId,
+        'volume': state.volume,
+        'muted': state.muted,
+        'supported': state.supported,
+        'readable': state.readable,
+        'writable': state.writable,
+        if (state.steps != null) 'steps': state.steps,
+        'command_sequence': ?commandSequence,
+      },
+    );
+  }
+
   void _startRendererHeartbeat() {
     _rendererHeartbeat?.cancel();
+    _startSystemVolumeMonitor();
     _rendererHeartbeat = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_rendererHeartbeatBusy) return;
       _rendererHeartbeatBusy = true;
@@ -1746,6 +1811,39 @@ class _CoreDashboardState extends State<CoreDashboard>
               }
             })
             .whenComplete(() => _rendererHeartbeatBusy = false),
+      );
+    });
+  }
+
+  void _startSystemVolumeMonitor() {
+    _systemVolumeMonitor?.cancel();
+    _systemVolumeMonitor = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (_systemVolumeMonitorBusy || _offlineMode || !mounted) return;
+      final localOutputs = _rendererAudioDevicesByOutput.keys.toSet();
+      if (localOutputs.isEmpty) return;
+      _systemVolumeMonitorBusy = true;
+      unawaited(
+        Future<void>(() async {
+          try {
+            for (final outputId in localOutputs) {
+              final previous = _rendererSystemVolumeByOutput[outputId];
+              final current = await _readSystemVolumeForOutput(outputId);
+              final changed =
+                  previous == null ||
+                  previous.supported != current.supported ||
+                  previous.writable != current.writable ||
+                  previous.muted != current.muted ||
+                  (previous.volume - current.volume).abs() >= 0.005;
+              if (changed) {
+                await _reportRendererSystemVolume(outputId, current);
+              }
+            }
+          } catch (_) {
+            // Endpoint polling is best-effort and must not affect playback.
+          } finally {
+            _systemVolumeMonitorBusy = false;
+          }
+        }),
       );
     });
   }
@@ -3200,6 +3298,11 @@ class _CoreDashboardState extends State<CoreDashboard>
                   ...zone,
                   'volume': volume['volume'],
                   'muted': volume['muted'],
+                  'volume_mode': volume['mode'],
+                  'player_volume': volume['player_volume'],
+                  'player_muted': volume['player_muted'],
+                  'system_volume': volume['system_volume'],
+                  'system_muted': volume['system_muted'],
                 };
               })
               .toList(growable: false);
@@ -3491,7 +3594,38 @@ class _CoreDashboardState extends State<CoreDashboard>
         _acknowledgeLocallyAppliedRendererCommand(command, outputId);
         return;
       }
+      if (action == 'volume' &&
+          command['volume_mode']?.toString() == 'system') {
+        final volume =
+            (command['volume'] as num?)?.toDouble().clamp(0.0, 1.0) ?? 1.0;
+        final muted = command['muted'] == true;
+        final state = await _setSystemVolumeForOutput(outputId, volume, muted);
+        if (!state.supported || !state.writable) {
+          throw StateError(
+            'System volume is not writable for ${_rendererAudioDeviceLabel(_rendererAudioDevicesByOutput[outputId] ?? AudioDevice.auto())}',
+          );
+        }
+        unawaited(
+          _reportRendererSystemVolume(
+            outputId,
+            state,
+            commandSequence: _intValue(command['sequence']),
+          ).catchError((Object _) {}),
+        );
+        return;
+      }
       final player = await _playerForOutput(outputId);
+      if (action == 'play' || action == 'resume') {
+        final zone = _zoneById(outputId);
+        final playerVolume =
+            (zone?['player_volume'] as num?)?.toDouble().clamp(0.0, 1.0) ?? 1.0;
+        final playerMuted = zone?['player_muted'] == true;
+        await _runRendererAudioOperation(
+          outputId,
+          'restore_player_volume',
+          () => player.setVolume(playerMuted ? 0.0 : playerVolume),
+        );
+      }
       switch (action) {
         case 'play':
           final streamPath = command['stream_path']?.toString();
@@ -6259,14 +6393,79 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   bool _activeZoneMuted() => _zoneById(_activeZoneId())?['muted'] == true;
 
-  Future<void> _setActiveZoneVolume(double volume, {bool? muted}) async {
+  String _activeZoneVolumeMode() =>
+      _zoneById(_activeZoneId())?['volume_mode']?.toString() == 'system'
+      ? 'system'
+      : 'player';
+
+  bool _activeZoneSystemVolumeSupported() {
+    final zone = _zoneById(_activeZoneId());
+    return zone?['system_volume_supported'] == true &&
+        zone?['system_volume_writable'] == true;
+  }
+
+  double _activeZoneVolumeForMode(String mode) {
+    final zone = _zoneById(_activeZoneId());
+    final key = mode == 'system' ? 'system_volume' : 'player_volume';
+    return ((zone?[key] as num?)?.toDouble() ?? _activeZoneVolume()).clamp(
+      0.0,
+      1.0,
+    );
+  }
+
+  bool _activeZoneMutedForMode(String mode) {
+    final zone = _zoneById(_activeZoneId());
+    final key = mode == 'system' ? 'system_muted' : 'player_muted';
+    return zone?[key] == true;
+  }
+
+  Future<void> _setActiveZoneVolumeMode(String mode) async {
+    final normalizedMode = mode == 'system' ? 'system' : 'player';
+    if (normalizedMode == 'system' && !_activeZoneSystemVolumeSupported()) {
+      return;
+    }
+    if (normalizedMode == 'system') {
+      final localOutputId = _clientOutputForZone(_activeZoneId());
+      if (localOutputId != null) {
+        final current = await _readSystemVolumeForOutput(localOutputId);
+        if (current.supported && current.writable) {
+          await _setActiveZoneVolume(
+            current.volume,
+            muted: current.muted,
+            mode: normalizedMode,
+          );
+          return;
+        }
+      }
+    }
+    await _setActiveZoneVolume(
+      _activeZoneVolumeForMode(normalizedMode),
+      muted: _activeZoneMutedForMode(normalizedMode),
+      mode: normalizedMode,
+    );
+  }
+
+  Future<void> _setActiveZoneVolume(
+    double volume, {
+    bool? muted,
+    String? mode,
+  }) async {
     final zoneId = _activeZoneId();
     final intentId = _beginPlaybackIntent(zoneId, 'volume');
+    final volumeMode = mode ?? _activeZoneVolumeMode();
     final normalized = volume.clamp(0.0, 1.0);
     final effectiveMuted = muted ?? (normalized <= 0.001);
     if (_offlineMode) {
-      final player = await _playerForOutput(_clientOutputId);
-      await player.setVolume(effectiveMuted ? 0 : normalized);
+      if (volumeMode == 'system') {
+        await _setSystemVolumeForOutput(
+          _clientOutputId,
+          normalized,
+          effectiveMuted,
+        );
+      } else {
+        final player = await _playerForOutput(_clientOutputId);
+        await player.setVolume(effectiveMuted ? 0 : normalized);
+      }
       if (mounted) {
         setState(() {
           _zones = _zones
@@ -6276,6 +6475,15 @@ class _CoreDashboardState extends State<CoreDashboard>
                   ...zone,
                   'volume': normalized,
                   'muted': effectiveMuted,
+                  'volume_mode': volumeMode,
+                  if (volumeMode == 'system')
+                    'system_volume': normalized
+                  else
+                    'player_volume': normalized,
+                  if (volumeMode == 'system')
+                    'system_muted': effectiveMuted
+                  else
+                    'player_muted': effectiveMuted,
                 };
               })
               .toList(growable: false);
@@ -6284,13 +6492,31 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final localOutputId = _clientOutputForZone(zoneId);
-    if (localOutputId != null && _hasActiveRendererSource(zoneId)) {
-      final player = await _playerForOutput(localOutputId);
-      await _runRendererAudioOperation(
-        localOutputId,
-        'local_volume',
-        () => player.setVolume(effectiveMuted ? 0 : normalized),
-      );
+    _SystemVolumeState? appliedSystemVolume;
+    if (localOutputId != null &&
+        (volumeMode == 'system' || _hasActiveRendererSource(zoneId))) {
+      if (volumeMode == 'system') {
+        appliedSystemVolume = await _setSystemVolumeForOutput(
+          localOutputId,
+          normalized,
+          effectiveMuted,
+        );
+        if (!appliedSystemVolume.supported || !appliedSystemVolume.writable) {
+          if (mounted) {
+            setState(
+              () => _error = 'System volume is unavailable for this output',
+            );
+          }
+          return;
+        }
+      } else {
+        final player = await _playerForOutput(localOutputId);
+        await _runRendererAudioOperation(
+          localOutputId,
+          'local_volume',
+          () => player.setVolume(effectiveMuted ? 0 : normalized),
+        );
+      }
       _markPlaybackIntentAppliedLocally(intentId);
       if (mounted) {
         setState(() {
@@ -6300,8 +6526,17 @@ class _CoreDashboardState extends State<CoreDashboard>
                 if (zone['id']?.toString() != zoneId) return zone;
                 return <String, dynamic>{
                   ...zone,
-                  'volume': normalized,
-                  'muted': effectiveMuted,
+                  'volume': appliedSystemVolume?.volume ?? normalized,
+                  'muted': appliedSystemVolume?.muted ?? effectiveMuted,
+                  'volume_mode': volumeMode,
+                  if (volumeMode == 'system')
+                    'system_volume': appliedSystemVolume?.volume ?? normalized
+                  else
+                    'player_volume': normalized,
+                  if (volumeMode == 'system')
+                    'system_muted': appliedSystemVolume?.muted ?? effectiveMuted
+                  else
+                    'player_muted': effectiveMuted,
                 };
               })
               .toList(growable: false);
@@ -6315,11 +6550,20 @@ class _CoreDashboardState extends State<CoreDashboard>
           _playbackCommandBody(<String, dynamic>{
             'volume': normalized,
             'muted': effectiveMuted,
+            'mode': volumeMode,
           }, intentId: intentId),
         ),
       ),
     );
     if (!mounted || result == null) {
+      if (localOutputId != null && appliedSystemVolume != null) {
+        unawaited(
+          _reportRendererSystemVolume(
+            localOutputId,
+            appliedSystemVolume,
+          ).catchError((Object _) {}),
+        );
+      }
       return;
     }
     setState(() {
@@ -6331,18 +6575,27 @@ class _CoreDashboardState extends State<CoreDashboard>
             }
             return <String, dynamic>{
               ...zone,
-              'volume': result['volume'],
-              'muted': result['muted'],
+              'volume': appliedSystemVolume?.volume ?? result['volume'],
+              'muted': appliedSystemVolume?.muted ?? result['muted'],
+              'volume_mode': result['mode'],
+              'player_volume': result['player_volume'],
+              'player_muted': result['player_muted'],
+              'system_volume':
+                  appliedSystemVolume?.volume ?? result['system_volume'],
+              'system_muted':
+                  appliedSystemVolume?.muted ?? result['system_muted'],
             };
           })
           .toList(growable: false);
     });
-    unawaited(
-      _IntMusicPlatform.instance.updateVolume(
-        normalized,
-        muted: effectiveMuted,
-      ),
-    );
+    if (localOutputId != null && appliedSystemVolume != null) {
+      unawaited(
+        _reportRendererSystemVolume(
+          localOutputId,
+          appliedSystemVolume,
+        ).catchError((Object _) {}),
+      );
+    }
   }
 
   String _activeZoneId() =>
@@ -6805,6 +7058,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       playbackMode: _playbackMode,
       volume: _activeZoneVolume(),
       muted: _activeZoneMuted(),
+      volumeMode: _activeZoneVolumeMode(),
+      systemVolumeSupported: _activeZoneSystemVolumeSupported(),
       onResume: _resumePlayback,
       onPause: _pausePlayback,
       onPrevious: _playPreviousTrack,
@@ -6814,6 +7069,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       onToggleMute: () => unawaited(
         _setActiveZoneVolume(_activeZoneVolume(), muted: !_activeZoneMuted()),
       ),
+      onVolumeModeChanged: (mode) => unawaited(_setActiveZoneVolumeMode(mode)),
       onCycleMode: _cyclePlaybackMode,
       onShowModeMenu: _showPlaybackModeMenu,
       onShowQueue: _showQueueSheet,
@@ -6980,6 +7236,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       playbackMode: _playbackMode,
       volume: _activeZoneVolume(),
       muted: _activeZoneMuted(),
+      volumeMode: _activeZoneVolumeMode(),
+      systemVolumeSupported: _activeZoneSystemVolumeSupported(),
       onResume: (_) => _resumePlayback(),
       onPause: (_) => _pausePlayback(),
       onPrevious: _playPreviousTrack,
@@ -6993,6 +7251,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       onToggleMute: () => unawaited(
         _setActiveZoneVolume(_activeZoneVolume(), muted: !_activeZoneMuted()),
       ),
+      onVolumeModeChanged: (mode) => unawaited(_setActiveZoneVolumeMode(mode)),
       onToggleFavorite: _toggleFavorite,
       onOpenTrack: _openTrackDetail,
     );

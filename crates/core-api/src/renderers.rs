@@ -86,6 +86,10 @@ impl RendererRegistry {
                     node_name: Some(registration.name.clone()),
                     is_online: true,
                     is_remote: true,
+                    system_volume_supported: output.system_volume_supported,
+                    system_volume_readable: output.system_volume_readable,
+                    system_volume_writable: output.system_volume_writable,
+                    system_volume_steps: output.system_volume_steps,
                 }
             })
             .collect::<Vec<_>>();
@@ -158,6 +162,15 @@ impl RendererRegistry {
                         },
                         volume: 1.0,
                         muted: false,
+                        volume_mode: protocol::VolumeControlMode::Player,
+                        player_volume: 1.0,
+                        player_muted: false,
+                        system_volume: None,
+                        system_muted: None,
+                        system_volume_supported: output.system_volume_supported,
+                        system_volume_readable: output.system_volume_readable,
+                        system_volume_writable: output.system_volume_writable,
+                        system_volume_steps: output.system_volume_steps,
                         track_id: if online { state.track_id } else { None },
                         track_title: if online { state.track_title } else { None },
                         position_ms: if online { state.position_ms } else { 0 },
@@ -183,6 +196,51 @@ impl RendererRegistry {
             .filter(|node| node.is_online(now))
             .find(|node| node.outputs.iter().any(|output| output.id == output_id))
             .map(|node| node.client_id.clone())
+    }
+
+    pub async fn system_volume_writable_for_output(&self, output_id: &str) -> bool {
+        let now = Utc::now();
+        self.inner
+            .read()
+            .await
+            .values()
+            .filter(|node| node.is_online(now))
+            .flat_map(|node| node.outputs.iter())
+            .find(|output| output.id == output_id)
+            .is_some_and(|output| output.system_volume_supported && output.system_volume_writable)
+    }
+
+    pub async fn update_system_volume_capability(
+        &self,
+        client_id: &str,
+        output_id: &str,
+        supported: bool,
+        readable: bool,
+        writable: bool,
+        steps: Option<u32>,
+    ) -> Result<()> {
+        let mut guard = self.inner.write().await;
+        let Some(node) = guard.get_mut(client_id) else {
+            bail!("renderer {client_id} is not registered");
+        };
+        node.last_seen_at = Utc::now();
+        let output_id = if output_id.starts_with("renderer:") {
+            output_id.to_string()
+        } else {
+            remote_output_id(client_id, output_id)
+        };
+        let Some(output) = node
+            .outputs
+            .iter_mut()
+            .find(|output| output.id == output_id)
+        else {
+            bail!("renderer output {output_id} is not registered");
+        };
+        output.system_volume_supported = supported;
+        output.system_volume_readable = readable;
+        output.system_volume_writable = writable;
+        output.system_volume_steps = steps;
+        Ok(())
     }
 
     pub async fn state_for_output(&self, output_id: &str) -> Option<PlaybackState> {
@@ -377,6 +435,12 @@ mod tests {
                 is_default: true,
                 sample_rates: Vec::new(),
                 channels: Vec::new(),
+                system_volume_supported: true,
+                system_volume_readable: true,
+                system_volume_writable: true,
+                system_volume_steps: Some(100),
+                system_volume: Some(0.5),
+                system_muted: Some(false),
             }],
             reset_playback: false,
             request_playback_sync: false,

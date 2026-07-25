@@ -40,6 +40,54 @@ class _PlatformCapabilities {
   }
 }
 
+@immutable
+class _SystemVolumeState {
+  const _SystemVolumeState({
+    required this.supported,
+    required this.readable,
+    required this.writable,
+    required this.volume,
+    required this.muted,
+    this.steps,
+  });
+
+  const _SystemVolumeState.unsupported()
+    : supported = false,
+      readable = false,
+      writable = false,
+      volume = 1,
+      muted = false,
+      steps = null;
+
+  final bool supported;
+  final bool readable;
+  final bool writable;
+  final double volume;
+  final bool muted;
+  final int? steps;
+
+  factory _SystemVolumeState.fromMap(Map<dynamic, dynamic>? value) {
+    final map = value ?? const <dynamic, dynamic>{};
+    return _SystemVolumeState(
+      supported: map['supported'] == true,
+      readable: map['readable'] == true,
+      writable: map['writable'] == true,
+      volume: ((map['volume'] as num?)?.toDouble() ?? 1).clamp(0.0, 1.0),
+      muted: map['muted'] == true,
+      steps: (map['steps'] as num?)?.toInt(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'system_volume_supported': supported,
+    'system_volume_readable': readable,
+    'system_volume_writable': writable,
+    if (steps != null) 'system_volume_steps': steps,
+    if (readable) 'system_volume': volume,
+    if (readable) 'system_muted': muted,
+  };
+}
+
 class _IntMusicPlatform {
   _IntMusicPlatform._();
 
@@ -157,16 +205,63 @@ class _IntMusicPlatform {
   // bridge avoids passing app state through every native sync call.
   String _activeCoreBaseUrlForPlatform = '';
 
-  Future<void> updateVolume(double volume, {required bool muted}) async {
+  Map<String, dynamic> _systemVolumeArguments({
+    required String outputName,
+    required String outputDescription,
+    required bool isDefault,
+  }) => <String, dynamic>{
+    'outputName': outputName,
+    'outputDescription': outputDescription,
+    'isDefault': isDefault,
+  };
+
+  Future<_SystemVolumeState> getSystemVolume({
+    required String outputName,
+    required String outputDescription,
+    required bool isDefault,
+  }) async {
     try {
-      await _channel.invokeMethod<void>('updateVolume', <String, dynamic>{
-        'volume': volume.clamp(0.0, 1.0),
-        'muted': muted,
-      });
+      final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'getSystemVolume',
+        _systemVolumeArguments(
+          outputName: outputName,
+          outputDescription: outputDescription,
+          isDefault: isDefault,
+        ),
+      );
+      return _SystemVolumeState.fromMap(result);
     } on MissingPluginException {
-      // Optional integration.
+      return const _SystemVolumeState.unsupported();
     } on PlatformException {
-      // Optional integration.
+      return const _SystemVolumeState.unsupported();
+    }
+  }
+
+  Future<_SystemVolumeState> setSystemVolume({
+    required String outputName,
+    required String outputDescription,
+    required bool isDefault,
+    required double volume,
+    required bool muted,
+  }) async {
+    try {
+      final result = await _channel.invokeMapMethod<dynamic, dynamic>(
+        'setSystemVolume',
+        <String, dynamic>{
+          ..._systemVolumeArguments(
+            outputName: outputName,
+            outputDescription: outputDescription,
+            isDefault: isDefault,
+          ),
+          'volume': volume.clamp(0.0, 1.0),
+          'muted': muted,
+        },
+      );
+      return _SystemVolumeState.fromMap(result);
+    } on MissingPluginException {
+      return const _SystemVolumeState.unsupported();
+    } on PlatformException {
+      return const _SystemVolumeState.unsupported();
     }
   }
 

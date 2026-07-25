@@ -108,6 +108,8 @@ class _PlaybackBar extends StatelessWidget {
     required this.playbackMode,
     required this.volume,
     required this.muted,
+    required this.volumeMode,
+    required this.systemVolumeSupported,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
@@ -115,6 +117,7 @@ class _PlaybackBar extends StatelessWidget {
     required this.onSeek,
     required this.onVolumeChanged,
     required this.onToggleMute,
+    required this.onVolumeModeChanged,
     required this.onCycleMode,
     required this.onShowModeMenu,
     required this.onShowQueue,
@@ -133,6 +136,8 @@ class _PlaybackBar extends StatelessWidget {
   final _PlaybackMode playbackMode;
   final double volume;
   final bool muted;
+  final String volumeMode;
+  final bool systemVolumeSupported;
   final VoidCallback onResume;
   final VoidCallback onPause;
   final VoidCallback onPrevious;
@@ -140,6 +145,7 @@ class _PlaybackBar extends StatelessWidget {
   final Future<void> Function(int) onSeek;
   final ValueChanged<double> onVolumeChanged;
   final VoidCallback onToggleMute;
+  final ValueChanged<String> onVolumeModeChanged;
   final VoidCallback onCycleMode;
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
@@ -326,8 +332,12 @@ class _PlaybackBar extends StatelessWidget {
                       _VolumeControl(
                         volume: volume,
                         muted: muted,
+                        mode: volumeMode,
+                        systemVolumeSupported: systemVolumeSupported,
+                        targetLabel: targetLabel,
                         onChanged: onVolumeChanged,
                         onToggleMute: onToggleMute,
+                        onModeChanged: onVolumeModeChanged,
                       ),
                     ],
                     if (!showModeInline || !showDeviceInline)
@@ -426,12 +436,20 @@ class _VolumeControl extends StatelessWidget {
     required this.muted,
     required this.onChanged,
     required this.onToggleMute,
+    this.mode = 'player',
+    this.systemVolumeSupported = false,
+    this.targetLabel,
+    this.onModeChanged,
   });
 
   final double volume;
   final bool muted;
   final ValueChanged<double> onChanged;
   final VoidCallback onToggleMute;
+  final String mode;
+  final bool systemVolumeSupported;
+  final String? targetLabel;
+  final ValueChanged<String>? onModeChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -449,13 +467,17 @@ class _VolumeControl extends StatelessWidget {
             _showAnchoredPopup<void>(
               context: buttonContext,
               anchorContext: buttonContext,
-              width: 112,
-              maxHeight: 280,
+              width: 248,
+              maxHeight: 360,
               child: _VerticalVolumePanel(
                 volume: value,
                 muted: muted,
+                mode: mode,
+                systemVolumeSupported: systemVolumeSupported,
+                targetLabel: targetLabel,
                 onChanged: onChanged,
                 onToggleMute: onToggleMute,
+                onModeChanged: onModeChanged,
               ),
             ),
           ),
@@ -472,12 +494,20 @@ class _VerticalVolumePanel extends StatefulWidget {
     required this.muted,
     required this.onChanged,
     required this.onToggleMute,
+    required this.mode,
+    required this.systemVolumeSupported,
+    this.targetLabel,
+    this.onModeChanged,
   });
 
   final double volume;
   final bool muted;
   final ValueChanged<double> onChanged;
   final VoidCallback onToggleMute;
+  final String mode;
+  final bool systemVolumeSupported;
+  final String? targetLabel;
+  final ValueChanged<String>? onModeChanged;
 
   @override
   State<_VerticalVolumePanel> createState() => _VerticalVolumePanelState();
@@ -501,15 +531,61 @@ class _VerticalVolumePanelState extends State<_VerticalVolumePanel> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (widget.targetLabel?.isNotEmpty == true) ...[
+            Text(
+              widget.targetLabel!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<String>(
+              showSelectedIcon: false,
+              segments: <ButtonSegment<String>>[
+                ButtonSegment<String>(
+                  value: 'player',
+                  icon: const Icon(Icons.graphic_eq_rounded, size: 17),
+                  label: Text(_tr(context, 'Player')),
+                ),
+                ButtonSegment<String>(
+                  value: 'system',
+                  enabled: widget.systemVolumeSupported,
+                  icon: const Icon(Icons.computer_rounded, size: 17),
+                  label: Text(_tr(context, 'System')),
+                ),
+              ],
+              selected: <String>{widget.mode == 'system' ? 'system' : 'player'},
+              onSelectionChanged: widget.onModeChanged == null
+                  ? null
+                  : (selection) {
+                      final mode = selection.first;
+                      if (mode == widget.mode) return;
+                      widget.onModeChanged!(mode);
+                      Navigator.of(context).maybePop();
+                    },
+            ),
+          ),
+          const SizedBox(height: 12),
           Text(
             '${(_value * 100).round()}%',
             style: Theme.of(
               context,
             ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
           ),
+          Text(
+            _tr(context, widget.mode == 'system' ? 'System' : 'Player'),
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: IntMusicTheme.of(context).textSecondary,
+            ),
+          ),
           const SizedBox(height: 4),
           SizedBox(
-            height: 170,
+            height: 125,
             child: RotatedBox(
               quarterTurns: 3,
               child: Slider(

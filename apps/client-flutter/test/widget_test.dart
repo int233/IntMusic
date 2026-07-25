@@ -164,6 +164,8 @@ void main() {
 
     expect(find.byKey(const Key('vertical-volume-panel')), findsOneWidget);
     expect(find.text('100%'), findsOneWidget);
+    expect(find.text('Player'), findsWidgets);
+    expect(find.text('System'), findsOneWidget);
   });
 
   testWidgets('animates between split and compact playback layouts', (

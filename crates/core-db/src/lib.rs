@@ -21,7 +21,7 @@ use protocol::{
     RelatedReleaseTrackSummary, ReleaseEditionSummary, ReplacePlaybackQueue, ScanProblem,
     TrackDetail, TrackEditSnapshot, TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField,
     TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateArtistAsset, UpdateArtistProfile,
-    UpdateArtistVisual, UpdatePlaylist, ZoneVolume,
+    UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -4743,36 +4743,136 @@ pub async fn step_playback_queue(
 
 pub async fn zone_volume(pool: &DbPool, zone_id: &str) -> Result<ZoneVolume> {
     ensure_zone_preferences(pool, zone_id).await?;
-    let row = sqlx::query("SELECT volume, muted FROM zone_preferences WHERE zone_id = ?1")
-        .bind(zone_id)
-        .fetch_one(pool)
-        .await?;
+    let row = sqlx::query(
+        r#"
+        SELECT
+            volume_mode,
+            player_volume,
+            player_muted,
+            system_volume,
+            system_muted
+        FROM zone_preferences
+        WHERE zone_id = ?1
+        "#,
+    )
+    .bind(zone_id)
+    .fetch_one(pool)
+    .await?;
+    let mode = match row.try_get::<String, _>("volume_mode")?.as_str() {
+        "system" => VolumeControlMode::System,
+        _ => VolumeControlMode::Player,
+    };
+    let player_volume = row.try_get::<f64, _>("player_volume")? as f32;
+    let player_muted = row.try_get::<i64, _>("player_muted")? != 0;
+    let system_volume = row
+        .try_get::<Option<f64>, _>("system_volume")?
+        .map(|value| value as f32);
+    let system_muted = row
+        .try_get::<Option<i64>, _>("system_muted")?
+        .map(|value| value != 0);
+    let (volume, muted) = match mode {
+        VolumeControlMode::Player => (player_volume, player_muted),
+        VolumeControlMode::System => (
+            system_volume.unwrap_or(player_volume),
+            system_muted.unwrap_or(player_muted),
+        ),
+    };
     Ok(ZoneVolume {
         zone_id: zone_id.to_string(),
-        volume: row.try_get::<f64, _>("volume")? as f32,
-        muted: row.try_get::<i64, _>("muted")? != 0,
+        volume,
+        muted,
+        mode,
+        player_volume,
+        player_muted,
+        system_volume,
+        system_muted,
     })
 }
 
 pub async fn set_zone_volume(
     pool: &DbPool,
     zone_id: &str,
+    mode: VolumeControlMode,
     volume: f32,
     muted: Option<bool>,
+) -> Result<ZoneVolume> {
+    ensure_zone_preferences(pool, zone_id).await?;
+    let volume = volume.clamp(0.0, 1.0) as f64;
+    let muted = muted.map(|value| if value { 1_i64 } else { 0_i64 });
+    let now = Utc::now().to_rfc3339();
+    match mode {
+        VolumeControlMode::Player => {
+            sqlx::query(
+                r#"
+                UPDATE zone_preferences
+                SET volume_mode = 'player',
+                    volume = ?2,
+                    muted = COALESCE(?3, player_muted),
+                    player_volume = ?2,
+                    player_muted = COALESCE(?3, player_muted),
+                    updated_at = ?4
+                WHERE zone_id = ?1
+                "#,
+            )
+            .bind(zone_id)
+            .bind(volume)
+            .bind(muted)
+            .bind(now)
+            .execute(pool)
+            .await?;
+        }
+        VolumeControlMode::System => {
+            sqlx::query(
+                r#"
+                UPDATE zone_preferences
+                SET volume_mode = 'system',
+                    volume = ?2,
+                    muted = COALESCE(?3, COALESCE(system_muted, 0)),
+                    system_volume = ?2,
+                    system_muted = COALESCE(?3, COALESCE(system_muted, 0)),
+                    updated_at = ?4
+                WHERE zone_id = ?1
+                "#,
+            )
+            .bind(zone_id)
+            .bind(volume)
+            .bind(muted)
+            .bind(now)
+            .execute(pool)
+            .await?;
+        }
+    }
+    zone_volume(pool, zone_id).await
+}
+
+pub async fn set_zone_system_volume_state(
+    pool: &DbPool,
+    zone_id: &str,
+    volume: f32,
+    muted: bool,
 ) -> Result<ZoneVolume> {
     ensure_zone_preferences(pool, zone_id).await?;
     sqlx::query(
         r#"
         UPDATE zone_preferences
-        SET volume = ?2,
-            muted = COALESCE(?3, muted),
+        SET system_volume = CASE
+                WHEN ?3 = 1 AND ?2 <= 0.001 THEN system_volume
+                ELSE ?2
+            END,
+            system_muted = ?3,
+            volume = CASE
+                WHEN volume_mode != 'system' THEN volume
+                WHEN ?3 = 1 AND ?2 <= 0.001 THEN COALESCE(system_volume, volume)
+                ELSE ?2
+            END,
+            muted = CASE WHEN volume_mode = 'system' THEN ?3 ELSE muted END,
             updated_at = ?4
         WHERE zone_id = ?1
         "#,
     )
     .bind(zone_id)
     .bind(volume.clamp(0.0, 1.0) as f64)
-    .bind(muted.map(|value| if value { 1_i64 } else { 0_i64 }))
+    .bind(if muted { 1_i64 } else { 0_i64 })
     .bind(Utc::now().to_rfc3339())
     .execute(pool)
     .await?;
@@ -6615,6 +6715,15 @@ pub async fn list_zones(pool: &DbPool) -> Result<Vec<protocol::ZoneSummary>> {
                 state,
                 volume: row.try_get::<f64, _>("volume")? as f32,
                 muted: false,
+                volume_mode: VolumeControlMode::Player,
+                player_volume: row.try_get::<f64, _>("volume")? as f32,
+                player_muted: false,
+                system_volume: None,
+                system_muted: None,
+                system_volume_supported: false,
+                system_volume_readable: false,
+                system_volume_writable: false,
+                system_volume_steps: None,
                 track_id: None,
                 track_title: None,
                 position_ms: 0,
@@ -7666,7 +7775,7 @@ mod tests {
             .expect("repeat all wraps forward");
         assert_eq!(next, 1);
 
-        let volume = set_zone_volume(&pool, "zone-b", 1.7, Some(false))
+        let volume = set_zone_volume(&pool, "zone-b", VolumeControlMode::Player, 1.7, Some(false))
             .await
             .expect("set volume");
         assert_eq!(volume.volume, 1.0);
@@ -7674,6 +7783,31 @@ mod tests {
         let persisted = zone_volume(&pool, "zone-b").await.expect("get volume");
         assert_eq!(persisted.volume, 1.0);
         assert!(!persisted.muted);
+
+        let system = set_zone_system_volume_state(&pool, "zone-b", 0.35, true)
+            .await
+            .expect("report system volume");
+        assert_eq!(system.mode, VolumeControlMode::Player);
+        assert_eq!(system.volume, 1.0);
+        assert_eq!(system.system_volume, Some(0.35));
+        assert_eq!(system.system_muted, Some(true));
+
+        let selected =
+            set_zone_volume(&pool, "zone-b", VolumeControlMode::System, 0.35, Some(true))
+                .await
+                .expect("select system volume");
+        assert_eq!(selected.mode, VolumeControlMode::System);
+        assert_eq!(selected.volume, 0.35);
+        assert!(selected.muted);
+        assert_eq!(selected.player_volume, 1.0);
+        assert!(!selected.player_muted);
+
+        let muted_zero = set_zone_system_volume_state(&pool, "zone-b", 0.0, true)
+            .await
+            .expect("report an endpoint that exposes mute as zero volume");
+        assert_eq!(muted_zero.volume, 0.35);
+        assert_eq!(muted_zero.system_volume, Some(0.35));
+        assert!(muted_zero.muted);
 
         close_test_pool(pool, path).await;
     }

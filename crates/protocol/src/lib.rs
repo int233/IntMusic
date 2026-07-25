@@ -882,6 +882,22 @@ pub struct OutputDevice {
     pub node_name: Option<String>,
     pub is_online: bool,
     pub is_remote: bool,
+    #[serde(default)]
+    pub system_volume_supported: bool,
+    #[serde(default)]
+    pub system_volume_readable: bool,
+    #[serde(default)]
+    pub system_volume_writable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_volume_steps: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeControlMode {
+    #[default]
+    Player,
+    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -895,6 +911,24 @@ pub struct ZoneSummary {
     pub volume: f32,
     #[serde(default)]
     pub muted: bool,
+    #[serde(default)]
+    pub volume_mode: VolumeControlMode,
+    #[serde(default = "default_volume")]
+    pub player_volume: f32,
+    #[serde(default)]
+    pub player_muted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_volume: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_muted: Option<bool>,
+    #[serde(default)]
+    pub system_volume_supported: bool,
+    #[serde(default)]
+    pub system_volume_readable: bool,
+    #[serde(default)]
+    pub system_volume_writable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_volume_steps: Option<u32>,
     pub track_id: Option<i64>,
     pub track_title: Option<String>,
     pub position_ms: u64,
@@ -989,6 +1023,8 @@ pub struct PlaybackModeUpdate {
 pub struct ZoneVolumeUpdate {
     pub volume: f32,
     pub muted: Option<bool>,
+    #[serde(default)]
+    pub mode: VolumeControlMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -996,6 +1032,16 @@ pub struct ZoneVolume {
     pub zone_id: String,
     pub volume: f32,
     pub muted: bool,
+    #[serde(default)]
+    pub mode: VolumeControlMode,
+    #[serde(default = "default_volume")]
+    pub player_volume: f32,
+    #[serde(default)]
+    pub player_muted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_volume: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_muted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1048,6 +1094,18 @@ pub struct RendererOutputRegistration {
     pub is_default: bool,
     pub sample_rates: Vec<u32>,
     pub channels: Vec<u16>,
+    #[serde(default)]
+    pub system_volume_supported: bool,
+    #[serde(default)]
+    pub system_volume_readable: bool,
+    #[serde(default)]
+    pub system_volume_writable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_volume_steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_volume: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_muted: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1083,6 +1141,25 @@ pub struct RendererCommandPayload {
     pub volume: Option<f32>,
     #[serde(default)]
     pub muted: Option<bool>,
+    #[serde(default)]
+    pub volume_mode: VolumeControlMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RendererVolumeStateReport {
+    pub output_id: String,
+    pub volume: f32,
+    pub muted: bool,
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub readable: bool,
+    #[serde(default)]
+    pub writable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1150,6 +1227,10 @@ pub struct PlaybackStats {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_volume() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

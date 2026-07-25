@@ -38,6 +38,10 @@ pub fn list_output_devices() -> Result<Vec<OutputDevice>> {
             node_name: Some("Core local".to_string()),
             is_online: true,
             is_remote: false,
+            system_volume_supported: false,
+            system_volume_readable: false,
+            system_volume_writable: false,
+            system_volume_steps: None,
         });
     }
 
