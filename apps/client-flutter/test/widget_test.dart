@@ -125,6 +125,34 @@ void main() {
     expect(preferences.getString('intmusic.playback_regions.sort'), 'name');
   });
 
+  testWidgets('exposes and persists the playback diagnostics log switch', (
+    tester,
+  ) async {
+    await pumpDesktop(tester);
+    await tester.tap(find.byIcon(Icons.tune_outlined).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 280));
+
+    final scroll = find.byKey(const Key('settings-scroll-view'));
+    final setting = find.text('Playback diagnostics log');
+    await tester.scrollUntilVisible(
+      setting,
+      320,
+      scrollable: find
+          .descendant(of: scroll, matching: find.byType(Scrollable))
+          .first,
+    );
+    await tester.drag(scroll, const Offset(0, -180));
+    await tester.pump();
+    expect(setting, findsOneWidget);
+    expect(find.text('Export log'), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('diagnostic-logging-setting')));
+    await tester.pump();
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getBool('intmusic.diagnostics.logging'), isFalse);
+  });
+
   testWidgets('opens a vertical volume control from the playback bar', (
     tester,
   ) async {

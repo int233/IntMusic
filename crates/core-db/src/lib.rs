@@ -5000,7 +5000,16 @@ pub async fn track_media_profile(
                 file.relative_path,
                 root.external_id AS root_external_id,
                 file.client_file_id,
-                replica.last_verified_at
+                replica.last_verified_at,
+                file.extension,
+                file.size_bytes,
+                file.modified_at,
+                file.codec,
+                file.bitrate,
+                file.sample_rate,
+                file.bit_depth,
+                file.channels,
+                file.duration_ms
             FROM media_replicas replica
             LEFT JOIN devices device ON device.id = replica.device_id
             LEFT JOIN files file ON file.id = replica.file_id
@@ -5016,6 +5025,7 @@ pub async fn track_media_profile(
             .into_iter()
             .map(|replica_row| {
                 let last_verified_at: Option<String> = replica_row.try_get("last_verified_at")?;
+                let modified_at: Option<String> = replica_row.try_get("modified_at")?;
                 Ok(MediaReplicaSummary {
                     id: replica_row.try_get("id")?,
                     file_id: replica_row.try_get("file_id")?,
@@ -5028,6 +5038,15 @@ pub async fn track_media_profile(
                     root_external_id: replica_row.try_get("root_external_id")?,
                     client_file_id: replica_row.try_get("client_file_id")?,
                     last_verified_at: last_verified_at.map(parse_datetime).transpose()?,
+                    extension: replica_row.try_get("extension")?,
+                    size_bytes: replica_row.try_get("size_bytes")?,
+                    modified_at: modified_at.map(parse_datetime).transpose()?,
+                    codec: replica_row.try_get("codec")?,
+                    bitrate: replica_row.try_get("bitrate")?,
+                    sample_rate: replica_row.try_get("sample_rate")?,
+                    bit_depth: replica_row.try_get("bit_depth")?,
+                    channels: replica_row.try_get("channels")?,
+                    duration_ms: replica_row.try_get("duration_ms")?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -8324,6 +8343,19 @@ mod tests {
             .iter()
             .any(|replica| replica.device_id.as_deref() == Some("dev-b")
                 && replica.root_external_id.as_deref() == Some("root-b")));
+        let replica = media.variants[0]
+            .replicas
+            .iter()
+            .find(|replica| replica.device_id.as_deref() == Some("dev-a"))
+            .expect("client replica metadata");
+        assert_eq!(replica.extension.as_deref(), Some("flac"));
+        assert_eq!(replica.size_bytes, Some(4_096));
+        assert_eq!(replica.codec.as_deref(), Some("flac"));
+        assert_eq!(replica.bitrate, Some(2_400_000));
+        assert_eq!(replica.sample_rate, Some(96_000));
+        assert_eq!(replica.bit_depth, Some(24));
+        assert_eq!(replica.channels, Some(2));
+        assert!(replica.modified_at.is_some());
 
         let reconciled = upsert_client_library_manifest(
             &pool,

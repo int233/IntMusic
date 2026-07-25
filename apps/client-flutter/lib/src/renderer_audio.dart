@@ -5,6 +5,8 @@ bool get _usesDesktopRendererBackend => Platform.isMacOS || Platform.isWindows;
 abstract class _RendererAudioPlayer {
   Stream<bool> get completed;
 
+  Stream<bool> get playing;
+
   Future<void> stop();
 
   Future<void> open(String uri, {bool localFile = false});
@@ -31,6 +33,9 @@ class _MediaKitRendererAudioPlayer implements _RendererAudioPlayer {
 
   @override
   Stream<bool> get completed => player.stream.completed;
+
+  @override
+  Stream<bool> get playing => player.stream.playing;
 
   @override
   Future<void> stop() => player.stop();
@@ -70,6 +75,11 @@ class _MobileRendererAudioPlayer implements _RendererAudioPlayer {
 
   @override
   Stream<bool> get completed => player.onPlayerComplete.map((_) => true);
+
+  @override
+  Stream<bool> get playing => player.onPlayerStateChanged.map(
+    (state) => state == ap.PlayerState.playing,
+  );
 
   @override
   Future<void> stop() => player.stop();

@@ -37,6 +37,7 @@ part 'src/core_discovery.dart';
 part 'src/client_library.dart';
 part 'src/offline_library.dart';
 part 'src/client_cache.dart';
+part 'src/client_log.dart';
 part 'src/distribution.dart';
 part 'src/i18n.dart';
 part 'src/platform_integration.dart';
@@ -54,6 +55,7 @@ const _prefsPinCurrentClientRegionKey =
     'intmusic.playback_regions.pin_current_client';
 const _prefsRegionSortKey = 'intmusic.playback_regions.sort';
 const _prefsClientLibraryRootsKey = 'intmusic.client_library.roots';
+const _prefsDiagnosticLoggingKey = 'intmusic.diagnostics.logging';
 final CacheManager _artworkCacheManager = CacheManager(
   Config(
     'intmusicArtworkCache',
@@ -116,6 +118,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   final _libraryRootController = TextEditingController();
   final Map<String, Future<_RendererAudioPlayer>> _audioPlayers = {};
   final Map<String, StreamSubscription<bool>> _audioCompleteSubscriptions = {};
+  final Map<String, StreamSubscription<bool>> _audioPlayingSubscriptions = {};
   final Map<String, AudioDevice> _rendererAudioDevicesByOutput = {};
   final Map<String, Map<String, dynamic>> _rendererPlaybackByOutput = {};
   final Map<String, int> _rendererLoadedTrackByOutput = {};
@@ -186,6 +189,12 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, int> _detailWarmAfterIds = <String, int>{};
   final Map<String, int> _detailWarmTargetCursors = <String, int>{};
   bool _offlineMode = false;
+  bool _diagnosticLoggingEnabled = true;
+  String _diagnosticLogPath = '';
+  final Map<String, int> _optimisticLocalTrackByOutput = <String, int>{};
+  final Map<String, DateTime> _optimisticLocalStartedAtByOutput =
+      <String, DateTime>{};
+  final Map<String, bool> _rendererLocalFileByOutput = <String, bool>{};
   DateTime? _offlinePlaybackStartedAt;
   int _offlinePlaybackStartPositionMs = 0;
   List<dynamic> _playbackHistory = const [];
@@ -246,6 +255,9 @@ class _CoreDashboardState extends State<CoreDashboard>
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
     for (final subscription in _audioCompleteSubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    for (final subscription in _audioPlayingSubscriptions.values) {
       unawaited(subscription.cancel());
     }
     unawaited(_rendererDeviceSubscription?.cancel() ?? Future<void>.value());
@@ -529,6 +541,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       final zoneRegionSort = _zoneRegionSortFromPreference(
         preferences.getString(_prefsRegionSortKey),
       );
+      final diagnosticLoggingEnabled =
+          preferences.getBool(_prefsDiagnosticLoggingKey) ?? true;
+      await _ClientLog.initialize(enabled: diagnosticLoggingEnabled);
       var clientLibraryRoots = _decodeClientLibraryRoots(
         preferences.getString(_prefsClientLibraryRootsKey),
       );
@@ -566,6 +581,8 @@ class _CoreDashboardState extends State<CoreDashboard>
         _playlistViewMode = playlistViewMode;
         _pinCurrentClientRegion = pinCurrentClientRegion;
         _zoneRegionSort = zoneRegionSort;
+        _diagnosticLoggingEnabled = diagnosticLoggingEnabled;
+        _diagnosticLogPath = _ClientLog.path;
         _clientLibraryRoots = clientLibraryRoots;
         _offlineLibrary = offlineLibrary;
         _recentSearches = recentSearches.take(10).toList(growable: false);
@@ -573,8 +590,60 @@ class _CoreDashboardState extends State<CoreDashboard>
             ? savedClientAlias!
             : _defaultClientAlias();
       });
-    } catch (_) {
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'client.preferences.load_failed',
+        error,
+        stackTrace: stackTrace,
+      );
       // Preferences are optional; discovery can still find the core.
+    }
+  }
+
+  Future<void> _setDiagnosticLogging(bool enabled) async {
+    final preferences = _preferences ?? await SharedPreferences.getInstance();
+    _preferences = preferences;
+    await preferences.setBool(_prefsDiagnosticLoggingKey, enabled);
+    if (_ClientLog.path.isEmpty) {
+      await _ClientLog.initialize(enabled: enabled);
+    } else {
+      _ClientLog.setEnabled(enabled);
+    }
+    if (!mounted) return;
+    setState(() {
+      _diagnosticLoggingEnabled = enabled;
+      _diagnosticLogPath = _ClientLog.path;
+    });
+  }
+
+  Future<void> _exportDiagnosticLog() async {
+    try {
+      final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(
+        RegExp(r'[:.]'),
+        '-',
+      );
+      final location = await getSaveLocation(
+        suggestedName: 'intmusic-client-$timestamp.jsonl',
+        acceptedTypeGroups: const <XTypeGroup>[
+          XTypeGroup(label: 'JSON Lines log', extensions: <String>['jsonl']),
+        ],
+      );
+      if (location == null) return;
+      await _ClientLog.exportTo(location.path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_tr(context, 'Diagnostic log exported'))),
+      );
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'client.log.export_failed',
+        error,
+        stackTrace: stackTrace,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${_tr(context, 'Export failed')}: $error')),
+      );
     }
   }
 
@@ -857,7 +926,40 @@ class _CoreDashboardState extends State<CoreDashboard>
     _eventReconnectTimer?.cancel();
     await _eventSocket?.close();
     _eventSocket = null;
-    final tracks = _offlineTrackSummaries(_offlineLibrary);
+    final localTracks = <int, Map<String, dynamic>>{
+      for (final value in _offlineTrackSummaries(
+        _offlineLibrary,
+      ).whereType<Map>())
+        if (_intValue(value['id']) != null)
+          _intValue(value['id'])!: value.cast<String, dynamic>(),
+    };
+    final tracks = _tracks.isEmpty
+        ? localTracks.values.toList(growable: false)
+        : _tracks
+              .map((value) {
+                final cached = _asMap(value);
+                final local = localTracks[_intValue(cached['id'])];
+                if (local == null) {
+                  return <String, dynamic>{
+                    ...cached,
+                    '_local_available': false,
+                  };
+                }
+                return <String, dynamic>{
+                  ...cached,
+                  'is_favorite': local['is_favorite'] ?? cached['is_favorite'],
+                  'play_count': local['play_count'] ?? cached['play_count'],
+                  '_offline': true,
+                  '_local_available': true,
+                };
+              })
+              .toList(growable: false);
+    final albums = _albums.isEmpty
+        ? _offlineAlbumSummaries(_offlineLibrary)
+        : _albums;
+    final artists = _artists.isEmpty
+        ? _offlineArtistSummaries(_offlineLibrary)
+        : _artists;
     final stoppedPlayback = <String, dynamic>{
       'zone_id': _clientOutputId,
       'state': 'stopped',
@@ -872,9 +974,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       _rendererStatus = 'Offline local playback';
       _error = null;
       _tracks = tracks;
-      _albums = _offlineAlbumSummaries(_offlineLibrary);
-      _artists = _offlineArtistSummaries(_offlineLibrary);
-      _playlists = const [];
+      _albums = albums;
+      _artists = artists;
       _outputs = <dynamic>[
         <String, dynamic>{
           'id': _clientOutputId,
@@ -919,8 +1020,8 @@ class _CoreDashboardState extends State<CoreDashboard>
           'library_roots': _clientLibraryRoots.length,
           'files': tracks.length,
           'tracks': tracks.length,
-          'albums': _albums.length,
-          'artists': _artists.length,
+          'albums': albums.length,
+          'artists': artists.length,
           'scan_problems': 0,
         },
       };
@@ -929,6 +1030,16 @@ class _CoreDashboardState extends State<CoreDashboard>
         'write_rating_on_favorite': false,
       };
     });
+    _ClientLog.event(
+      'client.offline.activated',
+      data: <String, Object?>{
+        'cached_tracks': tracks.length,
+        'local_tracks': localTracks.length,
+        'cached_albums': albums.length,
+        'cached_artists': artists.length,
+        'cached_playlists': _playlists.length,
+      },
+    );
     _offlineReconnectTimer?.cancel();
     _offlineReconnectTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       if (!_loading && _offlineMode) {
@@ -2246,12 +2357,17 @@ class _CoreDashboardState extends State<CoreDashboard>
       _eventSocketBaseUrl = baseUrl;
       final socket = await WebSocket.connect(_api.wsUrl('/ws/v1/events'));
       _eventSocket = socket;
+      _ClientLog.event(
+        'core.websocket.connected',
+        data: <String, Object?>{'host': Uri.parse(baseUrl).host},
+      );
       socket.listen(
         _handleCoreEvent,
         onDone: () {
           if (mounted && _eventSocket == socket) {
             setState(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
+            _ClientLog.event('core.websocket.closed', level: 'warning');
             _scheduleEventReconnect();
           }
         },
@@ -2259,11 +2375,17 @@ class _CoreDashboardState extends State<CoreDashboard>
           if (mounted && _eventSocket == socket) {
             setState(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
+            _ClientLog.error('core.websocket.error', error);
             _scheduleEventReconnect();
           }
         },
       );
-    } catch (_) {
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'core.websocket.connect_failed',
+        error,
+        stackTrace: stackTrace,
+      );
       _eventSocket = null;
       _rendererStatus = 'Renderer offline';
       _scheduleEventReconnect();
@@ -2321,9 +2443,23 @@ class _CoreDashboardState extends State<CoreDashboard>
           .listen((_) {
             unawaited(_handleOutputComplete(outputId).catchError((_) {}));
           });
+      _audioPlayingSubscriptions[outputId] = player.playing.distinct().listen((
+        playing,
+      ) {
+        _ClientLog.event(
+          playing
+              ? 'renderer.player.audio_started'
+              : 'renderer.player.audio_inactive',
+          data: <String, Object?>{
+            'output_id': outputId,
+            'track_id': _rendererLoadedTrackByOutput[outputId],
+          },
+        );
+      });
       return player;
     } catch (_) {
       await _audioCompleteSubscriptions.remove(outputId)?.cancel();
+      await _audioPlayingSubscriptions.remove(outputId)?.cancel();
       await player?.dispose();
       rethrow;
     }
@@ -2332,6 +2468,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Future<void> _disposeRendererPlayer(String outputId) async {
     final subscription = _audioCompleteSubscriptions.remove(outputId);
     await subscription?.cancel();
+    final playingSubscription = _audioPlayingSubscriptions.remove(outputId);
+    await playingSubscription?.cancel();
     final playerFuture = _audioPlayers.remove(outputId);
     if (playerFuture == null) {
       return;
@@ -2850,6 +2988,15 @@ class _CoreDashboardState extends State<CoreDashboard>
         if (!_isClientOutputId(targetOutputId)) {
           return;
         }
+        _ClientLog.event(
+          'renderer.command.received',
+          data: <String, Object?>{
+            'action': command['action']?.toString(),
+            'command_id': command['command_id']?.toString(),
+            'track_id': _intValue(command['track_id']),
+            'output_id': targetOutputId,
+          },
+        );
         unawaited(_handleRendererCommand(command));
         return;
       }
@@ -2909,7 +3056,8 @@ class _CoreDashboardState extends State<CoreDashboard>
       if (eventType == 'core.settings_changed') {
         unawaited(_refreshSettingsCache());
       }
-    } catch (error) {
+    } catch (error, stackTrace) {
+      _ClientLog.error('renderer.event.invalid', error, stackTrace: stackTrace);
       if (mounted) {
         setState(() => _rendererStatus = 'Renderer event error');
       }
@@ -2955,12 +3103,60 @@ class _CoreDashboardState extends State<CoreDashboard>
           }
           final positionMs = _intValue(command['position_ms']) ?? 0;
           final trackId = _intValue(command['track_id']);
+          final optimisticTrack = _optimisticLocalTrackByOutput[outputId];
+          final optimisticStarted = _optimisticLocalStartedAtByOutput[outputId];
+          final reuseOptimisticLocal =
+              trackId != null &&
+              optimisticTrack == trackId &&
+              optimisticStarted != null &&
+              DateTime.now().difference(optimisticStarted) <
+                  const Duration(seconds: 30) &&
+              _rendererLocalFileByOutput[outputId] == true;
+          if (reuseOptimisticLocal) {
+            _optimisticLocalTrackByOutput.remove(outputId);
+            _optimisticLocalStartedAtByOutput.remove(outputId);
+            _ClientLog.event(
+              'renderer.command.reused_local_fast_start',
+              data: <String, Object?>{
+                'track_id': trackId,
+                'output_id': outputId,
+                'command_delay_ms': DateTime.now()
+                    .difference(optimisticStarted)
+                    .inMilliseconds,
+              },
+            );
+            await _reportRendererState(
+              'playing',
+              outputId: outputId,
+              command: command,
+            );
+            break;
+          }
           final source = await _rendererSource(trackId, streamPath);
+          final openWatch = Stopwatch()..start();
+          _ClientLog.event(
+            'renderer.player.open.start',
+            data: <String, Object?>{
+              'track_id': trackId,
+              'output_id': outputId,
+              'source': source.localFile ? 'local' : 'core_stream',
+            },
+          );
           await player.stop();
-          await player.open(source.uri, localFile: source.localFile);
           if (trackId != null) {
             _rendererLoadedTrackByOutput[outputId] = trackId;
           }
+          await player.open(source.uri, localFile: source.localFile);
+          _rendererLocalFileByOutput[outputId] = source.localFile;
+          _ClientLog.event(
+            'renderer.player.open.end',
+            data: <String, Object?>{
+              'track_id': trackId,
+              'output_id': outputId,
+              'source': source.localFile ? 'local' : 'core_stream',
+              'elapsed_ms': openWatch.elapsedMilliseconds,
+            },
+          );
           if (positionMs > 0) {
             await player.seek(Duration(milliseconds: positionMs));
           }
@@ -3000,6 +3196,9 @@ class _CoreDashboardState extends State<CoreDashboard>
         case 'stop':
           await player.stop();
           _rendererLoadedTrackByOutput.remove(outputId);
+          _rendererLocalFileByOutput.remove(outputId);
+          _optimisticLocalTrackByOutput.remove(outputId);
+          _optimisticLocalStartedAtByOutput.remove(outputId);
           await _reportRendererState('stopped', outputId: outputId);
           break;
         case 'seek':
@@ -3027,11 +3226,32 @@ class _CoreDashboardState extends State<CoreDashboard>
           await player.setVolume(muted ? 0.0 : volume);
           break;
       }
-    } catch (error) {
+    } catch (error, stackTrace) {
+      _rendererLoadedTrackByOutput.remove(outputId);
+      _rendererLocalFileByOutput.remove(outputId);
+      _ClientLog.error(
+        'renderer.command.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'action': action,
+          'track_id': _intValue(command['track_id']),
+          'output_id': outputId,
+        },
+      );
       if (mounted) {
         setState(() => _error = 'Renderer playback failed: $error');
       }
-      await _reportRendererState('stopped', outputId: outputId);
+      try {
+        await _reportRendererState('stopped', outputId: outputId);
+      } catch (reportError, reportStackTrace) {
+        _ClientLog.error(
+          'renderer.state_report.failed',
+          reportError,
+          stackTrace: reportStackTrace,
+          data: <String, Object?>{'output_id': outputId},
+        );
+      }
     }
   }
 
@@ -3053,7 +3273,19 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
     await player.stop();
     final source = await _rendererSource(trackId, streamPath);
+    final openWatch = Stopwatch()..start();
+    _rendererLoadedTrackByOutput[outputId] = trackId;
     await player.open(source.uri, localFile: source.localFile);
+    _rendererLocalFileByOutput[outputId] = source.localFile;
+    _ClientLog.event(
+      'renderer.player.ensure_source',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'output_id': outputId,
+        'source': source.localFile ? 'local' : 'core_stream',
+        'elapsed_ms': openWatch.elapsedMilliseconds,
+      },
+    );
     _rendererLoadedTrackByOutput[outputId] = trackId;
     if (positionMs > 0) {
       await player.seek(Duration(milliseconds: positionMs));
@@ -3071,6 +3303,14 @@ class _CoreDashboardState extends State<CoreDashboard>
           ? null
           : _offlineCopyPath(cachedCopy, _clientLibraryRoots);
       if (cachedPath != null && await File(cachedPath).exists()) {
+        _ClientLog.event(
+          'renderer.source.selected',
+          data: <String, Object?>{
+            'track_id': trackId,
+            'source': 'offline_manifest',
+            'local': true,
+          },
+        );
         return (uri: cachedPath, localFile: true);
       }
       try {
@@ -3081,12 +3321,34 @@ class _CoreDashboardState extends State<CoreDashboard>
           _clientId,
         );
         if (localPath != null && await File(localPath).exists()) {
+          _ClientLog.event(
+            'renderer.source.selected',
+            data: <String, Object?>{
+              'track_id': trackId,
+              'source': 'core_replica_catalog',
+              'local': true,
+            },
+          );
           return (uri: localPath, localFile: true);
         }
-      } catch (_) {
+      } catch (error, stackTrace) {
+        _ClientLog.error(
+          'renderer.source.catalog_lookup_failed',
+          error,
+          stackTrace: stackTrace,
+          data: <String, Object?>{'track_id': trackId},
+        );
         // A catalog lookup failure must not prevent the normal Core stream.
       }
     }
+    _ClientLog.event(
+      'renderer.source.selected',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'source': 'core_stream',
+        'local': false,
+      },
+    );
     return (uri: _api.apiUrl(streamPath), localFile: false);
   }
 
@@ -3214,7 +3476,10 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   Future<void> _openAlbumDetail(int albumId) async {
     if (_offlineMode) {
-      final detail = _offlineAlbumDetail(_offlineLibrary, albumId);
+      final detail =
+          _albumDetailCache[albumId] ??
+          _albumDetailFromOverview(albumId) ??
+          _offlineAlbumDetail(_offlineLibrary, albumId);
       if (detail != null && mounted) {
         setState(() {
           _albumDetailCache[albumId] = detail;
@@ -3263,7 +3528,10 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   Future<void> _openArtistDetail(int artistId) async {
     if (_offlineMode) {
-      final detail = _offlineArtistDetail(_offlineLibrary, artistId);
+      final detail =
+          _artistDetailCache[artistId] ??
+          _artistDetailFromOverview(artistId) ??
+          _offlineArtistDetail(_offlineLibrary, artistId);
       if (detail != null && mounted) {
         setState(() {
           _artistDetailCache[artistId] = detail;
@@ -3280,6 +3548,37 @@ class _CoreDashboardState extends State<CoreDashboard>
       _navigateToInState(_AppRoute.artist(artistId));
     });
     unawaited(_refreshArtistDetail(artistId));
+  }
+
+  Future<void> _openArtistByName(String displayName) async {
+    final query = displayName.trim().toLowerCase();
+    if (query.isEmpty) return;
+    Map<String, dynamic>? match;
+    for (final value in _artists.whereType<Map>()) {
+      final artist = value.cast<String, dynamic>();
+      final name = artist['name']?.toString().trim().toLowerCase() ?? '';
+      if (name == query) {
+        match = artist;
+        break;
+      }
+    }
+    if (match == null) {
+      for (final value in _artists.whereType<Map>()) {
+        final artist = value.cast<String, dynamic>();
+        final name = artist['name']?.toString().trim().toLowerCase() ?? '';
+        if (name.length >= 2 &&
+            RegExp(
+              '(^|[,;/&、，]\\s*)${RegExp.escape(name)}(\\s*[,;/&、，]|\$)',
+            ).hasMatch(query)) {
+          match = artist;
+          break;
+        }
+      }
+    }
+    final artistId = _intValue(match?['id']);
+    if (artistId != null) {
+      await _openArtistDetail(artistId);
+    }
   }
 
   Map<String, dynamic>? _artistDetailFromOverview(int artistId) {
@@ -3360,8 +3659,12 @@ class _CoreDashboardState extends State<CoreDashboard>
       final path = copy == null
           ? null
           : _offlineCopyPath(copy, _clientLibraryRoots);
-      if (copy != null && path != null && mounted) {
-        final detail = copy.toTrackDetail(path);
+      final cached =
+          _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+      if (cached != null && mounted) {
+        final detail = copy == null || path == null
+            ? cached
+            : _detailWithLocalCopy(cached, copy, path);
         setState(() {
           _trackDetailCache[trackId] = detail;
           _navigateToInState(_AppRoute.track(trackId));
@@ -3377,6 +3680,41 @@ class _CoreDashboardState extends State<CoreDashboard>
       _navigateToInState(_AppRoute.track(trackId));
     });
     unawaited(_refreshTrackDetail(trackId));
+  }
+
+  Map<String, dynamic> _detailWithLocalCopy(
+    Map<String, dynamic> detail,
+    _OfflineTrackCopy copy,
+    String path,
+  ) {
+    return <String, dynamic>{
+      ...detail,
+      'track': <String, dynamic>{
+        ..._asMap(detail['track']),
+        '_local_available': true,
+      },
+      '_client_local_copy': <String, dynamic>{
+        'media_variant_id': copy.mediaVariantId,
+        'device_id': _clientId,
+        'device_name': _clientAlias(),
+        'source_kind': 'client',
+        'availability_state': 'ready',
+        'is_primary': false,
+        'relative_path': copy.relativePath,
+        'root_external_id': copy.rootExternalId,
+        'client_file_id': copy.fileExternalId,
+        'file_path': path,
+        'extension': copy.extension,
+        'size_bytes': copy.sizeBytes,
+        'modified_at': copy.modifiedAt.toUtc().toIso8601String(),
+        'codec': copy.metadata['codec'],
+        'bitrate': copy.metadata['bitrate'],
+        'sample_rate': copy.metadata['sample_rate'],
+        'bit_depth': copy.metadata['bit_depth'],
+        'channels': copy.metadata['channels'],
+        'duration_ms': copy.metadata['duration_ms'],
+      },
+    };
   }
 
   Map<String, dynamic>? _trackDetailFromOverview(int trackId) {
@@ -3498,7 +3836,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       _playlistDetailCache[playlistId] = detail;
       _navigateToInState(_AppRoute.playlist(playlistId));
     });
-    unawaited(_refreshPlaylistDetail(playlistId));
+    if (!_offlineMode) {
+      unawaited(_refreshPlaylistDetail(playlistId));
+    }
   }
 
   Map<String, dynamic>? _playlistDetailFromOverview(int playlistId) {
@@ -3843,14 +4183,167 @@ class _CoreDashboardState extends State<CoreDashboard>
     return null;
   }
 
+  bool _zoneUsesThisClient(String zoneId) {
+    if (_isClientOutputId(zoneId) || zoneId.startsWith(_clientZonePrefix)) {
+      return true;
+    }
+    final zone = _zoneById(zoneId);
+    final outputId = zone?['output_id']?.toString();
+    return _isClientOutputId(outputId) ||
+        (outputId?.startsWith(_clientZonePrefix) ?? false);
+  }
+
+  String? _clientOutputForZone(String zoneId) {
+    if (_isClientOutputId(zoneId)) return zoneId;
+    final outputId = _zoneById(zoneId)?['output_id']?.toString();
+    return _isClientOutputId(outputId) ? outputId : null;
+  }
+
+  bool _hasActiveLocalSource(String zoneId) {
+    final outputId = _clientOutputForZone(zoneId);
+    return outputId != null &&
+        _rendererLocalFileByOutput[outputId] == true &&
+        _rendererLoadedTrackByOutput[outputId] != null;
+  }
+
+  /// Starts an accessible local replica before waiting for Core.
+  ///
+  /// Core remains authoritative for the shared queue and history. The later
+  /// renderer command is reconciled without reopening the already-playing
+  /// source.
+  Future<bool> _tryStartLocalPlayback(
+    int trackId, {
+    required String zoneId,
+    List<int>? sourceTrackIds,
+  }) async {
+    if (!_zoneUsesThisClient(zoneId)) return false;
+    final copy = await _availableOfflineCopy(trackId);
+    if (copy == null) {
+      _ClientLog.event(
+        'playback.local_fast_start.unavailable',
+        data: <String, Object?>{'track_id': trackId, 'zone_id': zoneId},
+      );
+      return false;
+    }
+    final path = _offlineCopyPath(copy, _clientLibraryRoots);
+    if (path == null || !await File(path).exists()) {
+      _ClientLog.event(
+        'playback.local_fast_start.missing_file',
+        level: 'warning',
+        data: <String, Object?>{'track_id': trackId, 'zone_id': zoneId},
+      );
+      return false;
+    }
+
+    if (sourceTrackIds != null) {
+      _setOfflineQueue(
+        sourceTrackIds,
+        startIndex: sourceTrackIds.indexOf(trackId),
+      );
+    } else {
+      final items = _queueItems();
+      final existingIndex = items.indexWhere(
+        (item) => _intValue(_asMap(item['track'])['id']) == trackId,
+      );
+      if (existingIndex >= 0) {
+        _playbackQueue = <String, dynamic>{
+          ...?_playbackQueue,
+          'current_index': existingIndex,
+        };
+      }
+    }
+
+    final outputId = _isClientOutputId(zoneId)
+        ? zoneId
+        : (_zoneById(zoneId)?['output_id']?.toString() ?? _clientOutputId);
+    final player = await _playerForOutput(outputId);
+    final watch = Stopwatch()..start();
+    _ClientLog.event(
+      'playback.local_fast_start.begin',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'zone_id': zoneId,
+        'output_id': outputId,
+      },
+    );
+    try {
+      await player.stop();
+      _rendererLoadedTrackByOutput[outputId] = trackId;
+      await player.open(path, localFile: true);
+    } catch (error, stackTrace) {
+      if (_rendererLoadedTrackByOutput[outputId] == trackId) {
+        _rendererLoadedTrackByOutput.remove(outputId);
+      }
+      _ClientLog.error(
+        'playback.local_fast_start.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'elapsed_ms': watch.elapsedMilliseconds,
+        },
+      );
+      return false;
+    }
+    _rendererLocalFileByOutput[outputId] = true;
+    _optimisticLocalTrackByOutput[outputId] = trackId;
+    _optimisticLocalStartedAtByOutput[outputId] = DateTime.now();
+
+    final summary = _findEntity(_tracks, trackId) ?? copy.toTrackSummary();
+    final cachedDetail =
+        _trackDetailCache[trackId] ??
+        _trackDetailFromOverview(trackId) ??
+        copy.toTrackDetail(path);
+    final localDetail = _detailWithLocalCopy(cachedDetail, copy, path);
+    final playback = _withPlaybackTimestamp(<String, dynamic>{
+      'zone_id': zoneId,
+      'state': 'playing',
+      'track_id': trackId,
+      'track_title': summary['title'],
+      'position_ms': 0,
+      'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
+    });
+    _rendererPlaybackByOutput[outputId] = playback;
+    if (mounted) {
+      setState(() {
+        _activeTrackDetailId = trackId;
+        _activeTrackDetail = localDetail;
+        _trackDetailCache[trackId] = localDetail;
+        _applyPlayback(playback);
+        _rendererStatus = _tr(
+          context,
+          'Playing local copy · syncing with Core',
+        );
+        _error = null;
+      });
+    }
+    _ClientLog.event(
+      'playback.local_fast_start.ready',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'zone_id': zoneId,
+        'output_id': outputId,
+        'elapsed_ms': watch.elapsedMilliseconds,
+      },
+    );
+    return true;
+  }
+
   void _setOfflineQueue(List<int> trackIds, {int? startIndex}) {
     final summaries = <int, Map<String, dynamic>>{
-      for (final value in _offlineTrackSummaries(
-        _offlineLibrary,
-      ).whereType<Map>())
+      for (final value in _tracks.whereType<Map>())
         if (_intValue(value['id']) != null)
           _intValue(value['id'])!: value.cast<String, dynamic>(),
     };
+    for (final value in _offlineTrackSummaries(
+      _offlineLibrary,
+    ).whereType<Map>()) {
+      final trackId = _intValue(value['id']);
+      if (trackId != null) {
+        summaries.putIfAbsent(trackId, () => value.cast<String, dynamic>());
+      }
+    }
     final validIds = trackIds
         .where((trackId) => summaries.containsKey(trackId))
         .toList(growable: false);
@@ -3924,8 +4417,12 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
     _offlinePlaybackStartedAt = DateTime.now().toUtc();
     _offlinePlaybackStartPositionMs = 0;
-    final summary = copy.toTrackSummary();
-    final detail = copy.toTrackDetail(path);
+    final summary = _findEntity(_tracks, trackId) ?? copy.toTrackSummary();
+    final cachedDetail =
+        _trackDetailCache[trackId] ??
+        _trackDetailFromOverview(trackId) ??
+        copy.toTrackDetail(path);
+    final detail = _detailWithLocalCopy(cachedDetail, copy, path);
     final playback = <String, dynamic>{
       'zone_id': _clientOutputId,
       'state': 'playing',
@@ -3936,7 +4433,11 @@ class _CoreDashboardState extends State<CoreDashboard>
     };
     if (!mounted) return;
     setState(() {
-      _replaceTrackInCollections(summary);
+      _replaceTrackInCollections(<String, dynamic>{
+        ...summary,
+        '_offline': true,
+        '_local_available': true,
+      });
       _activeTrackDetailId = trackId;
       _activeTrackDetail = detail;
       _trackDetailCache[trackId] = detail;
@@ -4046,6 +4547,14 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _playTrack(int trackId) async {
+    _ClientLog.event(
+      'playback.user.play_track',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'zone_id': _activeZoneId(),
+        'offline': _offlineMode,
+      },
+    );
     if (_offlineMode) {
       final trackIds = _tracks
           .map((track) => _intValue((track as Map)['id']))
@@ -4090,6 +4599,16 @@ class _CoreDashboardState extends State<CoreDashboard>
       return;
     }
     final zoneId = _activeZoneId();
+    final requestWatch = Stopwatch()..start();
+    _ClientLog.event(
+      'playback.user.play_collection',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'zone_id': zoneId,
+        'collection_size': trackIds.length,
+        'start_index': startIndex,
+      },
+    );
     final optimisticTrack = _findEntity(_tracks, trackId);
     if (mounted) {
       setState(() {
@@ -4103,6 +4622,11 @@ class _CoreDashboardState extends State<CoreDashboard>
         });
       });
     }
+    final localStarted = await _tryStartLocalPlayback(
+      trackId,
+      zoneId: zoneId,
+      sourceTrackIds: trackIds,
+    );
     try {
       final result = _asMap(
         await _api.postJson(
@@ -4123,40 +4647,135 @@ class _CoreDashboardState extends State<CoreDashboard>
           if (playback.isNotEmpty) _applyPlayback(playback);
         });
       }
-    } on HttpException {
+      _ClientLog.event(
+        'playback.core.play_collection.applied',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'elapsed_ms': requestWatch.elapsedMilliseconds,
+          'local_fast_start': localStarted,
+          'core_timing_ms': _asMap(result['timing_ms']),
+        },
+      );
+    } on HttpException catch (error) {
+      final unsupported =
+          error.message.contains('HTTP 404') ||
+          error.message.contains('HTTP 405');
+      if (!unsupported) {
+        _ClientLog.error(
+          'playback.core.play_collection.failed',
+          error,
+          data: <String, Object?>{
+            'track_id': trackId,
+            'zone_id': zoneId,
+            'elapsed_ms': requestWatch.elapsedMilliseconds,
+            'local_fast_start': localStarted,
+          },
+        );
+        if (mounted && localStarted) {
+          setState(
+            () => _rendererStatus = _tr(
+              context,
+              'Weak connection · local playback continues',
+            ),
+          );
+        } else if (mounted) {
+          setState(() => _error = error.toString());
+        }
+        return;
+      }
       final queue = await _replaceQueue(
         trackIds,
         startIndex: startIndex,
         mode: _PlaybackMode.sequential,
       );
       if (queue == null) return;
-      final playback = await _playTrackOnZone(trackId, zoneId);
+      final playback = await _playTrackOnZone(
+        trackId,
+        zoneId,
+        tryLocalFastStart: false,
+      );
       if (mounted && playback != null) {
         setState(() => _applyPlayback(playback));
       }
-    } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'playback.core.play_collection.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'elapsed_ms': requestWatch.elapsedMilliseconds,
+          'local_fast_start': localStarted,
+        },
+      );
+      if (mounted && localStarted) {
+        setState(
+          () => _rendererStatus = _tr(
+            context,
+            'Weak connection · local playback continues',
+          ),
+        );
+      } else if (mounted) {
+        setState(() => _error = error.toString());
+      }
     }
   }
 
   Future<Map<String, dynamic>?> _playTrackOnZone(
     int trackId,
-    String zoneId,
-  ) async {
+    String zoneId, {
+    bool tryLocalFastStart = true,
+  }) async {
     if (_offlineMode) {
       await _playOfflineTrack(trackId);
       return _playback;
     }
+    final watch = Stopwatch()..start();
+    final localStarted =
+        tryLocalFastStart &&
+        await _tryStartLocalPlayback(trackId, zoneId: zoneId);
     try {
-      return _asMap(
+      final playback = _asMap(
         await _api.postJson(
           '/zones/${Uri.encodeComponent(zoneId)}/play',
           <String, dynamic>{'track_id': trackId},
           requestTimeout: const Duration(seconds: 8),
         ),
       );
-    } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
+      _ClientLog.event(
+        'playback.core.play_track.applied',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'elapsed_ms': watch.elapsedMilliseconds,
+          'local_fast_start': localStarted,
+        },
+      );
+      return playback;
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'playback.core.play_track.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'elapsed_ms': watch.elapsedMilliseconds,
+          'local_fast_start': localStarted,
+        },
+      );
+      if (mounted && localStarted) {
+        setState(
+          () => _rendererStatus = _tr(
+            context,
+            'Weak connection · local playback continues',
+          ),
+        );
+      } else if (mounted) {
+        setState(() => _error = error.toString());
+      }
       return null;
     }
   }
@@ -4167,6 +4786,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playPreviousOfflineTrack();
       return;
     }
+    await _tryStartAdjacentLocalPlayback(next: false);
     final playback = await _postPlaybackControl(
       '/zones/${Uri.encodeComponent(_activeZoneId())}/previous',
       const <String, dynamic>{},
@@ -4182,6 +4802,7 @@ class _CoreDashboardState extends State<CoreDashboard>
       await _playNextOfflineTrack();
       return;
     }
+    await _tryStartAdjacentLocalPlayback(next: true);
     final playback = await _postPlaybackControl(
       '/zones/${Uri.encodeComponent(_activeZoneId())}/next',
       const <String, dynamic>{},
@@ -4189,6 +4810,32 @@ class _CoreDashboardState extends State<CoreDashboard>
     if (mounted && playback != null) {
       setState(() => _applyPlayback(playback));
     }
+  }
+
+  Future<bool> _tryStartAdjacentLocalPlayback({required bool next}) async {
+    if (_playbackMode == _PlaybackMode.shuffle ||
+        _playbackMode == _PlaybackMode.repeatOne ||
+        !_zoneUsesThisClient(_activeZoneId())) {
+      return false;
+    }
+    final items = _queueItems();
+    if (items.isEmpty) return false;
+    var index = _intValue(_playbackQueue?['current_index']);
+    if (index == null || index < 0 || index >= items.length) {
+      final currentTrackId = _intValue(_playback?['track_id']);
+      index = items.indexWhere(
+        (item) => _intValue(_asMap(item['track'])['id']) == currentTrackId,
+      );
+    }
+    if (index < 0) return false;
+    index += next ? 1 : -1;
+    if (index < 0 || index >= items.length) {
+      if (_playbackMode != _PlaybackMode.repeatAll) return false;
+      index = next ? 0 : items.length - 1;
+    }
+    final trackId = _intValue(_asMap(items[index]['track'])['id']);
+    if (trackId == null) return false;
+    return _tryStartLocalPlayback(trackId, zoneId: _activeZoneId());
   }
 
   Future<void> _refreshPlaybackQueue({String? zoneId}) async {
@@ -4629,6 +5276,48 @@ class _CoreDashboardState extends State<CoreDashboard>
   }
 
   Future<void> _postZoneAction(String zoneId, String action) async {
+    final outputId = _clientOutputForZone(zoneId);
+    if (outputId != null && _hasActiveLocalSource(zoneId)) {
+      final player = await _playerForOutput(outputId);
+      final position =
+          await player.currentPositionMs() ??
+          _estimatedPlaybackPositionMs(_playback);
+      switch (action) {
+        case 'pause':
+          await player.pause();
+        case 'play':
+          await player.play();
+        case 'stop':
+          await player.stop();
+          _rendererLoadedTrackByOutput.remove(outputId);
+          _rendererLocalFileByOutput.remove(outputId);
+          _optimisticLocalTrackByOutput.remove(outputId);
+          _optimisticLocalStartedAtByOutput.remove(outputId);
+      }
+      if (mounted) {
+        setState(() {
+          _applyPlayback(<String, dynamic>{
+            ...?_playback,
+            'state': action == 'play'
+                ? 'playing'
+                : action == 'pause'
+                ? 'paused'
+                : 'stopped',
+            if (action == 'stop') 'track_id': null,
+            if (action == 'stop') 'track_title': null,
+            'position_ms': action == 'stop' ? 0 : position,
+          });
+        });
+      }
+      _ClientLog.event(
+        'playback.local_control.applied',
+        data: <String, Object?>{
+          'action': action,
+          'zone_id': zoneId,
+          'position_ms': position,
+        },
+      );
+    }
     final playback = await _postPlaybackControl(
       '/zones/${Uri.encodeComponent(zoneId)}/$action',
       const <String, dynamic>{},
@@ -4722,8 +5411,23 @@ class _CoreDashboardState extends State<CoreDashboard>
       }
       return;
     }
+    final zoneId = _activeZoneId();
+    final outputId = _clientOutputForZone(zoneId);
+    if (outputId != null && _hasActiveLocalSource(zoneId)) {
+      await (await _playerForOutput(
+        outputId,
+      )).seek(Duration(milliseconds: positionMs));
+      if (mounted) {
+        setState(() {
+          _applyPlayback(<String, dynamic>{
+            ...?_playback,
+            'position_ms': positionMs,
+          });
+        });
+      }
+    }
     final playback = await _postPlaybackControl(
-      '/zones/${Uri.encodeComponent(_activeZoneId())}/seek',
+      '/zones/${Uri.encodeComponent(zoneId)}/seek',
       <String, dynamic>{'position_ms': positionMs},
     );
     if (mounted && playback != null) {
@@ -4737,15 +5441,37 @@ class _CoreDashboardState extends State<CoreDashboard>
     String path,
     Map<String, dynamic> body,
   ) async {
+    final watch = Stopwatch()..start();
+    _ClientLog.event(
+      'playback.control.start',
+      data: <String, Object?>{'path': path},
+    );
     try {
-      return _asMap(
+      final result = _asMap(
         await _api.postJson(
           path,
           body,
           requestTimeout: const Duration(seconds: 8),
         ),
       );
-    } catch (error) {
+      _ClientLog.event(
+        'playback.control.end',
+        data: <String, Object?>{
+          'path': path,
+          'elapsed_ms': watch.elapsedMilliseconds,
+        },
+      );
+      return result;
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'playback.control.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'path': path,
+          'elapsed_ms': watch.elapsedMilliseconds,
+        },
+      );
       if (mounted) setState(() => _rendererStatus = 'Playback link is slow');
       return null;
     }
@@ -4780,6 +5506,27 @@ class _CoreDashboardState extends State<CoreDashboard>
         });
       }
       return;
+    }
+    final localOutputId = _clientOutputForZone(zoneId);
+    if (localOutputId != null && _hasActiveLocalSource(zoneId)) {
+      await (await _playerForOutput(
+        localOutputId,
+      )).setVolume(effectiveMuted ? 0 : normalized);
+      if (mounted) {
+        setState(() {
+          _zones = _zones
+              .map((value) {
+                final zone = _asMap(value);
+                if (zone['id']?.toString() != zoneId) return zone;
+                return <String, dynamic>{
+                  ...zone,
+                  'volume': normalized,
+                  'muted': effectiveMuted,
+                };
+              })
+              .toList(growable: false);
+        });
+      }
     }
     final result = await _run<Map<String, dynamic>>(
       () async => _asMap(
@@ -5557,6 +6304,8 @@ class _CoreDashboardState extends State<CoreDashboard>
           transcodingStatus: _transcodingStatus,
           clientId: _clientId,
           diagnostics: _diagnostics,
+          diagnosticLoggingEnabled: _diagnosticLoggingEnabled,
+          diagnosticLogPath: _diagnosticLogPath,
           language: _language,
           pinCurrentClientRegion: _pinCurrentClientRegion,
           zoneRegionSort: _zoneRegionSort,
@@ -5582,6 +6331,9 @@ class _CoreDashboardState extends State<CoreDashboard>
               unawaited(_setPinCurrentClientRegion(value)),
           onZoneRegionSortChanged: (value) =>
               unawaited(_setZoneRegionSort(value)),
+          onDiagnosticLoggingChanged: (value) =>
+              unawaited(_setDiagnosticLogging(value)),
+          onExportDiagnosticLog: () => unawaited(_exportDiagnosticLog()),
           onUpdateFavoriteSettings: _updateFavoriteSettings,
           onUpdateMetadataSettings: _updateMetadataSettings,
         );
@@ -5613,6 +6365,7 @@ class _CoreDashboardState extends State<CoreDashboard>
           onClose: _closeTrackDetail,
           onPlayTrack: _playTrack,
           onOpenAlbum: _openAlbumDetail,
+          onOpenArtist: _openArtistByName,
           onToggleFavorite: _toggleFavorite,
           onAddToPlaylist: _addTrackToPlaylist,
           onEdit: trackId == null ? () async {} : () => _editTrack(trackId),

@@ -129,28 +129,61 @@ class CoreApiClient {
   }) async {
     final effectiveTimeout = requestTimeout ?? timeout;
     final uri = Uri.parse(apiUrl(path));
-    final request = switch (method) {
-      'POST' => await _client.postUrl(uri).timeout(effectiveTimeout),
-      'DELETE' => await _client.deleteUrl(uri).timeout(effectiveTimeout),
-      _ => await _client.getUrl(uri).timeout(effectiveTimeout),
-    };
-    request.headers.contentType = ContentType.json;
-    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
-    request.headers.set(HttpHeaders.acceptEncodingHeader, 'gzip');
-    if (body != null) {
-      request.write(jsonEncode(body));
+    final stopwatch = Stopwatch()..start();
+    _ClientLog.event(
+      'core.http.start',
+      data: <String, Object?>{
+        'method': method,
+        'path': uri.path,
+        'timeout_ms': effectiveTimeout.inMilliseconds,
+      },
+    );
+    try {
+      final request = switch (method) {
+        'POST' => await _client.postUrl(uri).timeout(effectiveTimeout),
+        'DELETE' => await _client.deleteUrl(uri).timeout(effectiveTimeout),
+        _ => await _client.getUrl(uri).timeout(effectiveTimeout),
+      };
+      request.headers.contentType = ContentType.json;
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptEncodingHeader, 'gzip');
+      if (body != null) {
+        request.write(jsonEncode(body));
+      }
+      final response = await request.close().timeout(effectiveTimeout);
+      final text = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(effectiveTimeout);
+      _ClientLog.event(
+        'core.http.end',
+        data: <String, Object?>{
+          'method': method,
+          'path': uri.path,
+          'status': response.statusCode,
+          'elapsed_ms': stopwatch.elapsedMilliseconds,
+          'response_bytes': utf8.encode(text).length,
+        },
+      );
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException('HTTP ${response.statusCode}: $text', uri: uri);
+      }
+      if (text.isEmpty) {
+        return null;
+      }
+      return jsonDecode(text);
+    } catch (error, stackTrace) {
+      _ClientLog.error(
+        'core.http.error',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'method': method,
+          'path': uri.path,
+          'elapsed_ms': stopwatch.elapsedMilliseconds,
+        },
+      );
+      rethrow;
     }
-    final response = await request.close().timeout(effectiveTimeout);
-    final text = await response
-        .transform(utf8.decoder)
-        .join()
-        .timeout(effectiveTimeout);
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw HttpException('HTTP ${response.statusCode}: $text', uri: uri);
-    }
-    if (text.isEmpty) {
-      return null;
-    }
-    return jsonDecode(text);
   }
 }

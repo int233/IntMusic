@@ -18,6 +18,8 @@ class _SettingsPage extends StatelessWidget {
     required this.transcodingStatus,
     required this.clientId,
     required this.diagnostics,
+    required this.diagnosticLoggingEnabled,
+    required this.diagnosticLogPath,
     required this.language,
     required this.pinCurrentClientRegion,
     required this.zoneRegionSort,
@@ -38,6 +40,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onLanguageChanged,
     required this.onPinCurrentClientRegionChanged,
     required this.onZoneRegionSortChanged,
+    required this.onDiagnosticLoggingChanged,
+    required this.onExportDiagnosticLog,
     required this.onUpdateFavoriteSettings,
     required this.onUpdateMetadataSettings,
   });
@@ -58,6 +62,8 @@ class _SettingsPage extends StatelessWidget {
   final Map<String, dynamic>? transcodingStatus;
   final String clientId;
   final Map<String, dynamic>? diagnostics;
+  final bool diagnosticLoggingEnabled;
+  final String diagnosticLogPath;
   final _AppLanguage language;
   final bool pinCurrentClientRegion;
   final _ZoneRegionSort zoneRegionSort;
@@ -78,6 +84,8 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<_AppLanguage> onLanguageChanged;
   final ValueChanged<bool> onPinCurrentClientRegionChanged;
   final ValueChanged<_ZoneRegionSort> onZoneRegionSortChanged;
+  final ValueChanged<bool> onDiagnosticLoggingChanged;
+  final VoidCallback onExportDiagnosticLog;
   final Future<void> Function(Map<String, dynamic>) onUpdateFavoriteSettings;
   final Future<void> Function(Map<String, dynamic>) onUpdateMetadataSettings;
 
@@ -322,6 +330,61 @@ class _SettingsPage extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                _SettingsSwitchRow(
+                  key: const Key('diagnostic-logging-setting'),
+                  value: diagnosticLoggingEnabled,
+                  title: _tr(context, 'Playback diagnostics log'),
+                  subtitle: _tr(
+                    context,
+                    'Records local playback timing, source selection, Core requests, and renderer errors.',
+                  ),
+                  onChanged: onDiagnosticLoggingChanged,
+                ),
+                const SizedBox(height: 8),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: IntMusicTheme.of(context).surfaceRaised,
+                    border: Border.all(color: IntMusicTheme.of(context).stroke),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.description_outlined,
+                          color: IntMusicTheme.of(context).accent,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                _tr(context, 'Local log file'),
+                                style: Theme.of(context).textTheme.labelLarge,
+                              ),
+                              const SizedBox(height: 2),
+                              SelectableText(
+                                diagnosticLogPath.isEmpty
+                                    ? _tr(context, 'Preparing log file…')
+                                    : diagnosticLogPath,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: onExportDiagnosticLog,
+                          icon: const Icon(Icons.ios_share_outlined),
+                          label: Text(_tr(context, 'Export log')),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
                 _InfoRow(
                   label: _tr(context, 'Library'),
                   value: _joinParts([

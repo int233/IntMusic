@@ -598,6 +598,15 @@ pub struct MediaReplicaSummary {
     pub root_external_id: Option<String>,
     pub client_file_id: Option<String>,
     pub last_verified_at: Option<DateTime<Utc>>,
+    pub extension: Option<String>,
+    pub size_bytes: Option<i64>,
+    pub modified_at: Option<DateTime<Utc>>,
+    pub codec: Option<String>,
+    pub bitrate: Option<i64>,
+    pub sample_rate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub channels: Option<i64>,
+    pub duration_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

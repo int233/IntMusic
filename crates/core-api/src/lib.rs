@@ -2837,6 +2837,7 @@ async fn play_zone_collection(
     Path(zone_id): Path<String>,
     Json(payload): Json<ReplacePlaybackQueue>,
 ) -> ApiResult<serde_json::Value> {
+    let request_started = tokio::time::Instant::now();
     let start_index = payload.start_index.unwrap_or(0);
     let index = usize::try_from(start_index)
         .ok()
@@ -2844,9 +2845,19 @@ async fn play_zone_collection(
         .ok_or_else(|| anyhow::anyhow!("collection start_index is out of range"))?;
     let track_id = payload.track_ids[index];
     let queue = core_db::replace_playback_queue(state.pool(), &zone_id, payload).await?;
+    let queue_elapsed_ms = request_started.elapsed().as_millis();
     state.emit("playback.queue_changed", &queue);
     let playback = play_track_on_zone(&state, &zone_id, track_id, 0).await?;
-    Ok(Json(json!({ "queue": queue, "playback": playback })))
+    let total_elapsed_ms = request_started.elapsed().as_millis();
+    Ok(Json(json!({
+        "queue": queue,
+        "playback": playback,
+        "timing_ms": {
+            "queue": queue_elapsed_ms,
+            "playback": total_elapsed_ms.saturating_sub(queue_elapsed_ms),
+            "total": total_elapsed_ms
+        }
+    })))
 }
 
 async fn play_many_zones(
@@ -3446,6 +3457,14 @@ async fn play_track_on_zone(
             volume: None,
             muted: None,
         };
+        info!(
+            event = "renderer_command_sent",
+            command_id = %command.command_id,
+            renderer_id = %renderer_id,
+            zone_id,
+            track_id,
+            "sent renderer playback command"
+        );
         let playback = state
             .inner
             .renderers
