@@ -1,4 +1,4 @@
-part of '../main.dart';
+part of '../intmusic_client.dart';
 
 class _PlaylistsPage extends StatefulWidget {
   const _PlaylistsPage({

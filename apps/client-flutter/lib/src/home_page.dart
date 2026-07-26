@@ -1,4 +1,4 @@
-part of '../main.dart';
+part of '../intmusic_client.dart';
 
 class _HomePage extends StatelessWidget {
   const _HomePage({

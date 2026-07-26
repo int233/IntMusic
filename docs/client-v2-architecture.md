@@ -69,6 +69,62 @@ Flutter 不根据本地曲目列表推算下一首；平台媒体中心也不自
 
 缓存镜像不是新的事实来源。Core 的 snapshot 总能覆盖 Client 摘要，新的 `server_id` 会清空旧 Core 的详情与搜索缓存；后台预热使用目标 cursor 防止旧任务覆盖较新的快照。
 
+## 源码边界与依赖方向
+
+Flutter 启动入口只负责调用 `runIntMusicClient()`。应用装配位于
+`lib/intmusic_client.dart`，可独立测试的基础设施位于 `lib/core`，页面和
+Dashboard 能力按职责拆分在 `lib/src`：
+
+```text
+main.dart
+└── intmusic_client.dart
+    ├── core/
+    │   ├── logging/
+    │   ├── network/
+    │   ├── navigation_history.dart
+    │   └── task_scheduler.dart
+    └── src/
+        ├── app_*                  主题壳、顶栏、侧栏、模型与纯辅助函数
+        ├── *_page / *_sheet      页面和弹层
+        └── dashboard_*           用例编排；不声明通用 UI 组件
+```
+
+- `CoreApiClient` 复用每个 Core 地址的连接池，并为播放控制和后台元数据使用
+  独立 HTTP 通道。页面不能自行创建 `HttpClient`。
+- 周期任务统一由 `PeriodicTaskScheduler` 管理，同名任务不能重叠；应用进入
+  后台时，除 renderer 心跳、播放状态和分发外的任务暂停。
+- 导航历史由 `NavigationHistory` 管理。页面不能再维护独立的前进、后退栈。
+- 高频播放进度、音量、队列和 zone 投影通过 `_playbackRevision` 局部刷新
+  播放页面、侧栏和底栏，不能触发整个 Dashboard 壳重建。
+- 平台通道只能存在于 `platform_integration.dart`。新增原生能力先扩充统一
+  capability bridge，再由 Dashboard 编排。
+
+Rust Core 采用相同原则：`core-api` 的 router、server、event、播放服务和各
+资源 routes 分开；`core-db` 的连接/迁移、媒体库、播放队列、历史、分发和
+艺术家资料分开。路由只做验证与编排，SQL 只能位于 `core-db`。
+
+`tool/check_architecture.dart` 是强制边界而不是建议：单个 Dart 源文件上限
+1100 行、Dashboard 扩展上限 850 行、应用装配文件上限 550 行。扩展现有大
+类时应先提取模型、服务或独立 Widget，不得通过调高阈值解决失败。
+
+## 性能预算
+
+- 首屏：先读取本地 SQLite 摘要并绘制；网络发现、Core 刷新和详情预热均在
+  首屏之后运行。Android/iOS 使用系统 SQLite，桌面使用 SQLite FFI。
+- 主 isolate：大于 1 MiB 的 API JSON 与整库缓存 JSON 在后台 isolate
+  解码；图片上传使用文件流，禁止整文件 `readAsBytes()`。
+- 图片：磁盘缓存与 Flutter 解码缓存分别设上限；根据目标物理像素传入
+  `memCacheWidth`，列表不得解码原始超高分辨率艺术照。
+- 数据库：反向艺术家关联、可用媒体副本和 Client 文件对账必须命中复合
+  索引；一个详情请求中的多个媒体版本必须批量读取副本，禁止 N+1 查询。
+- 弱网：用户控制请求使用短超时专用连接池；GET 可重试一次，POST/DELETE
+  不自动重放。后台失败只更新诊断和同步状态，不覆盖本地可用页面。
+- 内存：详情缓存是 SQLite 的热投影，不是第二份事实来源；新的全库结构在
+  引入前必须说明淘汰策略和移动端上限。
+
+这些预算通过架构检查、单元测试和真实平台构建共同维护。性能变更至少要给出
+“减少了哪一种重建、往返、查询或大对象分配”的可验证理由。
+
 ## 平台能力矩阵
 
 | 能力 | macOS | Windows | Android |
@@ -118,3 +174,8 @@ Flutter 不根据本地曲目列表推算下一首；平台媒体中心也不自
 7. 至少完成一个桌面宽度和一个紧凑宽度的视觉检查
 
 任何新平台功能都应先扩充 capability bridge 和本表，不得从页面直接创建新的 MethodChannel。
+
+CI 还会执行 Dart 格式检查和 `tool/check_architecture.dart`。`protocol`
+测试会比较 `core-api/router.rs` 与 `openapi.yaml` 的所有 HTTP 路径，并验证
+Core 发出的事件类型都在 `events.schema.json` 中；增加或删除接口时必须在
+同一提交更新契约。

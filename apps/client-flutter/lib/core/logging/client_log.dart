@@ -1,11 +1,14 @@
-part of '../main.dart';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:path_provider/path_provider.dart';
 
 /// Lightweight, local-only JSON Lines diagnostics for the client.
 ///
 /// Writes are serialized away from the playback path and the active log is
 /// rotated before it grows beyond 5 MiB. No audio, artwork, credentials, or
 /// request bodies are recorded.
-class _ClientLog {
+class ClientLog {
   static const int _maxBytes = 5 * 1024 * 1024;
   static const int _retainedFiles = 3;
 

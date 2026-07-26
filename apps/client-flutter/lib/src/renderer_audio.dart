@@ -1,4 +1,4 @@
-part of '../main.dart';
+part of '../intmusic_client.dart';
 
 bool get _usesDesktopRendererBackend => Platform.isMacOS || Platform.isWindows;
 

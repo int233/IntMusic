@@ -269,3 +269,286 @@ paths:
       responses:
         "200":
           description: Diagnostic data.
+  /library/roots/{id}:
+    delete:
+      summary: Remove a library root.
+      responses:
+        "200":
+          description: Root removed.
+  /client-sync/snapshot:
+    get:
+      summary: Return the normalized offline-first Client snapshot.
+      responses:
+        "200":
+          description: Client synchronization snapshot.
+  /client-sync/changes:
+    get:
+      summary: Return invalidated cache scopes after a synchronization cursor.
+      responses:
+        "200":
+          description: Ordered synchronization changes.
+  /client-sync/details:
+    get:
+      summary: Return a page of entity details for background cache warming.
+      responses:
+        "200":
+          description: Entity details and continuation cursor.
+  /scan/problems:
+    get:
+      summary: List problems recorded by library scans.
+      responses:
+        "200":
+          description: Scan problems.
+  /albums/{album_id}:
+    get:
+      summary: Return an album and its release-track ordering.
+      responses:
+        "200":
+          description: Album detail.
+  /artists/{artist_id}:
+    get:
+      summary: Return artist metadata, releases, tracks, assets, and visuals.
+      responses:
+        "200":
+          description: Artist detail.
+    post:
+      summary: Update user-managed artist profile fields.
+      responses:
+        "200":
+          description: Updated artist detail.
+  /artists/{artist_id}/musicbrainz/preview:
+    post:
+      summary: Preview MusicBrainz profile metadata without changing local data.
+      responses:
+        "200":
+          description: Metadata preview.
+  /artists/{artist_id}/assets:
+    get:
+      summary: List artist image assets.
+      responses:
+        "200":
+          description: Artist assets.
+    post:
+      summary: Upload one or more artist image assets.
+      responses:
+        "200":
+          description: Updated artist detail.
+  /artists/{artist_id}/assets/{asset_id}:
+    post:
+      summary: Update an artist asset classification.
+      responses:
+        "200":
+          description: Updated asset.
+    delete:
+      summary: Soft-delete an artist asset.
+      responses:
+        "200":
+          description: Updated artist detail.
+  /artists/{artist_id}/visuals/{slot}:
+    post:
+      summary: Update one artist visual slot and up to five crop regions.
+      responses:
+        "200":
+          description: Updated visual.
+  /artwork/albums/{album_id}:
+    get:
+      summary: Return album artwork.
+      responses:
+        "200":
+          description: Encoded artwork.
+  /artwork/tracks/{track_id}:
+    get:
+      summary: Return track artwork.
+      responses:
+        "200":
+          description: Encoded artwork.
+  /artwork/artists/{artist_id}/{slot}:
+    get:
+      summary: Render an artist visual slot at the requested size.
+      responses:
+        "200":
+          description: Encoded artist artwork.
+  /tracks/{track_id}/favorite:
+    post:
+      summary: Update favorite and user-rating state.
+      responses:
+        "200":
+          description: Updated track summary.
+  /playlists:
+    get:
+      summary: List manual, smart, and favorite playlists.
+      responses:
+        "200":
+          description: Playlists.
+    post:
+      summary: Create a playlist.
+      responses:
+        "200":
+          description: Created playlist.
+  /playlists/{playlist_id}:
+    get:
+      summary: Return playlist detail and ordered tracks.
+      responses:
+        "200":
+          description: Playlist detail.
+    post:
+      summary: Update playlist metadata or rules.
+      responses:
+        "200":
+          description: Updated playlist.
+    delete:
+      summary: Delete a playlist.
+      responses:
+        "200":
+          description: Playlist deleted.
+  /playlists/{playlist_id}/tracks:
+    post:
+      summary: Add a track at an optional playlist position.
+      responses:
+        "200":
+          description: Updated playlist.
+  /playlists/{playlist_id}/tracks/{track_id}:
+    delete:
+      summary: Remove a track from a playlist.
+      responses:
+        "200":
+          description: Updated playlist.
+  /zones/{zone_id}/play-collection:
+    post:
+      summary: Atomically replace a queue and start one selected collection item.
+      responses:
+        "200":
+          description: Playback state and queue.
+  /zones/{zone_id}/stop:
+    post:
+      summary: Stop playback in a zone.
+      responses:
+        "200":
+          description: Playback state.
+  /zones/{zone_id}/seek:
+    post:
+      summary: Seek the active zone.
+      responses:
+        "200":
+          description: Playback state.
+  /zones/{zone_id}/queue:
+    get:
+      summary: Return the durable queue snapshot.
+      responses:
+        "200":
+          description: Playback queue.
+    post:
+      summary: Replace the durable queue and current index.
+      responses:
+        "200":
+          description: Playback queue.
+  /zones/{zone_id}/queue/items:
+    post:
+      summary: Add one or more items to a durable queue.
+      responses:
+        "200":
+          description: Playback queue.
+  /zones/{zone_id}/queue/items/{item_id}:
+    delete:
+      summary: Remove one durable queue item.
+      responses:
+        "200":
+          description: Playback queue.
+  /zones/{zone_id}/queue/move:
+    post:
+      summary: Move an item within a durable queue.
+      responses:
+        "200":
+          description: Playback queue.
+  /zones/{zone_id}/queue/mode:
+    post:
+      summary: Change sequential, repeat, or shuffle behavior.
+      responses:
+        "200":
+          description: Playback queue.
+  /zones/{zone_id}/next:
+    post:
+      summary: Advance according to the persisted queue mode.
+      responses:
+        "200":
+          description: Playback state.
+  /zones/{zone_id}/previous:
+    post:
+      summary: Move backward according to the persisted queue mode.
+      responses:
+        "200":
+          description: Playback state.
+  /zones/{zone_id}/volume:
+    get:
+      summary: Return player and system-endpoint volume layers.
+      responses:
+        "200":
+          description: Dual-layer zone volume.
+    post:
+      summary: Update the selected player or system-endpoint volume layer.
+      responses:
+        "200":
+          description: Dual-layer zone volume.
+  /zones/{zone_id}/alias:
+    post:
+      summary: Set or clear the user-facing zone alias.
+      responses:
+        "200":
+          description: Updated zone.
+  /playback/history:
+    get:
+      summary: List playback transport events.
+      responses:
+        "200":
+          description: Playback events.
+  /playback/sessions:
+    get:
+      summary: List completed and active listening sessions.
+      responses:
+        "200":
+          description: Playback sessions.
+  /playback/stats:
+    get:
+      summary: Return aggregate listening statistics.
+      responses:
+        "200":
+          description: Playback statistics.
+  /settings:
+    get:
+      summary: Return the complete server settings projection.
+      responses:
+        "200":
+          description: Settings.
+  /settings/server:
+    get:
+      summary: Return server identity settings.
+      responses:
+        "200":
+          description: Server settings.
+    post:
+      summary: Update server identity settings.
+      responses:
+        "200":
+          description: Server settings.
+  /settings/favorites:
+    get:
+      summary: Return favorite and rating interoperability settings.
+      responses:
+        "200":
+          description: Favorite settings.
+    post:
+      summary: Update favorite and rating interoperability settings.
+      responses:
+        "200":
+          description: Favorite settings.
+  /settings/metadata:
+    get:
+      summary: Return metadata parsing settings.
+      responses:
+        "200":
+          description: Metadata settings.
+    post:
+      summary: Update metadata parsing settings.
+      responses:
+        "200":
+          description: Metadata settings.

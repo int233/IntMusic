@@ -1,0 +1,818 @@
+use super::*;
+
+pub async fn album_detail(pool: &DbPool, album_id: i64) -> Result<AlbumDetail> {
+    let album_row = sqlx::query(
+        r#"
+        SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
+               al.cover_asset_id, COUNT(t.id) AS track_count
+        FROM albums al
+        LEFT JOIN tracks t ON t.album_id = al.id
+        WHERE al.id = ?1
+        GROUP BY al.id
+        "#,
+    )
+    .bind(album_id)
+    .fetch_one(pool)
+    .await?;
+
+    let track_rows = sqlx::query(
+        track_select_sql(
+            "WHERE t.album_id = ?1 GROUP BY t.id ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0), t.title",
+        )
+        .as_str(),
+    )
+    .bind(album_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(AlbumDetail {
+        album: row_to_album(album_row)?,
+        tracks: track_rows
+            .into_iter()
+            .map(row_to_track)
+            .collect::<Result<_>>()?,
+    })
+}
+
+pub async fn track_media_profile(
+    pool: &DbPool,
+    track_id: i64,
+) -> Result<Option<TrackMediaProfile>> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            rt.id AS release_track_id,
+            work.id AS work_id,
+            work.global_id AS work_global_id,
+            work.title AS work_title,
+            work.disambiguation AS work_disambiguation,
+            recording.id AS recording_id,
+            recording.global_id AS recording_global_id,
+            recording.title AS recording_title,
+            recording.version_title AS recording_version_title,
+            recording.recording_kind,
+            recording.duration_ms AS recording_duration_ms,
+            release.id AS release_id,
+            release.global_id AS release_global_id,
+            release.album_id AS release_album_id,
+            album.title AS release_title,
+            release.edition_title AS release_edition_title,
+            release.edition_kind AS release_edition_kind,
+            album.date AS release_date,
+            album.year AS release_year
+        FROM legacy_track_catalog_links links
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        JOIN catalog_works work ON work.id = recording.work_id
+        LEFT JOIN release_editions release ON release.id = rt.release_id
+        LEFT JOIN albums album ON album.id = release.album_id
+        WHERE links.track_id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+
+    let release_track_id: i64 = row.try_get("release_track_id")?;
+    let recording_id: i64 = row.try_get("recording_id")?;
+    let work = CatalogWorkSummary {
+        id: row.try_get("work_id")?,
+        global_id: row.try_get("work_global_id")?,
+        title: row.try_get("work_title")?,
+        disambiguation: row.try_get("work_disambiguation")?,
+    };
+    let recording = CatalogRecordingSummary {
+        id: recording_id,
+        global_id: row.try_get("recording_global_id")?,
+        title: row.try_get("recording_title")?,
+        version_title: row.try_get("recording_version_title")?,
+        recording_kind: row.try_get("recording_kind")?,
+        duration_ms: row.try_get("recording_duration_ms")?,
+    };
+    let release = release_edition_from_row(&row)?;
+
+    let variant_rows = sqlx::query(
+        r#"
+        SELECT
+            variant.id,
+            variant.global_id,
+            relation.relation_kind,
+            relation.is_preferred,
+            variant.codec,
+            variant.container,
+            variant.bitrate,
+            variant.sample_rate,
+            variant.bit_depth,
+            variant.channels,
+            variant.duration_ms,
+            variant.content_hash,
+            master.id AS master_id,
+            master.global_id AS master_global_id,
+            master.label AS master_label,
+            master.mastering_kind,
+            master.release_year AS master_release_year
+        FROM release_track_media_variants relation
+        JOIN media_variants variant ON variant.id = relation.media_variant_id
+        JOIN audio_masters master ON master.id = variant.audio_master_id
+        WHERE relation.release_track_id = ?1
+        ORDER BY relation.is_preferred DESC,
+                 COALESCE(variant.bit_depth, 0) DESC,
+                 COALESCE(variant.sample_rate, 0) DESC,
+                 COALESCE(variant.bitrate, 0) DESC,
+                 variant.id
+        "#,
+    )
+    .bind(release_track_id)
+    .fetch_all(pool)
+    .await?;
+
+    // Fetch every physical copy in one round trip. A track may expose several
+    // quality variants, so querying replicas inside the variant loop turns the
+    // detail endpoint into an avoidable N+1 query path.
+    let replica_rows = sqlx::query(
+        r#"
+        SELECT
+            replica.media_variant_id,
+            replica.id,
+            replica.file_id,
+            replica.device_id,
+            COALESCE(device.name, 'Core local') AS device_name,
+            replica.source_kind,
+            CASE
+                WHEN file.deleted_at IS NOT NULL THEN 'missing'
+                ELSE replica.availability_state
+            END AS availability_state,
+            replica.is_primary,
+            file.relative_path,
+            root.external_id AS root_external_id,
+            file.client_file_id,
+            replica.last_verified_at,
+            file.extension,
+            file.size_bytes,
+            file.modified_at,
+            file.codec,
+            file.bitrate,
+            file.sample_rate,
+            file.bit_depth,
+            file.channels,
+            file.duration_ms
+        FROM release_track_media_variants relation
+        JOIN media_replicas replica
+          ON replica.media_variant_id = relation.media_variant_id
+        LEFT JOIN devices device ON device.id = replica.device_id
+        LEFT JOIN files file ON file.id = replica.file_id
+        LEFT JOIN library_roots root ON root.id = replica.library_root_id
+        WHERE relation.release_track_id = ?1
+        ORDER BY replica.media_variant_id,
+                 replica.is_primary DESC,
+                 device_name,
+                 replica.id
+        "#,
+    )
+    .bind(release_track_id)
+    .fetch_all(pool)
+    .await?;
+    let mut replicas_by_variant = HashMap::<i64, Vec<MediaReplicaSummary>>::new();
+    for replica_row in replica_rows {
+        let variant_id: i64 = replica_row.try_get("media_variant_id")?;
+        let last_verified_at: Option<String> = replica_row.try_get("last_verified_at")?;
+        let modified_at: Option<String> = replica_row.try_get("modified_at")?;
+        replicas_by_variant
+            .entry(variant_id)
+            .or_default()
+            .push(MediaReplicaSummary {
+                id: replica_row.try_get("id")?,
+                file_id: replica_row.try_get("file_id")?,
+                device_id: replica_row.try_get("device_id")?,
+                device_name: replica_row.try_get("device_name")?,
+                source_kind: replica_row.try_get("source_kind")?,
+                availability_state: replica_row.try_get("availability_state")?,
+                is_primary: replica_row.try_get::<i64, _>("is_primary")? != 0,
+                relative_path: replica_row.try_get("relative_path")?,
+                root_external_id: replica_row.try_get("root_external_id")?,
+                client_file_id: replica_row.try_get("client_file_id")?,
+                last_verified_at: last_verified_at.map(parse_datetime).transpose()?,
+                extension: replica_row.try_get("extension")?,
+                size_bytes: replica_row.try_get("size_bytes")?,
+                modified_at: modified_at.map(parse_datetime).transpose()?,
+                codec: replica_row.try_get("codec")?,
+                bitrate: replica_row.try_get("bitrate")?,
+                sample_rate: replica_row.try_get("sample_rate")?,
+                bit_depth: replica_row.try_get("bit_depth")?,
+                channels: replica_row.try_get("channels")?,
+                duration_ms: replica_row.try_get("duration_ms")?,
+            });
+    }
+
+    let mut variants = Vec::with_capacity(variant_rows.len());
+    for variant_row in variant_rows {
+        let variant_id: i64 = variant_row.try_get("id")?;
+        let replicas = replicas_by_variant.remove(&variant_id).unwrap_or_default();
+        variants.push(MediaVariantSummary {
+            id: variant_id,
+            global_id: variant_row.try_get("global_id")?,
+            relation_kind: variant_row.try_get("relation_kind")?,
+            is_preferred: variant_row.try_get::<i64, _>("is_preferred")? != 0,
+            codec: variant_row.try_get("codec")?,
+            container: variant_row.try_get("container")?,
+            bitrate: variant_row.try_get("bitrate")?,
+            sample_rate: variant_row.try_get("sample_rate")?,
+            bit_depth: variant_row.try_get("bit_depth")?,
+            channels: variant_row.try_get("channels")?,
+            duration_ms: variant_row.try_get("duration_ms")?,
+            content_hash: variant_row.try_get("content_hash")?,
+            master: AudioMasterSummary {
+                id: variant_row.try_get("master_id")?,
+                global_id: variant_row.try_get("master_global_id")?,
+                label: variant_row.try_get("master_label")?,
+                mastering_kind: variant_row.try_get("mastering_kind")?,
+                release_year: variant_row.try_get("master_release_year")?,
+            },
+            replicas,
+        });
+    }
+
+    let related_rows = sqlx::query(
+        r#"
+        SELECT
+            rt.id AS related_release_track_id,
+            MIN(links.track_id) AS legacy_track_id,
+            rt.title,
+            rt.disc_number,
+            rt.track_number,
+            release.id AS release_id,
+            release.global_id AS release_global_id,
+            release.album_id AS release_album_id,
+            album.title AS release_title,
+            release.edition_title AS release_edition_title,
+            release.edition_kind AS release_edition_kind,
+            album.date AS release_date,
+            album.year AS release_year
+        FROM release_tracks rt
+        LEFT JOIN legacy_track_catalog_links links ON links.release_track_id = rt.id
+        LEFT JOIN release_editions release ON release.id = rt.release_id
+        LEFT JOIN albums album ON album.id = release.album_id
+        WHERE rt.recording_id = ?1
+        GROUP BY rt.id
+        ORDER BY COALESCE(album.year, 0), COALESCE(album.title, ''), rt.disc_number, rt.track_number
+        "#,
+    )
+    .bind(recording_id)
+    .fetch_all(pool)
+    .await?;
+    let related_release_tracks = related_rows
+        .into_iter()
+        .map(|related_row| {
+            let related_release_track_id: i64 = related_row.try_get("related_release_track_id")?;
+            Ok(RelatedReleaseTrackSummary {
+                release_track_id: related_release_track_id,
+                legacy_track_id: related_row.try_get("legacy_track_id")?,
+                release: release_edition_from_row(&related_row)?,
+                title: related_row.try_get("title")?,
+                disc_number: related_row.try_get("disc_number")?,
+                track_number: related_row.try_get("track_number")?,
+                is_current: related_release_track_id == release_track_id,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(TrackMediaProfile {
+        release_track_id,
+        work,
+        recording,
+        release,
+        variants,
+        related_release_tracks,
+    }))
+}
+
+pub async fn recording_link_candidates(
+    pool: &DbPool,
+    track_id: i64,
+    limit: u32,
+) -> Result<Vec<RecordingLinkCandidate>> {
+    let target = sqlx::query(
+        r#"
+        SELECT
+            t.title,
+            t.duration_ms,
+            rt.recording_id,
+            recording.recording_kind,
+            COALESCE(GROUP_CONCAT(artist.name, char(31)), '') AS artists
+        FROM tracks t
+        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists artist ON artist.id = ta.artist_id
+        WHERE t.id = ?1
+        GROUP BY t.id
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await?;
+    let target_title: String = target.try_get("title")?;
+    let target_duration: Option<i64> = target.try_get("duration_ms")?;
+    let target_recording_id: i64 = target.try_get("recording_id")?;
+    let target_recording_kind: String = target.try_get("recording_kind")?;
+    let target_artists = normalized_artist_names(&target.try_get::<String, _>("artists")?);
+
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            t.id AS track_id,
+            rt.id AS release_track_id,
+            rt.recording_id,
+            recording.recording_kind,
+            t.title,
+            t.duration_ms,
+            t.album_id,
+            album.title AS album_title,
+            album.year,
+            t.disc_number,
+            t.track_number,
+            COALESCE(GROUP_CONCAT(artist.name, char(31)), '') AS artists,
+            COALESCE(GROUP_CONCAT(DISTINCT artist.name), NULL) AS artist_display
+        FROM tracks t
+        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        JOIN catalog_recordings recording ON recording.id = rt.recording_id
+        LEFT JOIN albums album ON album.id = t.album_id
+        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
+        LEFT JOIN artists artist ON artist.id = ta.artist_id
+        WHERE t.id <> ?1
+          AND lower(trim(t.title)) = lower(trim(?2))
+          AND (
+              ?3 IS NULL
+              OR t.duration_ms IS NULL
+              OR ABS(t.duration_ms - ?3) <= 15000
+          )
+        GROUP BY t.id
+        LIMIT 250
+        "#,
+    )
+    .bind(track_id)
+    .bind(&target_title)
+    .bind(target_duration)
+    .fetch_all(pool)
+    .await?;
+
+    let mut candidates = Vec::new();
+    for row in rows {
+        let recording_id: i64 = row.try_get("recording_id")?;
+        let duration_ms: Option<i64> = row.try_get("duration_ms")?;
+        let recording_kind: String = row.try_get("recording_kind")?;
+        let artists = normalized_artist_names(&row.try_get::<String, _>("artists")?);
+        let mut confidence = 0.45_f32;
+        let mut reasons = vec!["same_title".to_string()];
+        if !target_artists.is_empty()
+            && target_artists.iter().any(|artist| artists.contains(artist))
+        {
+            confidence += 0.25;
+            reasons.push("same_primary_artist".to_string());
+        }
+        if let (Some(target_duration), Some(duration_ms)) = (target_duration, duration_ms) {
+            let difference = (target_duration - duration_ms).abs();
+            if difference <= 1_000 {
+                confidence += 0.2;
+                reasons.push("duration_within_1s".to_string());
+            } else if difference <= 3_000 {
+                confidence += 0.15;
+                reasons.push("duration_within_3s".to_string());
+            } else if difference <= 10_000 {
+                confidence += 0.08;
+                reasons.push("duration_within_10s".to_string());
+            }
+        }
+        if recording_kind == target_recording_kind {
+            confidence += 0.1;
+            reasons.push("same_recording_kind".to_string());
+        }
+        let already_linked = recording_id == target_recording_id;
+        if already_linked {
+            confidence = 1.0;
+            reasons.push("already_linked".to_string());
+        }
+        if confidence < 0.55 {
+            continue;
+        }
+        candidates.push(RecordingLinkCandidate {
+            track_id: row.try_get("track_id")?,
+            release_track_id: row.try_get("release_track_id")?,
+            recording_id,
+            title: row.try_get("title")?,
+            artist_display: row.try_get("artist_display")?,
+            album_id: row.try_get("album_id")?,
+            album_title: row.try_get("album_title")?,
+            year: row.try_get("year")?,
+            disc_number: row.try_get("disc_number")?,
+            track_number: row.try_get("track_number")?,
+            duration_ms,
+            already_linked,
+            confidence: confidence.min(1.0),
+            reasons,
+        });
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .already_linked
+            .cmp(&left.already_linked)
+            .then_with(|| {
+                right
+                    .confidence
+                    .partial_cmp(&left.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.album_title.cmp(&right.album_title))
+            .then_with(|| left.track_id.cmp(&right.track_id))
+    });
+    candidates.truncate(limit.clamp(1, 100) as usize);
+    Ok(candidates)
+}
+
+fn normalized_artist_names(value: &str) -> Vec<String> {
+    let mut names = value
+        .split('\u{1f}')
+        .map(normalize_text)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub async fn link_track_to_recording(
+    pool: &DbPool,
+    track_id: i64,
+    source_track_id: i64,
+) -> Result<TrackMediaProfile> {
+    if track_id == source_track_id {
+        bail!("a release track cannot be linked to itself");
+    }
+    let mut transaction = pool.begin().await?;
+    let source_recording_id: i64 = sqlx::query_scalar(
+        r#"
+        SELECT rt.recording_id
+        FROM legacy_track_catalog_links links
+        JOIN release_tracks rt ON rt.id = links.release_track_id
+        WHERE links.track_id = ?1
+        "#,
+    )
+    .bind(source_track_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let target_release_track_id: i64 = sqlx::query_scalar(
+        "SELECT release_track_id FROM legacy_track_catalog_links WHERE track_id = ?1",
+    )
+    .bind(track_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query("UPDATE release_tracks SET recording_id = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(source_recording_id)
+        .bind(&now)
+        .bind(target_release_track_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE audio_masters
+        SET recording_id = ?1, updated_at = ?2
+        WHERE id IN (
+            SELECT variant.audio_master_id
+            FROM release_track_media_variants relation
+            JOIN media_variants variant ON variant.id = relation.media_variant_id
+            WHERE relation.release_track_id = ?3
+        )
+        "#,
+    )
+    .bind(source_recording_id)
+    .bind(&now)
+    .bind(target_release_track_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE legacy_track_catalog_links
+        SET match_kind = 'confirmed_recording', match_confidence = 1.0, updated_at = ?1
+        WHERE track_id = ?2
+        "#,
+    )
+    .bind(&now)
+    .bind(track_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    track_media_profile(pool, track_id)
+        .await?
+        .context("track media profile is missing after recording link")
+}
+
+pub async fn detach_track_recording(pool: &DbPool, track_id: i64) -> Result<TrackMediaProfile> {
+    let mut transaction = pool.begin().await?;
+    let identity = sqlx::query(
+        r#"
+        SELECT
+            links.release_track_id,
+            t.title,
+            t.subtitle,
+            t.duration_ms
+        FROM tracks t
+        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let release_track_id: i64 = identity.try_get("release_track_id")?;
+    let title: String = identity.try_get("title")?;
+    let subtitle: Option<String> = identity.try_get("subtitle")?;
+    let duration_ms: Option<i64> = identity.try_get("duration_ms")?;
+    let now = Utc::now().to_rfc3339();
+    let work_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO catalog_works (
+            global_id, title, normalized_title, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?4)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(&title)
+    .bind(normalize_text(&title))
+    .bind(&now)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let recording_id: i64 = sqlx::query_scalar(
+        r#"
+        INSERT INTO catalog_recordings (
+            global_id, work_id, title, version_title, recording_kind,
+            duration_ms, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(work_id)
+    .bind(&title)
+    .bind(&subtitle)
+    .bind(inferred_recording_kind(subtitle.as_deref()))
+    .bind(duration_ms)
+    .bind(&now)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE release_tracks SET recording_id = ?1, updated_at = ?2 WHERE id = ?3")
+        .bind(recording_id)
+        .bind(&now)
+        .bind(release_track_id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE audio_masters
+        SET recording_id = ?1, updated_at = ?2
+        WHERE id IN (
+            SELECT variant.audio_master_id
+            FROM release_track_media_variants relation
+            JOIN media_variants variant ON variant.id = relation.media_variant_id
+            WHERE relation.release_track_id = ?3
+        )
+        "#,
+    )
+    .bind(recording_id)
+    .bind(&now)
+    .bind(release_track_id)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE legacy_track_catalog_links
+        SET match_kind = 'detached', match_confidence = 1.0, updated_at = ?1
+        WHERE track_id = ?2
+        "#,
+    )
+    .bind(&now)
+    .bind(track_id)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    track_media_profile(pool, track_id)
+        .await?
+        .context("track media profile is missing after recording detach")
+}
+
+fn release_edition_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> Result<Option<ReleaseEditionSummary>> {
+    let id: Option<i64> = row.try_get("release_id")?;
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    Ok(Some(ReleaseEditionSummary {
+        id,
+        global_id: row.try_get("release_global_id")?,
+        album_id: row.try_get("release_album_id")?,
+        title: row.try_get("release_title")?,
+        edition_title: row.try_get("release_edition_title")?,
+        edition_kind: row.try_get("release_edition_kind")?,
+        date: row.try_get("release_date")?,
+        year: row.try_get("release_year")?,
+    }))
+}
+
+pub async fn track_detail(pool: &DbPool, track_id: i64) -> Result<TrackDetail> {
+    let track_row = sqlx::query(track_select_sql("WHERE t.id = ?1 GROUP BY t.id").as_str())
+        .bind(track_id)
+        .fetch_one(pool)
+        .await?;
+    let track = row_to_track(track_row)?;
+
+    let file_row = sqlx::query(
+        r#"
+        SELECT f.path, f.relative_path, f.extension, f.size_bytes, f.modified_at, f.scan_status
+        FROM tracks t
+        JOIN files f ON f.id = t.file_id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await?;
+
+    let genres = sqlx::query(
+        r#"
+        SELECT g.name
+        FROM track_genres tg
+        JOIN genres g ON g.id = tg.genre_id
+        WHERE tg.track_id = ?1
+        ORDER BY g.name
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| row.try_get("name"))
+    .collect::<Result<Vec<String>, sqlx::Error>>()?;
+    let composers = track_artist_role_names(pool, track_id, "composer").await?;
+    let lyricists = track_artist_role_names(pool, track_id, "lyricist").await?;
+
+    let lyrics = sqlx::query(
+        r#"
+        SELECT kind, text, language, translation_text, pronunciation_text,
+               offset_ms, source, revision, parsed_json
+        FROM lyrics
+        WHERE track_id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_optional(pool)
+    .await?
+    .map(|row| {
+        let parsed_json: Option<String> = row.try_get("parsed_json")?;
+        Ok::<_, sqlx::Error>(LyricPayload {
+            kind: row.try_get("kind")?,
+            text: row.try_get("text")?,
+            language: row.try_get("language")?,
+            translation: row.try_get("translation_text")?,
+            pronunciation: row.try_get("pronunciation_text")?,
+            offset_ms: row.try_get("offset_ms")?,
+            source: row.try_get("source")?,
+            revision: row.try_get("revision")?,
+            cues: parsed_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str(value).ok())
+                .unwrap_or_default(),
+        })
+    })
+    .transpose()?;
+
+    Ok(TrackDetail {
+        track,
+        file_path: file_row.try_get("path")?,
+        relative_path: file_row.try_get("relative_path")?,
+        extension: file_row.try_get("extension")?,
+        size_bytes: file_row.try_get("size_bytes")?,
+        modified_at: parse_datetime(file_row.try_get::<String, _>("modified_at")?)?,
+        scan_status: file_row.try_get("scan_status")?,
+        genres,
+        composers,
+        lyricists,
+        lyrics,
+        media: track_media_profile(pool, track_id).await?,
+    })
+}
+
+async fn track_artist_role_names(pool: &DbPool, track_id: i64, role: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query(
+        r#"
+        SELECT ar.name
+        FROM track_artists ta
+        JOIN artists ar ON ar.id = ta.artist_id
+        WHERE ta.track_id = ?1 AND ta.role = ?2
+        ORDER BY ta.position, ar.name
+        "#,
+    )
+    .bind(track_id)
+    .bind(role)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| row.try_get("name"))
+    .collect::<Result<Vec<String>, sqlx::Error>>()?)
+}
+
+pub(crate) async fn current_track_ingest(pool: &DbPool, track_id: i64) -> Result<TrackIngest> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            t.title, t.sort_title, t.subtitle, al.title AS album,
+            t.disc_number, t.disc_total, t.track_number, t.track_total,
+            t.duration_ms, t.date, t.year, t.bpm, t.comment,
+            t.tag_rating, t.tag_rating_scale, t.album_id
+        FROM tracks t
+        LEFT JOIN albums al ON al.id = t.album_id
+        WHERE t.id = ?1
+        "#,
+    )
+    .bind(track_id)
+    .fetch_one(pool)
+    .await?;
+    let album_id: Option<i64> = row.try_get("album_id")?;
+    let album_artists = if let Some(album_id) = album_id {
+        sqlx::query(
+            r#"
+            SELECT ar.name
+            FROM album_artists aa
+            JOIN artists ar ON ar.id = aa.artist_id
+            WHERE aa.album_id = ?1
+            ORDER BY aa.position, ar.name
+            "#,
+        )
+        .bind(album_id)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get("name"))
+        .collect::<Result<Vec<String>, sqlx::Error>>()?
+    } else {
+        Vec::new()
+    };
+    let genres = sqlx::query(
+        r#"
+        SELECT g.name
+        FROM track_genres tg
+        JOIN genres g ON g.id = tg.genre_id
+        WHERE tg.track_id = ?1
+        ORDER BY g.name
+        "#,
+    )
+    .bind(track_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| row.try_get("name"))
+    .collect::<Result<Vec<String>, sqlx::Error>>()?;
+    let lyrics = sqlx::query("SELECT kind, text FROM lyrics WHERE track_id = ?1")
+        .bind(track_id)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(TrackIngest {
+        title: row.try_get("title")?,
+        sort_title: row.try_get("sort_title")?,
+        subtitle: row.try_get("subtitle")?,
+        album: row.try_get("album")?,
+        track_artists: track_artist_role_names(pool, track_id, "primary").await?,
+        album_artists,
+        composers: track_artist_role_names(pool, track_id, "composer").await?,
+        lyricists: track_artist_role_names(pool, track_id, "lyricist").await?,
+        genres,
+        disc_number: row.try_get("disc_number")?,
+        disc_total: row.try_get("disc_total")?,
+        track_number: row.try_get("track_number")?,
+        track_total: row.try_get("track_total")?,
+        duration_ms: row.try_get("duration_ms")?,
+        date: row.try_get("date")?,
+        year: row.try_get("year")?,
+        bpm: row.try_get("bpm")?,
+        comment: row.try_get("comment")?,
+        lyrics: lyrics
+            .as_ref()
+            .map(|lyrics| lyrics.try_get("text"))
+            .transpose()?,
+        lyrics_kind: lyrics
+            .as_ref()
+            .map(|lyrics| lyrics.try_get("kind"))
+            .transpose()?,
+        tag_rating: row.try_get("tag_rating")?,
+        tag_rating_scale: row.try_get("tag_rating_scale")?,
+    })
+}

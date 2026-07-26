@@ -1,11 +1,18 @@
-part of '../main.dart';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:isolate';
+
+import 'package:file_selector/file_selector.dart';
+
+import '../logging/client_log.dart';
 
 class CoreApiClient {
   factory CoreApiClient(
     String baseUrl, {
     Duration timeout = const Duration(seconds: 20),
   }) {
-    final normalized = baseUrl.trim().replaceAll(RegExp(r'/+$'), '');
+    final normalized = normalizeBaseUrl(baseUrl);
     return _instances.putIfAbsent(
       normalized,
       () => CoreApiClient._(normalized, timeout),
@@ -34,6 +41,34 @@ class CoreApiClient {
   final Duration timeout;
   late final HttpClient _client;
   late final HttpClient _controlClient;
+  bool _closed = false;
+
+  static String normalizeBaseUrl(String value) =>
+      value.trim().replaceAll(RegExp(r'/+$'), '');
+
+  static void retainOnly(String baseUrl) {
+    final retained = normalizeBaseUrl(baseUrl);
+    final staleKeys = _instances.keys
+        .where((key) => key != retained)
+        .toList(growable: false);
+    for (final key in staleKeys) {
+      _instances.remove(key)?.close();
+    }
+  }
+
+  static void closeAll() {
+    for (final client in _instances.values) {
+      client.close();
+    }
+    _instances.clear();
+  }
+
+  void close() {
+    if (_closed) return;
+    _closed = true;
+    _client.close(force: true);
+    _controlClient.close(force: true);
+  }
 
   Future<dynamic> getJson(String path, {Duration? requestTimeout}) =>
       _request('GET', path, requestTimeout: requestTimeout);
@@ -89,8 +124,10 @@ class CoreApiClient {
       request.write(
         'Content-Disposition: form-data; name="file"; filename="$safeName"\r\n',
       );
-      request.write('Content-Type: application/octet-stream\r\n\r\n');
-      request.add(await file.readAsBytes().timeout(uploadTimeout));
+      request.write(
+        'Content-Type: ${file.mimeType ?? 'application/octet-stream'}\r\n\r\n',
+      );
+      await request.addStream(file.openRead().timeout(uploadTimeout));
       request.write('\r\n--$boundary--\r\n');
       final response = await request.close().timeout(uploadTimeout);
       final text = await response
@@ -150,6 +187,9 @@ class CoreApiClient {
     Duration? requestTimeout,
     bool control = false,
   }) async {
+    if (_closed) {
+      throw StateError('CoreApiClient for $baseUrl has been closed.');
+    }
     final effectiveTimeout = requestTimeout ?? timeout;
     final uri = Uri.parse(apiUrl(path));
     final stopwatch = Stopwatch()..start();
@@ -165,7 +205,7 @@ class CoreApiClient {
       return remaining;
     }
 
-    _ClientLog.event(
+    ClientLog.event(
       'core.http.start',
       data: <String, Object?>{
         'method': method,
@@ -200,14 +240,14 @@ class CoreApiClient {
           .transform(utf8.decoder)
           .join()
           .timeout(remainingTimeout());
-      _ClientLog.event(
+      ClientLog.event(
         'core.http.end',
         data: <String, Object?>{
           'method': method,
           'path': uri.path,
           'status': response.statusCode,
           'elapsed_ms': stopwatch.elapsedMilliseconds,
-          'response_bytes': utf8.encode(text).length,
+          'response_characters': text.length,
           'channel': control ? 'playback_control' : 'background',
         },
       );
@@ -217,9 +257,11 @@ class CoreApiClient {
       if (text.isEmpty) {
         return null;
       }
-      return jsonDecode(text);
+      return text.length >= 1024 * 1024
+          ? Isolate.run<dynamic>(() => jsonDecode(text))
+          : jsonDecode(text);
     } catch (error, stackTrace) {
-      _ClientLog.error(
+      ClientLog.error(
         'core.http.error',
         error,
         stackTrace: stackTrace,

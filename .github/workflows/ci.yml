@@ -32,6 +32,10 @@ jobs:
       - working-directory: apps/client-flutter
         run: flutter pub get
       - working-directory: apps/client-flutter
+        run: dart format --output=none --set-exit-if-changed lib test tool
+      - working-directory: apps/client-flutter
+        run: dart run tool/check_architecture.dart
+      - working-directory: apps/client-flutter
         run: flutter analyze
       - working-directory: apps/client-flutter
         run: flutter test

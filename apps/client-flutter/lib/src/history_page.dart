@@ -1,4 +1,4 @@
-part of '../main.dart';
+part of '../intmusic_client.dart';
 
 class _HistoryPage extends StatelessWidget {
   const _HistoryPage({

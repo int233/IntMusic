@@ -1,4 +1,4 @@
-part of '../main.dart';
+part of '../intmusic_client.dart';
 
 const _intMusicServiceType = '_intmusic-core._tcp.local';
 const _corePortRangeStart = 49330;

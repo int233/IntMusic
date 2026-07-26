@@ -1,4 +1,4 @@
-part of '../main.dart';
+part of '../intmusic_client.dart';
 
 class _ClientCacheSnapshot {
   const _ClientCacheSnapshot({
@@ -31,16 +31,23 @@ class _ClientCacheStore {
   static Database? _database;
   static Future<void> _writeQueue = Future<void>.value();
 
+  static DatabaseFactory _factory() {
+    if (Platform.isAndroid || Platform.isIOS) {
+      return mobile_sqlite.databaseFactory;
+    }
+    sqfliteFfiInit();
+    return databaseFactoryFfi;
+  }
+
   static Future<Database> _open() async {
     final current = _database;
     if (current != null && current.isOpen) return current;
-    sqfliteFfiInit();
     final support = await getApplicationSupportDirectory();
     final cacheDirectory = Directory(
       '${support.path}${Platform.pathSeparator}cache',
     );
     await cacheDirectory.create(recursive: true);
-    final database = await databaseFactoryFfi.openDatabase(
+    final database = await _factory().openDatabase(
       '${cacheDirectory.path}${Platform.pathSeparator}client-cache-v1.sqlite3',
       options: OpenDatabaseOptions(
         version: _databaseVersion,
@@ -134,40 +141,14 @@ class _ClientCacheStore {
         where: 'core_url = ?',
         whereArgs: <Object?>[normalized],
       );
-      final values = <String, dynamic>{};
-      final trackDetails = <int, Map<String, dynamic>>{};
-      final albumDetails = <int, Map<String, dynamic>>{};
-      final artistDetails = <int, Map<String, dynamic>>{};
-      final playlistDetails = <int, Map<String, dynamic>>{};
+      final decoded = await Isolate.run(() => _decodeRows(rows));
+      final values = decoded.values;
+      final trackDetails = decoded.trackDetails;
+      final albumDetails = decoded.albumDetails;
+      final artistDetails = decoded.artistDetails;
+      final playlistDetails = decoded.playlistDetails;
       final pendingDetailRefresh = <String, int>{};
       final pendingDetailTargetCursors = <String, int>{};
-      for (final row in rows) {
-        final kind = row['kind']?.toString() ?? '';
-        final key = row['entity_key']?.toString() ?? '';
-        final payload = _decodeCachePayload(row['payload']);
-        if (payload == null) continue;
-        final id = int.tryParse(key);
-        switch (kind) {
-          case 'overview':
-            values[key] = payload;
-          case 'track_detail':
-            if (id != null && payload is Map) {
-              trackDetails[id] = payload.cast<String, dynamic>();
-            }
-          case 'album_detail':
-            if (id != null && payload is Map) {
-              albumDetails[id] = payload.cast<String, dynamic>();
-            }
-          case 'artist_detail':
-            if (id != null && payload is Map) {
-              artistDetails[id] = payload.cast<String, dynamic>();
-            }
-          case 'playlist_detail':
-            if (id != null && payload is Map) {
-              playlistDetails[id] = payload.cast<String, dynamic>();
-            }
-        }
-      }
       final warmRows = await database.query(
         'detail_warm_state',
         columns: <String>['kind', 'after_id', 'target_cursor'],
@@ -206,6 +187,48 @@ class _ClientCacheStore {
         pendingDetailTargetCursors: <String, int>{},
       );
     }
+  }
+
+  static _DecodedCacheRows _decodeRows(List<Map<String, Object?>> rows) {
+    final values = <String, dynamic>{};
+    final trackDetails = <int, Map<String, dynamic>>{};
+    final albumDetails = <int, Map<String, dynamic>>{};
+    final artistDetails = <int, Map<String, dynamic>>{};
+    final playlistDetails = <int, Map<String, dynamic>>{};
+    for (final row in rows) {
+      final kind = row['kind']?.toString() ?? '';
+      final key = row['entity_key']?.toString() ?? '';
+      final payload = _decodeCachePayload(row['payload']);
+      if (payload == null) continue;
+      final id = int.tryParse(key);
+      switch (kind) {
+        case 'overview':
+          values[key] = payload;
+        case 'track_detail':
+          if (id != null && payload is Map) {
+            trackDetails[id] = payload.cast<String, dynamic>();
+          }
+        case 'album_detail':
+          if (id != null && payload is Map) {
+            albumDetails[id] = payload.cast<String, dynamic>();
+          }
+        case 'artist_detail':
+          if (id != null && payload is Map) {
+            artistDetails[id] = payload.cast<String, dynamic>();
+          }
+        case 'playlist_detail':
+          if (id != null && payload is Map) {
+            playlistDetails[id] = payload.cast<String, dynamic>();
+          }
+      }
+    }
+    return _DecodedCacheRows(
+      values: values,
+      trackDetails: trackDetails,
+      albumDetails: albumDetails,
+      artistDetails: artistDetails,
+      playlistDetails: playlistDetails,
+    );
   }
 
   static Future<void> replaceSnapshot(
@@ -580,4 +603,20 @@ class _ClientCacheStore {
       return null;
     }
   }
+}
+
+class _DecodedCacheRows {
+  const _DecodedCacheRows({
+    required this.values,
+    required this.trackDetails,
+    required this.albumDetails,
+    required this.artistDetails,
+    required this.playlistDetails,
+  });
+
+  final Map<String, dynamic> values;
+  final Map<int, Map<String, dynamic>> trackDetails;
+  final Map<int, Map<String, dynamic>> albumDetails;
+  final Map<int, Map<String, dynamic>> artistDetails;
+  final Map<int, Map<String, dynamic>> playlistDetails;
 }
