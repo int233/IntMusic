@@ -246,6 +246,11 @@ String _zoneIdForOutput(Map<String, dynamic> output) {
 
 String _zoneGroupName(Map<String, dynamic> zone) {
   final nodeName = zone['node_name']?.toString().trim();
+  if (zone['is_local_client'] == true &&
+      nodeName != null &&
+      nodeName.isNotEmpty) {
+    return nodeName;
+  }
   if (nodeName != null && nodeName.isNotEmpty) {
     return zone['is_remote'] == true ? nodeName : 'Core local';
   }
@@ -270,11 +275,16 @@ String _zoneDisplayName(Map<String, dynamic> zone) {
 }
 
 String _zoneSubtitle(Map<String, dynamic> zone) {
+  final source = zone['is_local_client'] == true
+      ? 'local client'
+      : zone['is_remote'] == true
+      ? 'remote client'
+      : 'core';
   return _joinParts([
     _zoneTrackLabel(zone),
     _formatDuration(zone['position_ms']),
     zone['is_online'] == false ? 'offline' : 'online',
-    zone['is_remote'] == true ? 'remote' : 'core',
+    source,
   ]);
 }
 

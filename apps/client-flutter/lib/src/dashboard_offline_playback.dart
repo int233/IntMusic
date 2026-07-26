@@ -30,6 +30,9 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     return _isClientOutputId(outputId) ? outputId : null;
   }
 
+  String _offlineOutputForZone([String? zoneId]) =>
+      _clientOutputForZone(zoneId ?? _activeZoneId()) ?? _clientOutputId;
+
   bool _hasActiveRendererSource(String zoneId) {
     final outputId = _clientOutputForZone(zoneId);
     return outputId != null &&
@@ -167,7 +170,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     return true;
   }
 
-  void _setOfflineQueue(List<int> trackIds, {int? startIndex}) {
+  void _setOfflineQueue(List<int> trackIds, {int? startIndex, String? zoneId}) {
     final summaries = <int, Map<String, dynamic>>{
       for (final value in _tracks.whereType<Map>())
         if (_intValue(value['id']) != null)
@@ -184,8 +187,9 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     final validIds = trackIds
         .where((trackId) => summaries.containsKey(trackId))
         .toList(growable: false);
+    final targetZoneId = _offlineOutputForZone(zoneId);
     _playbackQueue = <String, dynamic>{
-      'zone_id': _clientOutputId,
+      'zone_id': targetZoneId,
       'revision': (_intValue(_playbackQueue?['revision']) ?? 0) + 1,
       'mode': _playbackMode.nameForApi,
       'current_index':
@@ -206,7 +210,9 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
   Future<void> _playOfflineTrack(
     int trackId, {
     List<int>? sourceTrackIds,
+    String? zoneId,
   }) async {
+    final outputId = _offlineOutputForZone(zoneId);
     var copy = await _availableOfflineCopy(trackId);
     if (copy == null) {
       if (mounted) {
@@ -223,6 +229,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
       _setOfflineQueue(
         sourceTrackIds,
         startIndex: sourceTrackIds.indexOf(trackId),
+        zoneId: outputId,
       );
     } else {
       final items = _queueItems();
@@ -230,7 +237,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
         (item) => _intValue(_asMap(item['track'])['id']) == trackId,
       );
       if (existingIndex < 0) {
-        _setOfflineQueue(<int>[trackId], startIndex: 0);
+        _setOfflineQueue(<int>[trackId], startIndex: 0, zoneId: outputId);
       } else {
         _playbackQueue = <String, dynamic>{
           ...?_playbackQueue,
@@ -238,14 +245,24 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
         };
       }
     }
+    final previousOutputId = _offlineOutputForZone(
+      _playback?['zone_id']?.toString(),
+    );
     await _finishOfflinePlayback('replaced');
+    if (previousOutputId != outputId &&
+        _rendererLoadedTrackByOutput.containsKey(previousOutputId)) {
+      await (await _playerForOutput(previousOutputId)).stop();
+      _rendererLoadedTrackByOutput.remove(previousOutputId);
+      _rendererLocalFileByOutput.remove(previousOutputId);
+      _rendererPlaybackByOutput.remove(previousOutputId);
+    }
     final path = _offlineCopyPath(copy, _clientLibraryRoots);
     if (path == null) return;
-    final player = await _playerForOutput(_clientOutputId);
+    final player = await _playerForOutput(outputId);
     await player.stop();
-    _rendererLoadedTrackByOutput[_clientOutputId] = trackId;
+    _rendererLoadedTrackByOutput[outputId] = trackId;
     await player.open(path, localFile: true);
-    _rendererLocalFileByOutput[_clientOutputId] = true;
+    _rendererLocalFileByOutput[outputId] = true;
     final measuredDuration = await player.durationMs();
     if ((_intValue(copy.metadata['duration_ms']) ?? 0) <= 0 &&
         measuredDuration != null &&
@@ -263,13 +280,14 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
         copy.toTrackDetail(path);
     final detail = _detailWithLocalCopy(cachedDetail, copy, path);
     final playback = <String, dynamic>{
-      'zone_id': _clientOutputId,
+      'zone_id': outputId,
       'state': 'playing',
       'track_id': trackId,
       'track_title': summary['title'],
       'position_ms': 0,
       'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
     };
+    _rendererPlaybackByOutput[outputId] = playback;
     if (!mounted) return;
     _mutate(() {
       _replaceTrackInCollections(<String, dynamic>{
@@ -289,7 +307,8 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     if (!_offlineMode || _offlinePlaybackStartedAt == null) return;
     final trackId = _intValue(_playback?['track_id']);
     if (trackId == null) return;
-    final player = await _playerForOutput(_clientOutputId);
+    final outputId = _offlineOutputForZone(_playback?['zone_id']?.toString());
+    final player = await _playerForOutput(outputId);
     final endPosition =
         await player.currentPositionMs() ??
         _estimatedPlaybackPositionMs(_playback);
@@ -369,15 +388,17 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     await _playOfflineTrack(trackId);
   }
 
-  Future<void> _setOfflineStopped() async {
-    final player = await _playerForOutput(_clientOutputId);
+  Future<void> _setOfflineStopped({String? zoneId}) async {
+    final outputId = _offlineOutputForZone(zoneId);
+    final player = await _playerForOutput(outputId);
     await player.stop();
-    _rendererLoadedTrackByOutput.remove(_clientOutputId);
-    _rendererLocalFileByOutput.remove(_clientOutputId);
+    _rendererLoadedTrackByOutput.remove(outputId);
+    _rendererLocalFileByOutput.remove(outputId);
+    _rendererPlaybackByOutput.remove(outputId);
     if (!mounted) return;
     _mutatePlayback(() {
       _applyPlayback(<String, dynamic>{
-        'zone_id': _clientOutputId,
+        'zone_id': outputId,
         'state': 'stopped',
         'track_id': null,
         'track_title': null,

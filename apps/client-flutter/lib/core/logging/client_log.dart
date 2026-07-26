@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,12 +12,17 @@ import 'package:path_provider/path_provider.dart';
 class ClientLog {
   static const int _maxBytes = 5 * 1024 * 1024;
   static const int _retainedFiles = 3;
+  static const int _maxPendingLines = 1024;
+  static const int _writeBatchSize = 128;
 
   static bool _enabled = true;
   static File? _file;
   static int _estimatedBytes = 0;
   static int _sequence = 0;
-  static Future<void> _writeQueue = Future<void>.value();
+  static final Queue<String> _pendingLines = ListQueue<String>();
+  static int _droppedLines = 0;
+  static bool _draining = false;
+  static Future<void> _drainFuture = Future<void>.value();
 
   static String get path => _file?.path ?? '';
 
@@ -64,11 +70,15 @@ class ClientLog {
       if (data.isNotEmpty) 'data': _sanitize(data),
     };
     final line = '${jsonEncode(sanitized)}\n';
-    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
-      await _rotateIfNeeded(utf8.encode(line).length);
-      await _file!.writeAsString(line, mode: FileMode.append, flush: false);
-      _estimatedBytes += utf8.encode(line).length;
-    });
+    if (_pendingLines.length >= _maxPendingLines) {
+      _droppedLines += 1;
+      if (level != 'error') {
+        return;
+      }
+      _pendingLines.removeFirst();
+    }
+    _pendingLines.addLast(line);
+    _startDrain();
   }
 
   static void error(
@@ -90,7 +100,7 @@ class ClientLog {
   }
 
   static Future<void> exportTo(String destinationPath) async {
-    await _writeQueue.catchError((_) {});
+    await _drainFuture.catchError((_) {});
     final source = _file;
     if (source == null || !await source.exists()) {
       await File(destinationPath).writeAsString(
@@ -99,6 +109,49 @@ class ClientLog {
       return;
     }
     await source.copy(destinationPath);
+  }
+
+  static void _startDrain() {
+    if (_draining) return;
+    _draining = true;
+    _drainFuture = _drain()
+        .catchError((_) {
+          _droppedLines += _pendingLines.length;
+          _pendingLines.clear();
+        })
+        .whenComplete(() {
+          _draining = false;
+          if (_pendingLines.isNotEmpty) {
+            _startDrain();
+          }
+        });
+  }
+
+  static Future<void> _drain() async {
+    while (_pendingLines.isNotEmpty || _droppedLines > 0) {
+      final batch = <String>[];
+      if (_droppedLines > 0) {
+        final dropped = _droppedLines;
+        _droppedLines = 0;
+        batch.add(
+          '${jsonEncode(<String, Object?>{
+            'timestamp': DateTime.now().toUtc().toIso8601String(),
+            'sequence': ++_sequence,
+            'level': 'warning',
+            'event': 'client.log.backpressure',
+            'data': <String, Object?>{'dropped_events': dropped},
+          })}\n',
+        );
+      }
+      while (batch.length < _writeBatchSize && _pendingLines.isNotEmpty) {
+        batch.add(_pendingLines.removeFirst());
+      }
+      final payload = batch.join();
+      final bytes = utf8.encode(payload).length;
+      await _rotateIfNeeded(bytes);
+      await _file!.writeAsString(payload, mode: FileMode.append, flush: false);
+      _estimatedBytes += bytes;
+    }
   }
 
   static Future<void> _rotateIfNeeded(int incomingBytes) async {

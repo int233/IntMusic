@@ -400,6 +400,13 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
 
   Future<void> _refreshPlaybackQueue({String? zoneId}) async {
     final targetZoneId = zoneId ?? _activeZoneId();
+    if (_offlineMode) {
+      _playbackQueue = <String, dynamic>{
+        ...?_playbackQueue,
+        'zone_id': targetZoneId,
+      };
+      return;
+    }
     try {
       final queue = _asMap(
         await _api.getJson('/zones/${Uri.encodeComponent(targetZoneId)}/queue'),

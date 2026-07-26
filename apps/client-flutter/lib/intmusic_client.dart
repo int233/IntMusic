@@ -180,6 +180,9 @@ class _CoreDashboardState extends State<CoreDashboard>
   final PeriodicTaskScheduler _taskScheduler = PeriodicTaskScheduler();
   Timer? _eventReconnectTimer;
   Timer? _eventHealthTimer;
+  Timer? _offlineReconnectTimer;
+  int _offlineReconnectFailures = 0;
+  bool _offlineReconnectBusy = false;
   int _zoneRefreshFailures = 0;
   Timer? _searchDebounce;
   WebSocket? _eventSocket;
@@ -323,6 +326,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     CoreApiClient.closeAll();
     _eventReconnectTimer?.cancel();
     _eventHealthTimer?.cancel();
+    _offlineReconnectTimer?.cancel();
     _searchDebounce?.cancel();
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());

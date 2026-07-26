@@ -46,6 +46,43 @@ class CoreApiClient {
   static String normalizeBaseUrl(String value) =>
       value.trim().replaceAll(RegExp(r'/+$'), '');
 
+  /// Performs a single, uncached health probe.
+  ///
+  /// Discovery can inspect thousands of endpoints. These short-lived probes
+  /// must not enter the pooled client map or inherit normal GET retries and
+  /// per-request diagnostic logging.
+  static Future<dynamic> probeJson(
+    String baseUrl,
+    String path, {
+    Duration timeout = const Duration(milliseconds: 900),
+  }) async {
+    final normalized = normalizeBaseUrl(baseUrl);
+    final client = HttpClient()
+      ..connectionTimeout = timeout
+      ..idleTimeout = timeout
+      ..maxConnectionsPerHost = 1
+      ..autoUncompress = true;
+    try {
+      final uri = Uri.parse('$normalized/api/v1$path');
+      final request = await client.getUrl(uri).timeout(timeout);
+      request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      request.headers.set(HttpHeaders.acceptEncodingHeader, 'gzip');
+      final response = await request.close().timeout(timeout);
+      final text = await response
+          .transform(utf8.decoder)
+          .join()
+          .timeout(timeout);
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException('HTTP ${response.statusCode}: $text', uri: uri);
+      }
+      return text.isEmpty ? null : jsonDecode(text);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static int get debugPooledClientCount => _instances.length;
+
   static void retainOnly(String baseUrl) {
     final retained = normalizeBaseUrl(baseUrl);
     final staleKeys = _instances.keys

@@ -2,15 +2,20 @@ part of '../intmusic_client.dart';
 
 extension _DashboardSync on _CoreDashboardState {
   Future<void> _discoverAndRefresh() async {
-    await _run<void>(() => _refreshAllInner(forceDiscovery: true));
+    await _run<void>(
+      () => _refreshAllInner(forceDiscovery: true, includeLanScan: true),
+    );
   }
 
   Future<void> _refreshAllInner({
     bool allowDiscovery = false,
     bool forceDiscovery = false,
+    bool includeLanScan = false,
   }) async {
     if (forceDiscovery) {
-      final discovered = await _applyDiscoveredCoreUrl();
+      final discovered = await _applyDiscoveredCoreUrl(
+        includeLanScan: includeLanScan,
+      );
       if (!discovered) {
         throw StateError('No IntMusic core found on the local network');
       }
@@ -32,6 +37,8 @@ extension _DashboardSync on _CoreDashboardState {
 
   Future<void> _activateOfflineMode() async {
     if (_offlineMode) return;
+    await _rendererAudioInitialization;
+    final previousActiveOutput = _clientOutputForZone(_activeZoneId());
     for (final task in const <String>[
       'renderer-heartbeat',
       'system-volume',
@@ -45,6 +52,22 @@ extension _DashboardSync on _CoreDashboardState {
     _eventReconnectTimer?.cancel();
     await _eventSocket?.close();
     _eventSocket = null;
+    final offlineZones = await _buildOfflineRendererZones();
+    final offlineSelectedOutput =
+        previousActiveOutput != null &&
+            offlineZones.any(
+              (zone) => zone['id']?.toString() == previousActiveOutput,
+            )
+        ? previousActiveOutput
+        : _clientOutputId;
+    final selectedOfflineZone = offlineZones.firstWhere(
+      (zone) => zone['id']?.toString() == offlineSelectedOutput,
+      orElse: () => <String, dynamic>{
+        'id': offlineSelectedOutput,
+        'state': 'stopped',
+        'position_ms': 0,
+      },
+    );
     final localTracks = <int, Map<String, dynamic>>{
       for (final value in _offlineTrackSummaries(
         _offlineLibrary,
@@ -79,13 +102,13 @@ extension _DashboardSync on _CoreDashboardState {
     final artists = _artists.isEmpty
         ? _offlineArtistSummaries(_offlineLibrary)
         : _artists;
-    final stoppedPlayback = <String, dynamic>{
-      'zone_id': _clientOutputId,
-      'state': 'stopped',
-      'track_id': null,
-      'track_title': null,
-      'position_ms': 0,
-      'queue_revision': 0,
+    final offlinePlayback = <String, dynamic>{
+      'zone_id': offlineSelectedOutput,
+      'state': selectedOfflineZone['state'] ?? 'stopped',
+      'track_id': selectedOfflineZone['track_id'],
+      'track_title': selectedOfflineZone['track_title'],
+      'position_ms': selectedOfflineZone['position_ms'] ?? 0,
+      'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
     };
     if (!mounted) return;
     _mutate(() {
@@ -95,37 +118,18 @@ extension _DashboardSync on _CoreDashboardState {
       _tracks = tracks;
       _albums = albums;
       _artists = artists;
-      _outputs = <dynamic>[
-        <String, dynamic>{
-          'id': _clientOutputId,
-          'name': _clientAlias(),
-          'node_name': _clientAlias(),
-          'is_online': true,
-          'is_default': true,
-        },
-      ];
-      _zones = <dynamic>[
-        <String, dynamic>{
-          'id': _clientOutputId,
-          'name': _clientAlias(),
-          'state': 'stopped',
-          'track_id': null,
-          'track_title': null,
-          'position_ms': 0,
-          'volume': 1.0,
-          'muted': false,
-          'is_online': true,
-        },
-      ];
-      _selectedZoneId = _clientOutputId;
+      _outputs = offlineZones;
+      _zones = offlineZones;
+      _selectedZoneId = offlineSelectedOutput;
       _selectedZoneLabel = _tr(context, 'Offline · This device');
-      _playback = _withPlaybackTimestamp(stoppedPlayback);
+      _playback = _withPlaybackTimestamp(offlinePlayback);
       _playbackQueue = <String, dynamic>{
-        'zone_id': _clientOutputId,
-        'revision': 0,
-        'mode': _playbackMode.nameForApi,
-        'current_index': null,
-        'items': const <dynamic>[],
+        ...?_playbackQueue,
+        'zone_id': offlineSelectedOutput,
+        'revision': _intValue(_playbackQueue?['revision']) ?? 0,
+        'mode': _playbackQueue?['mode'] ?? _playbackMode.nameForApi,
+        'current_index': _playbackQueue?['current_index'],
+        'items': _playbackQueue?['items'] ?? const <dynamic>[],
       };
       _status = <String, dynamic>{
         ...?_status,
@@ -159,21 +163,15 @@ extension _DashboardSync on _CoreDashboardState {
         'cached_playlists': _playlists.length,
       },
     );
-    _taskScheduler.schedule(
-      'offline-reconnect',
-      interval: const Duration(seconds: 12),
-      callback: () async {
-        if (!_loading && _offlineMode) {
-          await _refreshAll();
-        }
-      },
-    );
+    _startSystemVolumeMonitor();
+    _scheduleOfflineReconnect(resetBackoff: true);
   }
 
-  Future<bool> _applyDiscoveredCoreUrl() async {
+  Future<bool> _applyDiscoveredCoreUrl({bool includeLanScan = false}) async {
     _rendererStatus = 'Discovering core';
     final cores = await _discoverIntMusicCores(
       hintBaseUrl: _coreUrlController.text,
+      includeLanScan: includeLanScan,
     );
     if (cores.isEmpty) {
       return false;
@@ -182,6 +180,55 @@ extension _DashboardSync on _CoreDashboardState {
     _coreUrlController.text = selected.baseUrl;
     _rendererStatus = 'Discovered ${selected.source}';
     return true;
+  }
+
+  void _scheduleOfflineReconnect({bool resetBackoff = false}) {
+    _offlineReconnectTimer?.cancel();
+    if (resetBackoff) {
+      _offlineReconnectFailures = 0;
+    }
+    if (!_offlineMode || !mounted) {
+      return;
+    }
+    const delays = <Duration>[
+      Duration(seconds: 15),
+      Duration(seconds: 30),
+      Duration(minutes: 1),
+      Duration(minutes: 2),
+      Duration(minutes: 5),
+    ];
+    final delay = delays[min(_offlineReconnectFailures, delays.length - 1)];
+    _offlineReconnectTimer = Timer(delay, () async {
+      if (!mounted || !_offlineMode || _offlineReconnectBusy) {
+        _scheduleOfflineReconnect();
+        return;
+      }
+      _offlineReconnectBusy = true;
+      try {
+        final discovered = await _applyDiscoveredCoreUrl();
+        if (discovered) {
+          await _refreshFromCurrentCore();
+        }
+      } catch (error) {
+        ClientLog.event(
+          'client.offline.reconnect_failed',
+          level: 'warning',
+          message: error.toString(),
+          data: <String, Object?>{
+            'attempt': _offlineReconnectFailures + 1,
+            'next_delay_seconds':
+                delays[min(_offlineReconnectFailures + 1, delays.length - 1)]
+                    .inSeconds,
+          },
+        );
+      } finally {
+        _offlineReconnectBusy = false;
+        if (_offlineMode && mounted) {
+          _offlineReconnectFailures += 1;
+          _scheduleOfflineReconnect();
+        }
+      }
+    });
   }
 
   Future<void> _refreshFromCurrentCore() async {
@@ -270,10 +317,15 @@ extension _DashboardSync on _CoreDashboardState {
     }
     if (_offlineMode) {
       await _finishOfflinePlayback('reconnected');
-      await (await _playerForOutput(_clientOutputId)).stop();
+      final outputId = _offlineOutputForZone(_playback?['zone_id']?.toString());
+      await (await _playerForOutput(outputId)).stop();
+      _rendererLoadedTrackByOutput.remove(outputId);
+      _rendererLocalFileByOutput.remove(outputId);
+      _rendererPlaybackByOutput.remove(outputId);
     }
     _offlineMode = false;
-    _taskScheduler.cancel('offline-reconnect');
+    _offlineReconnectTimer?.cancel();
+    _offlineReconnectFailures = 0;
     _startRendererHeartbeat();
     _startRendererPositionReporter();
     _startZoneRefresh();

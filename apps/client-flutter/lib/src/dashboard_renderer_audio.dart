@@ -82,7 +82,8 @@ extension _DashboardRendererAudio on _CoreDashboardState {
   }
 
   Future<void> _handleOutputComplete(String outputId) async {
-    if (_offlineMode && outputId == _clientOutputId) {
+    if (_offlineMode &&
+        outputId == _offlineOutputForZone(_playback?['zone_id']?.toString())) {
       await _finishOfflinePlayback('completed');
       await _playNextOfflineTrack(completed: true);
       return;

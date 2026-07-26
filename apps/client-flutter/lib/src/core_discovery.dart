@@ -20,7 +20,28 @@ class _DiscoveredCore {
 
 Future<List<_DiscoveredCore>> _discoverIntMusicCores({
   String? hintBaseUrl,
+  bool includeLanScan = false,
 }) async {
+  final hintUri = Uri.tryParse(hintBaseUrl?.trim() ?? '');
+  if (hintUri != null &&
+      (hintUri.scheme == 'http' || hintUri.scheme == 'https') &&
+      hintUri.host.isNotEmpty &&
+      hintUri.hasPort) {
+    final hinted = await _verifyCoreCandidates(<_DiscoveredCore>[
+      _DiscoveredCore(
+        baseUrl: Uri(
+          scheme: hintUri.scheme,
+          host: hintUri.host,
+          port: hintUri.port,
+        ).toString(),
+        source: 'saved Core',
+      ),
+    ], probeTimeout: const Duration(milliseconds: 2500));
+    if (hinted.isNotEmpty) {
+      return hinted;
+    }
+  }
+
   final installed = await _verifyCoreCandidates(
     await _installedCoreCandidates(),
   );
@@ -47,8 +68,15 @@ Future<List<_DiscoveredCore>> _discoverIntMusicCores({
     return direct;
   }
 
+  if (!includeLanScan) {
+    return const <_DiscoveredCore>[];
+  }
+
   final lanHosts = await _lanSubnetHosts();
-  return _verifyCoreCandidates(_portRangeCandidates(lanHosts, 'LAN scan'));
+  return _verifyCoreCandidates(
+    _portRangeCandidates(lanHosts, 'LAN scan'),
+    concurrency: 32,
+  );
 }
 
 Future<List<_DiscoveredCore>> _installedCoreCandidates() async {
@@ -109,14 +137,18 @@ List<_DiscoveredCore> _portRangeCandidates(
 }
 
 Future<List<_DiscoveredCore>> _verifyCoreCandidates(
-  Iterable<_DiscoveredCore> candidates,
-) async {
+  Iterable<_DiscoveredCore> candidates, {
+  int concurrency = 12,
+  Duration probeTimeout = const Duration(milliseconds: 420),
+}) async {
   final verified = <_DiscoveredCore>[];
   final pending = candidates.toList(growable: false);
-  const batchSize = 192;
-  for (var offset = 0; offset < pending.length; offset += batchSize) {
-    final batch = pending.skip(offset).take(batchSize).map((candidate) async {
-      final status = await _tryLoadCoreStatus(candidate.baseUrl);
+  for (var offset = 0; offset < pending.length; offset += concurrency) {
+    final batch = pending.skip(offset).take(concurrency).map((candidate) async {
+      final status = await _tryLoadCoreStatus(
+        candidate.baseUrl,
+        timeout: probeTimeout,
+      );
       if (status == null) {
         return null;
       }
@@ -263,13 +295,13 @@ Map<String, String> _parseTxtProperties(String? text) {
   return result;
 }
 
-Future<Map<String, dynamic>?> _tryLoadCoreStatus(String baseUrl) async {
+Future<Map<String, dynamic>?> _tryLoadCoreStatus(
+  String baseUrl, {
+  Duration timeout = const Duration(milliseconds: 420),
+}) async {
   try {
     final status = _asMap(
-      await CoreApiClient(
-        baseUrl,
-        timeout: const Duration(milliseconds: 420),
-      ).getJson('/status'),
+      await CoreApiClient.probeJson(baseUrl, '/status', timeout: timeout),
     );
     if (_isIntMusicCoreStatus(status)) {
       return status;

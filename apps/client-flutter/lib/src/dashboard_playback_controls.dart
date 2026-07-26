@@ -98,6 +98,10 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   );
 
   Future<_DeviceSheetSnapshot> _refreshDeviceSheetSnapshot() async {
+    if (_offlineMode) {
+      await _refreshOfflineRendererZones();
+      return _currentDeviceSheetSnapshot();
+    }
     try {
       final zones = await _api.getJson('/zones') as List<dynamic>;
       if (mounted) {
@@ -115,20 +119,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
 
   Future<void> _pausePlayback() async {
     if (_offlineMode) {
-      final player = await _playerForOutput(_clientOutputId);
-      final position =
-          await player.currentPositionMs() ??
-          _estimatedPlaybackPositionMs(_playback);
-      await player.pause();
-      if (mounted) {
-        _mutatePlayback(() {
-          _applyPlayback(<String, dynamic>{
-            ...?_playback,
-            'state': 'paused',
-            'position_ms': position,
-          });
-        });
-      }
+      await _pauseZone(_activeZoneId());
       return;
     }
     await _pauseZone(_activeZoneId());
@@ -148,17 +139,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
         }
         return;
       }
-      final player = await _playerForOutput(_clientOutputId);
-      await player.play();
-      if (mounted) {
-        _mutatePlayback(() {
-          _applyPlayback(<String, dynamic>{
-            ...?_playback,
-            'state': 'playing',
-            'position_ms': _estimatedPlaybackPositionMs(_playback),
-          });
-        });
-      }
+      await _resumeZone(_activeZoneId());
       return;
     }
     await _resumeZone(_activeZoneId());
@@ -175,7 +156,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   Future<void> _stopZone(String zoneId) async {
     if (_offlineMode) {
       await _finishOfflinePlayback('stopped');
-      await _setOfflineStopped();
+      await _setOfflineStopped(zoneId: zoneId);
       return;
     }
     await _postZoneAction(zoneId, 'stop');
@@ -243,6 +224,9 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
         },
       );
     }
+    if (_offlineMode) {
+      return;
+    }
     final playback = await _postPlaybackControl(
       zoneId,
       '/zones/${Uri.encodeComponent(zoneId)}/$action',
@@ -257,6 +241,14 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
 
   Future<void> _movePlayback(String sourceZoneId, String targetZoneId) async {
     if (sourceZoneId == targetZoneId) {
+      return;
+    }
+    if (_offlineMode) {
+      final trackId = _intValue(_playback?['track_id']);
+      if (trackId == null) return;
+      final position = _estimatedPlaybackPositionMs(_playback);
+      await _playOfflineTrack(trackId, zoneId: targetZoneId);
+      await _seekPlayback(position);
       return;
     }
     final states = await _run<List<dynamic>>(
@@ -292,6 +284,15 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
     if (trackId == null) {
       return;
     }
+    if (_offlineMode) {
+      if (mounted) {
+        _mutate(
+          () => _error =
+              'Synchronized multi-output playback requires a Core connection',
+        );
+      }
+      return;
+    }
     final zoneIds = _onlineZoneIds();
     if (zoneIds.isEmpty) {
       return;
@@ -325,14 +326,17 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
 
   Future<void> _seekPlayback(int positionMs) async {
     if (_offlineMode) {
-      final player = await _playerForOutput(_clientOutputId);
+      final outputId = _offlineOutputForZone();
+      final player = await _playerForOutput(outputId);
       await player.seek(Duration(milliseconds: positionMs));
+      final localPlayback = _withPlaybackTimestamp(<String, dynamic>{
+        ...?_playback,
+        'position_ms': positionMs,
+      });
+      _rendererPlaybackByOutput[outputId] = localPlayback;
       if (mounted) {
         _mutatePlayback(() {
-          _applyPlayback(<String, dynamic>{
-            ...?_playback,
-            'position_ms': positionMs,
-          });
+          _applyPlayback(localPlayback);
         });
       }
       return;

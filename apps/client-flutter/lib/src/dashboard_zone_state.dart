@@ -71,14 +71,27 @@ extension _DashboardZoneState on _CoreDashboardState {
     final normalized = volume.clamp(0.0, 1.0);
     final effectiveMuted = muted ?? (normalized <= 0.001);
     if (_offlineMode) {
+      final localOutputId = _clientOutputForZone(zoneId);
+      if (localOutputId == null) {
+        return;
+      }
+      _SystemVolumeState? appliedSystemVolume;
       if (volumeMode == 'system') {
-        await _setSystemVolumeForOutput(
-          _clientOutputId,
+        appliedSystemVolume = await _setSystemVolumeForOutput(
+          localOutputId,
           normalized,
           effectiveMuted,
         );
+        if (!appliedSystemVolume.supported || !appliedSystemVolume.writable) {
+          if (mounted) {
+            _mutate(
+              () => _error = 'System volume is unavailable for this output',
+            );
+          }
+          return;
+        }
       } else {
-        final player = await _playerForOutput(_clientOutputId);
+        final player = await _playerForOutput(localOutputId);
         await player.setVolume(effectiveMuted ? 0 : normalized);
       }
       if (mounted) {
@@ -86,17 +99,18 @@ extension _DashboardZoneState on _CoreDashboardState {
           _zones = _zones
               .map((value) {
                 final zone = _asMap(value);
+                if (zone['id']?.toString() != zoneId) return zone;
                 return <String, dynamic>{
                   ...zone,
-                  'volume': normalized,
-                  'muted': effectiveMuted,
+                  'volume': appliedSystemVolume?.volume ?? normalized,
+                  'muted': appliedSystemVolume?.muted ?? effectiveMuted,
                   'volume_mode': volumeMode,
                   if (volumeMode == 'system')
-                    'system_volume': normalized
+                    'system_volume': appliedSystemVolume?.volume ?? normalized
                   else
                     'player_volume': normalized,
                   if (volumeMode == 'system')
-                    'system_muted': effectiveMuted
+                    'system_muted': appliedSystemVolume?.muted ?? effectiveMuted
                   else
                     'player_muted': effectiveMuted,
                 };
@@ -227,6 +241,21 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   Future<void> _renameZone(String zoneId, String? alias) async {
+    if (_offlineMode) {
+      _mutatePlayback(() {
+        _zones = _zones
+            .map((value) {
+              final zone = _asMap(value);
+              if (zone['id']?.toString() != zoneId) return zone;
+              return <String, dynamic>{...zone, 'alias': alias};
+            })
+            .toList(growable: false);
+        if (_selectedZoneId == zoneId) {
+          _selectedZoneLabel = _zoneLabelById(zoneId);
+        }
+      });
+      return;
+    }
     await _run<void>(() async {
       await _api.postJson(
         '/zones/${Uri.encodeComponent(zoneId)}/alias',
@@ -245,6 +274,18 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   Future<void> _stopEverywhere() async {
+    if (_offlineMode) {
+      await _finishOfflinePlayback('stopped');
+      for (final outputId in _rendererLoadedTrackByOutput.keys.toList()) {
+        await (await _playerForOutput(outputId)).stop();
+        _rendererLoadedTrackByOutput.remove(outputId);
+        _rendererLocalFileByOutput.remove(outputId);
+        _rendererPlaybackByOutput.remove(outputId);
+      }
+      await _setOfflineStopped();
+      await _refreshOfflineRendererZones();
+      return;
+    }
     final zoneIds = _onlineZoneIds();
     if (zoneIds.isEmpty) {
       return;

@@ -110,7 +110,9 @@ extension _DashboardRendererDevices on _CoreDashboardState {
       _rendererSystemVolumeByOutput.remove(outputId);
     }
 
-    if (_rendererRegisteredCoreUrl != null) {
+    if (_offlineMode) {
+      unawaited(_refreshOfflineRendererZones());
+    } else if (_rendererRegisteredCoreUrl != null) {
       unawaited(
         _sendRendererRegistration()
             .then((_) => _refreshZonesSilently())
@@ -191,6 +193,88 @@ extension _DashboardRendererDevices on _CoreDashboardState {
     return state;
   }
 
+  Future<List<Map<String, dynamic>>> _buildOfflineRendererZones() async {
+    await _rendererAudioInitialization;
+    final existingByOutput = <String, Map<String, dynamic>>{
+      for (final value in _zones.whereType<Map>())
+        (_asMap(value)['output_id']?.toString() ??
+            _asMap(value)['id']?.toString() ??
+            ''): _asMap(
+          value,
+        ),
+    };
+    final alias = _clientAlias();
+    return Future.wait(
+      _rendererAudioDevicesByOutput.entries.map((entry) async {
+        final outputId = entry.key;
+        final existing = existingByOutput[outputId];
+        final systemVolume = await _readSystemVolumeForOutput(
+          outputId,
+        ).catchError((_) => const _SystemVolumeState.unsupported());
+        final rendererPlayback = _rendererPlaybackByOutput[outputId];
+        final currentPlaybackOutput = _clientOutputForZone(
+          _playback?['zone_id']?.toString() ?? '',
+        );
+        final playback =
+            rendererPlayback ??
+            (currentPlaybackOutput == outputId ? _playback : null);
+        final playerVolume =
+            ((existing?['player_volume'] ?? existing?['volume']) as num?)
+                ?.toDouble()
+                .clamp(0.0, 1.0) ??
+            1.0;
+        final playerMuted =
+            existing?['player_muted'] == true || existing?['muted'] == true;
+        final volumeMode = existing?['volume_mode']?.toString() == 'system'
+            ? 'system'
+            : 'player';
+        final effectiveVolume = volumeMode == 'system' && systemVolume.readable
+            ? systemVolume.volume
+            : playerVolume;
+        final effectiveMuted = volumeMode == 'system' && systemVolume.readable
+            ? systemVolume.muted
+            : playerMuted;
+        return <String, dynamic>{
+          'id': outputId,
+          'output_id': outputId,
+          'name': _rendererAudioDeviceLabel(entry.value),
+          'system_name': '$alias - ${_rendererAudioDeviceLabel(entry.value)}',
+          'node_name': alias,
+          'platform': Platform.operatingSystem,
+          'backend': _usesDesktopRendererBackend
+              ? 'media-kit-libmpv'
+              : 'flutter-audioplayers',
+          'is_local_client': true,
+          'is_remote': false,
+          'is_online': true,
+          'is_default': outputId == _clientOutputId,
+          'state': playback?['state']?.toString() ?? 'stopped',
+          'track_id': playback?['track_id'],
+          'track_title': playback?['track_title'],
+          'position_ms': playback?['position_ms'] ?? 0,
+          'volume': effectiveVolume,
+          'muted': effectiveMuted,
+          'volume_mode': volumeMode,
+          'player_volume': playerVolume,
+          'player_muted': playerMuted,
+          ...systemVolume.toJson(),
+        };
+      }),
+    );
+  }
+
+  Future<void> _refreshOfflineRendererZones() async {
+    if (!_offlineMode || !mounted) return;
+    final zones = await _buildOfflineRendererZones();
+    if (!mounted || !_offlineMode) return;
+    _mutatePlayback(() {
+      _zones = zones;
+      _outputs = zones;
+      _keepSelectedZoneValid();
+      _selectedZoneLabel = _zoneLabelById(_selectedZoneId);
+    });
+  }
+
   Future<void> _reportRendererSystemVolume(
     String outputId,
     _SystemVolumeState state, {
@@ -235,8 +319,9 @@ extension _DashboardRendererDevices on _CoreDashboardState {
       interval: const Duration(seconds: 5),
       runInBackground: true,
       callback: () async {
-        if (_offlineMode || !mounted) return;
+        if (!mounted) return;
         final localOutputs = _rendererAudioDevicesByOutput.keys.toSet();
+        var offlineChanged = false;
         for (final outputId in localOutputs) {
           final previous = _rendererSystemVolumeByOutput[outputId];
           final current = await _readSystemVolumeForOutput(outputId);
@@ -247,8 +332,15 @@ extension _DashboardRendererDevices on _CoreDashboardState {
               previous.muted != current.muted ||
               (previous.volume - current.volume).abs() >= 0.005;
           if (changed) {
-            await _reportRendererSystemVolume(outputId, current);
+            if (_offlineMode) {
+              offlineChanged = true;
+            } else {
+              await _reportRendererSystemVolume(outputId, current);
+            }
           }
+        }
+        if (offlineChanged) {
+          await _refreshOfflineRendererZones();
         }
       },
       onError: (_, _) {

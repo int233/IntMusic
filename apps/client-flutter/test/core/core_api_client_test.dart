@@ -57,4 +57,28 @@ void main() {
     );
     expect(postRequests, 1);
   });
+
+  test('health probes are uncached and do not retry', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    var requests = 0;
+    final subscription = server.listen((request) async {
+      requests += 1;
+      request.response.write(jsonEncode(<String, Object?>{'ready': true}));
+      await request.response.close();
+    });
+    addTearDown(() async {
+      await subscription.cancel();
+      await server.close(force: true);
+    });
+
+    final before = CoreApiClient.debugPooledClientCount;
+    final response = await CoreApiClient.probeJson(
+      'http://127.0.0.1:${server.port}',
+      '/status',
+    );
+
+    expect(response, <String, Object?>{'ready': true});
+    expect(requests, 1);
+    expect(CoreApiClient.debugPooledClientCount, before);
+  });
 }
