@@ -38,25 +38,77 @@ function Remove-DirectorySafe {
     Remove-Item -LiteralPath $resolvedPath -Recurse -Force
 }
 
+function Assert-NativeCommandSucceeded {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command,
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    if ($ExitCode -ne 0) {
+        throw "$Command failed with exit code $ExitCode."
+    }
+}
+
+function Assert-RequiredFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Description was not found: $Path"
+    }
+}
+
 Push-Location $repoRoot
 try {
     .\scripts\dev-shell.ps1
 
     cargo build -p core-cli -p core-daemon --release
+    Assert-NativeCommandSucceeded `
+        -Command "Cargo Windows release build" `
+        -ExitCode $LASTEXITCODE
 
     Push-Location $clientProject
     try {
         flutter build windows --release
+        Assert-NativeCommandSucceeded `
+            -Command "Flutter Windows release build" `
+            -ExitCode $LASTEXITCODE
     }
     finally {
         Pop-Location
+    }
+
+    Assert-RequiredFile `
+        -Path (Join-Path $clientRelease "IntMusic.exe") `
+        -Description "Flutter Windows client executable"
+    Assert-RequiredFile `
+        -Path $coreCliRelease `
+        -Description "Core CLI executable"
+    Assert-RequiredFile `
+        -Path $coreDaemonRelease `
+        -Description "Core daemon executable"
+    $clientEntries = @(Get-ChildItem -LiteralPath $clientRelease -Force)
+    if ($clientEntries.Count -eq 0) {
+        throw "Flutter Windows release directory is empty: $clientRelease"
     }
 
     New-Item -ItemType Directory -Force -Path (Join-Path $repoRoot "packaging\dist") | Out-Null
     Remove-DirectorySafe -Path $distRoot -ExpectedParent (Join-Path $repoRoot "packaging\dist")
     New-Item -ItemType Directory -Force -Path $clientDist, $coreDist, $installerOut | Out-Null
 
-    Copy-Item -Path (Join-Path $clientRelease "*") -Destination $clientDist -Recurse -Force
+    foreach ($entry in $clientEntries) {
+        Copy-Item `
+            -LiteralPath $entry.FullName `
+            -Destination $clientDist `
+            -Recurse `
+            -Force
+    }
     Copy-Item -LiteralPath $coreCliRelease -Destination $coreDist -Force
     Copy-Item -LiteralPath $coreDaemonRelease -Destination $coreDist -Force
 
@@ -119,6 +171,9 @@ or pass -FfmpegBundle with an already validated bundle.
             throw "Inno Setup is not installed and winget.exe was not found."
         }
         & $winget.Source install --id JRSoftware.InnoSetup --exact --silent --accept-package-agreements --accept-source-agreements
+        Assert-NativeCommandSucceeded `
+            -Command "Inno Setup installation" `
+            -ExitCode $LASTEXITCODE
         $candidatePaths = @(@(
             "$env:ProgramFiles\Inno Setup 7\ISCC.exe",
             "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
@@ -138,10 +193,26 @@ or pass -FfmpegBundle with an already validated bundle.
         return
     }
 
+    Assert-RequiredFile `
+        -Path (Join-Path $clientDist "IntMusic.exe") `
+        -Description "Staged Flutter Windows client executable"
+    Assert-RequiredFile `
+        -Path (Join-Path $coreDist "local-music-core.exe") `
+        -Description "Staged Core CLI executable"
+    Assert-RequiredFile `
+        -Path (Join-Path $coreDist "local-music-core-daemon.exe") `
+        -Description "Staged Core daemon executable"
+    Assert-RequiredFile `
+        -Path (Join-Path $coreDist "tools\ffmpeg\bin\ffmpeg.exe") `
+        -Description "Staged FFmpeg executable"
+    Assert-RequiredFile `
+        -Path (Join-Path $coreDist "tools\ffmpeg\bin\ffprobe.exe") `
+        -Description "Staged ffprobe executable"
+
     & $isccPath $issFile
-    if ($LASTEXITCODE -ne 0) {
-        throw "Inno Setup failed with exit code $LASTEXITCODE."
-    }
+    Assert-NativeCommandSucceeded `
+        -Command "Inno Setup compilation" `
+        -ExitCode $LASTEXITCODE
 
     $setupExe = Join-Path $installerOut "IntMusic-Windows-Setup.exe"
     if (-not (Test-Path -LiteralPath $setupExe)) {
