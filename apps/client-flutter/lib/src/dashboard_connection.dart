@@ -47,7 +47,7 @@ extension _DashboardConnection on _CoreDashboardState {
         ),
       ).timeout(const Duration(seconds: 8));
       final connectionGeneration = ++_eventConnectionGeneration;
-      _rendererCommandSequenceByOutput.clear();
+      _rendererCommandSequences.clear();
       _latestRendererCommandIssuedAtByOutput.clear();
       _playbackStateSequenceByZone.clear();
       _eventSocket = socket;

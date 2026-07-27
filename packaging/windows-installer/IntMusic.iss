@@ -1,6 +1,6 @@
 #define MyAppName "IntMusic"
 #define MyAppPublisher "IntMusic"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.0.2"
 #define MyAppExeName "IntMusic.exe"
 
 [Setup]

@@ -138,7 +138,8 @@ extension _DashboardEventRouter on _CoreDashboardState {
 
   bool _acceptRendererCommand(Map<String, dynamic> command) {
     final outputId = command['target_output_id']?.toString();
-    if (!_isClientOutputId(outputId)) return false;
+    if (outputId == null || !_isClientOutputId(outputId)) return false;
+    final action = command['action']?.toString();
 
     final issuedAt = _rendererCommandIssuedAt(command);
     final ageMs = issuedAt == null
@@ -163,7 +164,7 @@ extension _DashboardEventRouter on _CoreDashboardState {
     }
 
     final sequence = _intValue(command['sequence']) ?? 0;
-    final previousSequence = _rendererCommandSequenceByOutput[outputId];
+    final previousSequence = _rendererCommandSequences.latest(outputId);
     final latestStateSequence = _playbackStateSequenceByZone[outputId];
     final previousIssuedAt = _latestRendererCommandIssuedAtByOutput[outputId];
     if (sequence <= 0 &&
@@ -199,7 +200,11 @@ extension _DashboardEventRouter on _CoreDashboardState {
         unawaited(_restartEventStream('renderer_command_gap'));
         return false;
       }
-      _rendererCommandSequenceByOutput[outputId!] = sequence;
+      _rendererCommandSequences.record(
+        outputId,
+        sequence,
+        isTransport: action != 'volume',
+      );
     }
 
     if (!_rendererCommandMatchesLatestIntent(command)) {
@@ -207,7 +212,7 @@ extension _DashboardEventRouter on _CoreDashboardState {
       return false;
     }
     if (issuedAt != null) {
-      _latestRendererCommandIssuedAtByOutput[outputId!] = issuedAt;
+      _latestRendererCommandIssuedAtByOutput[outputId] = issuedAt;
     }
     return true;
   }
@@ -292,10 +297,7 @@ extension _DashboardEventRouter on _CoreDashboardState {
     if (zoneId == null) return true;
     final sequence = _intValue(playback['command_sequence']);
     final previousSequence = _playbackStateSequenceByZone[zoneId];
-    final commandSequence = _rendererCommandSequenceByOutput[zoneId];
-    if (sequence != null &&
-        commandSequence != null &&
-        sequence < commandSequence) {
+    if (_rendererCommandSequences.playbackPrecedesTransport(zoneId, sequence)) {
       return false;
     }
     if (sequence != null &&

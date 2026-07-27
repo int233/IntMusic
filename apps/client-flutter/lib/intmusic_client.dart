@@ -22,6 +22,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'core/navigation_history.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
+import 'core/renderer_command_sequences.dart';
 import 'core/task_scheduler.dart';
 import 'src/app_theme.dart';
 
@@ -192,7 +193,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   int _eventConnectionGeneration = 0;
   bool _eventRestartBusy = false;
   String? _rendererRegisteredCoreUrl;
-  final Map<String, int> _rendererCommandSequenceByOutput = {};
+  final RendererCommandSequences _rendererCommandSequences =
+      RendererCommandSequences();
   final Map<String, DateTime> _latestRendererCommandIssuedAtByOutput = {};
   final Map<String, int> _playbackStateSequenceByZone = {};
   final Map<String, int> _rendererOperationGenerationByOutput = {};

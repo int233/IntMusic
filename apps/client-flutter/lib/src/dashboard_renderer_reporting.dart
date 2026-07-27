@@ -47,36 +47,11 @@ extension _DashboardRendererReporting on _CoreDashboardState {
       'stop' => 'stopped',
       _ => 'playing',
     };
-    final previous = _rendererPlaybackByOutput[outputId];
-    final snapshot = _withPlaybackTimestamp(<String, dynamic>{
-      ...?previous,
-      'zone_id': outputId,
-      'state': state,
-      'track_id': state == 'stopped'
-          ? null
-          : command['track_id'] ?? previous?['track_id'],
-      'track_title': state == 'stopped'
-          ? null
-          : command['track_title'] ?? previous?['track_title'],
-      'position_ms': state == 'stopped'
-          ? 0
-          : _intValue(command['position_ms']) ??
-                _intValue(previous?['position_ms']) ??
-                0,
-      'command_sequence': _intValue(command['sequence']),
-      'origin_client_id': command['origin_client_id'],
-      'intent_id': command['intent_id'],
-    });
-    if (state == 'stopped') {
-      _rendererPlaybackByOutput.remove(outputId);
-    } else {
-      _rendererPlaybackByOutput[outputId] = snapshot;
-    }
     _reportRendererStateInBackground(
       state,
       outputId: outputId,
       command: command,
-      positionMs: _intValue(snapshot['position_ms']),
+      positionMs: _intValue(command['position_ms']),
     );
     ClientLog.event(
       'renderer.command.local_intent_acknowledged',
@@ -95,14 +70,87 @@ extension _DashboardRendererReporting on _CoreDashboardState {
     Map<String, dynamic>? command,
     int? positionMs,
   }) {
+    final targetOutputId = outputId ?? _clientOutputId;
+    if (command != null) {
+      _applyRendererCommandStateLocally(
+        state,
+        outputId: targetOutputId,
+        command: command,
+        positionMs: positionMs,
+      );
+    }
     unawaited(
       _reportRendererStateSafely(
         state,
-        outputId: outputId,
+        outputId: targetOutputId,
         command: command,
         positionMs: positionMs,
       ),
     );
+  }
+
+  void _applyRendererCommandStateLocally(
+    String state, {
+    required String outputId,
+    required Map<String, dynamic> command,
+    int? positionMs,
+  }) {
+    final rendererPrevious = _rendererPlaybackByOutput[outputId];
+    final visiblePrevious = _playback?['zone_id']?.toString() == outputId
+        ? _playback
+        : null;
+    final previous = rendererPrevious ?? visiblePrevious;
+    final snapshot = _withPlaybackTimestamp(<String, dynamic>{
+      ...?previous,
+      'zone_id': outputId,
+      'state': state,
+      'track_id': state == 'stopped'
+          ? null
+          : command['track_id'] ?? previous?['track_id'],
+      'track_title': state == 'stopped'
+          ? null
+          : command['track_title'] ?? previous?['track_title'],
+      'position_ms': state == 'stopped'
+          ? 0
+          : positionMs ??
+                _intValue(command['position_ms']) ??
+                (previous == null ? 0 : _estimatedPlaybackPositionMs(previous)),
+      'queue_revision':
+          _intValue(previous?['queue_revision']) ??
+          _intValue(_playbackQueue?['revision']) ??
+          0,
+      'command_sequence': _intValue(command['sequence']),
+      'origin_client_id': command['origin_client_id'],
+      'intent_id': command['intent_id'],
+    });
+    if (!_acceptIncomingPlayback(snapshot)) {
+      return;
+    }
+    if (state == 'stopped') {
+      _rendererPlaybackByOutput.remove(outputId);
+    } else {
+      _rendererPlaybackByOutput[outputId] = snapshot;
+    }
+    if (mounted) {
+      _mutatePlayback(() {
+        final activeState = _playback?['state']?.toString();
+        final activeTrackId = _intValue(_playback?['track_id']);
+        final shouldFollowRemotePlay =
+            command['action']?.toString() == 'play' &&
+            command['origin_client_id']?.toString() != _clientId &&
+            outputId != _activeZoneId() &&
+            (activeTrackId == null || activeState == 'stopped');
+        if (shouldFollowRemotePlay) {
+          _selectedZoneId = outputId;
+          _selectedZoneLabel = _zoneLabelById(outputId);
+        }
+        _mergePlaybackEvent(snapshot);
+      });
+      if (command['action']?.toString() == 'play' &&
+          outputId == _activeZoneId()) {
+        unawaited(_refreshPlaybackQueue(zoneId: outputId));
+      }
+    }
   }
 
   Future<void> _reportRendererStateSafely(
@@ -248,6 +296,8 @@ extension _DashboardRendererReporting on _CoreDashboardState {
   }) async {
     final targetOutputId = outputId ?? _clientOutputId;
     final previous = _rendererPlaybackByOutput[targetOutputId];
+    final operationGenerationBeforeReport =
+        _rendererOperationGenerationByOutput[targetOutputId] ?? 0;
     final playerFuture = _audioPlayers[targetOutputId];
     final reportedPosition = playerFuture == null
         ? null
@@ -289,9 +339,14 @@ extension _DashboardRendererReporting on _CoreDashboardState {
     if (!_acceptIncomingPlayback(playbackSnapshot)) {
       return;
     }
-    if (state == 'stopped') {
-      _rendererPlaybackByOutput.remove(targetOutputId);
+    if (state == 'stopped' &&
+        (_rendererOperationGenerationByOutput[targetOutputId] ?? 0) ==
+            operationGenerationBeforeReport) {
       _rendererLoadedTrackByOutput.remove(targetOutputId);
+      _rendererLocalFileByOutput.remove(targetOutputId);
+    }
+    if (playbackSnapshot['state']?.toString() == 'stopped') {
+      _rendererPlaybackByOutput.remove(targetOutputId);
     } else {
       _rendererPlaybackByOutput[targetOutputId] = playbackSnapshot;
     }
