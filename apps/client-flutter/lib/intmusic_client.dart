@@ -49,6 +49,7 @@ part 'src/playlist_pages.dart';
 part 'src/settings_page.dart';
 part 'src/settings_distribution.dart';
 part 'src/settings_library.dart';
+part 'src/settings_pending_files.dart';
 part 'src/settings_preferences.dart';
 part 'src/search_page.dart';
 part 'src/detail_sheets.dart';

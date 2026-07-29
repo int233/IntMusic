@@ -16,6 +16,7 @@
         "scan.problem_found",
         "library.changed",
         "library.client_manifest_changed",
+        "library.client_file_resolved",
         "client.mutations_applied",
         "artist.updated",
         "artist.asset.ready",

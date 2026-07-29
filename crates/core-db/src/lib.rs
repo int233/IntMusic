@@ -40,7 +40,9 @@ pub type DbPool = SqlitePool;
 static MIGRATOR: Migrator = sqlx::migrate!("./src/migrations");
 
 mod artists;
+mod client_file_resolution;
 mod client_library;
+mod client_mutations;
 mod connection;
 mod distribution_jobs;
 mod distribution_sources;
@@ -57,7 +59,12 @@ mod tracks;
 
 pub(crate) use artists::trimmed_option;
 pub use artists::*;
+pub use client_file_resolution::*;
+pub(crate) use client_file_resolution::{
+    attach_client_file_to_track, mark_client_replica_ready, normalize_client_metadata_status,
+};
 pub use client_library::*;
+pub use client_mutations::*;
 pub use connection::*;
 pub use distribution_jobs::*;
 pub use distribution_sources::*;
