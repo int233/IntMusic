@@ -21,10 +21,12 @@ import 'package:sqflite/sqflite.dart' as mobile_sqlite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/navigation_history.dart';
+import 'core/json_values.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
 import 'core/renderer_audio_output_policy.dart';
 import 'core/renderer_command_sequences.dart';
+import 'core/storage/client_cache_database.dart';
 import 'core/task_scheduler.dart';
 import 'src/app_theme.dart';
 
@@ -131,6 +133,11 @@ void runIntMusicClient() {
       ? 350
       : 700;
   runApp(const IntMusicClientApp());
+}
+
+@visibleForTesting
+Widget libraryFileDetailDialogForTesting(Map<String, dynamic> detail) {
+  return _LibraryFileDetailDialog(detail: detail, onOpenTrack: (_) {});
 }
 
 class IntMusicClientApp extends StatelessWidget {

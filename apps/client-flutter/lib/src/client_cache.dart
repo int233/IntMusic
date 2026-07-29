@@ -51,11 +51,7 @@ class _ClientCacheStore {
       '${cacheDirectory.path}${Platform.pathSeparator}client-cache-v1.sqlite3',
       options: OpenDatabaseOptions(
         version: _databaseVersion,
-        onConfigure: (database) async {
-          await database.execute('PRAGMA journal_mode = WAL');
-          await database.execute('PRAGMA synchronous = NORMAL');
-          await database.execute('PRAGMA busy_timeout = 5000');
-        },
+        onConfigure: configureClientCacheDatabase,
         onCreate: (database, _) async {
           await database.execute('''
             CREATE TABLE cache_entries (

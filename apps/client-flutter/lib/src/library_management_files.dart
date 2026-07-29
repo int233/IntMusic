@@ -736,7 +736,7 @@ class _LibraryFileDetailDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final file = _asMap(detail['file']);
-    final metadata = _asMap(detail['embedded_metadata']);
+    final metadata = jsonObjectOrEmpty(detail['embedded_metadata']);
     final issues = (detail['issues'] as List?) ?? const [];
     final trackId = _intValue(file['track_id']);
     return Dialog(
