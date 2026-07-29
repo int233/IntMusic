@@ -24,6 +24,10 @@ use protocol::{
     TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateArtistAsset, UpdateArtistProfile,
     UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
 };
+use protocol::{
+    LibraryDeviceSummary, LibraryFileDetail, LibraryFileIssue, LibraryFilePage, LibraryFileSummary,
+    LibraryManagementActionResult, LibraryManagementSummary, LibrarySourceSummary,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha384};
@@ -50,6 +54,8 @@ mod distribution_transcode;
 mod helpers;
 mod history;
 mod ingest;
+mod library_management;
+mod library_management_actions;
 mod library_roots;
 mod metadata;
 mod playback_queue;
@@ -72,6 +78,9 @@ pub use distribution_transcode::*;
 pub use helpers::*;
 pub use history::*;
 pub(crate) use ingest::*;
+pub use library_management::*;
+pub(crate) use library_management_actions::refresh_file_management_issues;
+pub use library_management_actions::*;
 pub use library_roots::*;
 pub(crate) use metadata::*;
 pub use playback_queue::*;

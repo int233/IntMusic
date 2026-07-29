@@ -265,23 +265,6 @@ extension _DashboardLibrary on _CoreDashboardState {
     }
   }
 
-  Future<void> _resolveClientLibraryFile(
-    int fileId,
-    Map<String, dynamic> resolution,
-  ) async {
-    final result = await _run<List<dynamic>>(() async {
-      await _api.postJson('/client-library/files/$fileId/resolve', resolution);
-      return await _api.getJson('/client-library/pending') as List<dynamic>;
-    });
-    if (!mounted || result == null) {
-      return;
-    }
-    _mutate(() => _clientLibraryPendingFiles = result);
-    if (resolution['action'] == 'match' || resolution['action'] == 'metadata') {
-      await _refreshAll();
-    }
-  }
-
   void _replaceClientLibraryRoot(_ClientLibraryRoot replacement) {
     _clientLibraryRoots = _clientLibraryRoots
         .map(

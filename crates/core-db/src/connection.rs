@@ -29,6 +29,9 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
         .run(pool)
         .await
         .context("failed to run database migrations")?;
+    audit_library_inventory(pool)
+        .await
+        .context("failed to audit the library file inventory")?;
     Ok(())
 }
 

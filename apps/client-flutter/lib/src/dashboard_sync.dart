@@ -260,9 +260,6 @@ extension _DashboardSync on _CoreDashboardState {
       _api
           .getJson('/transcoding/status')
           .catchError((_) => const <String, dynamic>{}),
-      _api
-          .getJson('/client-library/pending')
-          .catchError((_) => const <dynamic>[]),
     ]);
     _status = status;
     _outputs = results[0] as List<dynamic>;
@@ -278,7 +275,6 @@ extension _DashboardSync on _CoreDashboardState {
     _favoriteSettings = _asMap(results[6]);
     _metadataSettings = _asMap(results[7]);
     _transcodingStatus = _asMap(results[8]);
-    _clientLibraryPendingFiles = results[9] as List<dynamic>;
     if (syncSnapshot != null) {
       final settings = <String, dynamic>{
         ..._asMap(syncSnapshot['settings']),

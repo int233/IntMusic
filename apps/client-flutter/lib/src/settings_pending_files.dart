@@ -491,9 +491,11 @@ class _ClientLibraryFileResolverDialogState
 
   List<Map<String, dynamic>> get _matchingTracks {
     final query = _queryController.text.trim().toLowerCase();
-    final tracks = widget.tracks.whereType<Map>().map(
-      (value) => value.cast<String, dynamic>(),
-    );
+    final currentTrackId = _intValue(widget.file['track_id']);
+    final tracks = widget.tracks
+        .whereType<Map>()
+        .map((value) => value.cast<String, dynamic>())
+        .where((track) => _intValue(track['id']) != currentTrackId);
     if (query.isEmpty) {
       return tracks.take(40).toList(growable: false);
     }

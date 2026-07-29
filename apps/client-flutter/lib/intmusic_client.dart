@@ -45,6 +45,9 @@ part 'src/playback_lyrics.dart';
 part 'src/playback_devices.dart';
 part 'src/playback_queue_sheet.dart';
 part 'src/history_page.dart';
+part 'src/library_management_page.dart';
+part 'src/library_management_files.dart';
+part 'src/library_management_devices.dart';
 part 'src/playlist_pages.dart';
 part 'src/settings_page.dart';
 part 'src/settings_distribution.dart';
@@ -244,7 +247,6 @@ class _CoreDashboardState extends State<CoreDashboard>
   List<dynamic> _libraryRoots = const [];
   List<_ClientLibraryRoot> _clientLibraryRoots = const [];
   List<dynamic> _clientLibraryStatuses = const [];
-  List<dynamic> _clientLibraryPendingFiles = const [];
   List<dynamic> _distributionJobs = const [];
   Map<String, dynamic>? _transcodingStatus;
   final Set<String> _clientLibrarySyncingRootIds = <String>{};

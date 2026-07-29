@@ -448,5 +448,10 @@ const _destinations = [
   _Destination('Playlists', Icons.queue_music_outlined, Icons.queue_music),
   _Destination('Playback', Icons.graphic_eq, Icons.graphic_eq),
   _Destination('History', Icons.timeline_outlined, Icons.timeline),
+  _Destination(
+    'Library management',
+    Icons.inventory_2_outlined,
+    Icons.inventory_2,
+  ),
   _Destination('Settings', Icons.tune_outlined, Icons.tune),
 ];

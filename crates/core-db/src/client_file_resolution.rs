@@ -43,7 +43,14 @@ pub async fn list_client_library_pending_files(
         LEFT JOIN devices device ON device.id = root.owner_device_id
         LEFT JOIN track_metadata_sources source ON source.file_id = file.id
         WHERE file.deleted_at IS NULL
-          AND file.scan_status IN ('needs_attention', 'tag_parse_error', 'ignored')
+          AND (
+              file.scan_status IN ('needs_attention', 'tag_parse_error', 'ignored')
+              OR EXISTS (
+                  SELECT 1
+                  FROM library_file_issues issue
+                  WHERE issue.file_id = file.id AND issue.state = 'open'
+              )
+          )
         ORDER BY
             CASE file.scan_status
                 WHEN 'tag_parse_error' THEN 0
@@ -140,6 +147,12 @@ pub async fn resolve_client_library_file(
             .execute(pool)
             .await?;
             attach_client_file_to_track(pool, file_id, target_track_id).await?;
+            sqlx::query("DELETE FROM tracks WHERE file_id = ?1 AND id <> ?2")
+                .bind(file_id)
+                .bind(target_track_id)
+                .execute(pool)
+                .await?;
+            refresh_file_management_issues(pool, file_id).await?;
             resolution_result(pool, file_id, action, Some(target_track_id)).await
         }
         "metadata" => {
@@ -186,6 +199,7 @@ pub async fn resolve_client_library_file(
             .execute(pool)
             .await?;
             mark_client_replica_ready(pool, file_id, &now).await?;
+            refresh_file_management_issues(pool, file_id).await?;
             resolution_result(pool, file_id, action, Some(track_id)).await
         }
         "ignore" => {
@@ -225,6 +239,7 @@ pub async fn resolve_client_library_file(
             .bind(file_id)
             .execute(pool)
             .await?;
+            refresh_file_management_issues(pool, file_id).await?;
             Ok(ResolveClientLibraryFileResult {
                 file_id,
                 action: action.to_string(),
@@ -245,6 +260,7 @@ pub async fn resolve_client_library_file(
             .bind(file_id)
             .execute(pool)
             .await?;
+            refresh_file_management_issues(pool, file_id).await?;
             Ok(ResolveClientLibraryFileResult {
                 file_id,
                 action: action.to_string(),

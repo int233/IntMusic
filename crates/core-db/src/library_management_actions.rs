@@ -1,0 +1,320 @@
+use super::*;
+
+pub async fn manage_library_file(
+    pool: &DbPool,
+    file_id: i64,
+    action: &str,
+) -> Result<LibraryManagementActionResult> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM files WHERE id = ?1")
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await?;
+    if exists.is_none() {
+        bail!("library file was not found");
+    }
+    let now = Utc::now().to_rfc3339();
+    let state = match action.trim() {
+        "ignore" => {
+            resolve_client_library_file(pool, file_id, "ignore", None, None).await?;
+            "ignored"
+        }
+        "request_rescan" => {
+            sqlx::query(
+                "UPDATE files SET scan_status = 'needs_attention', scan_message = 'Metadata rescan requested', updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            open_file_issue(
+                pool,
+                file_id,
+                "rescan_requested",
+                Some("Waiting for the owning device to read embedded tags again."),
+            )
+            .await?;
+            "awaiting_rescan"
+        }
+        "reset" => {
+            resolve_client_library_file(pool, file_id, "reset", None, None).await?;
+            "awaiting_rescan"
+        }
+        "restore" => {
+            sqlx::query(
+                "UPDATE files SET deleted_at = NULL, availability_state = 'missing', scan_status = 'needs_attention', scan_message = 'Restore requested', updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            open_file_issue(
+                pool,
+                file_id,
+                "rescan_requested",
+                Some("Restore is waiting for the owning source to scan this file."),
+            )
+            .await?;
+            "awaiting_rescan"
+        }
+        "remove" => {
+            sqlx::query(
+                "UPDATE files SET deleted_at = COALESCE(deleted_at, ?1), availability_state = 'missing', updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'missing', updated_at = ?1 WHERE file_id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            resolve_all_file_issues(pool, file_id).await?;
+            "removed"
+        }
+        _ => bail!("unsupported library file action"),
+    };
+    Ok(LibraryManagementActionResult {
+        target_kind: "file".to_string(),
+        target_id: file_id.to_string(),
+        action: action.trim().to_string(),
+        state: state.to_string(),
+    })
+}
+
+pub async fn manage_library_device(
+    pool: &DbPool,
+    device_id: &str,
+    action: &str,
+) -> Result<LibraryManagementActionResult> {
+    let device_id = device_id.trim();
+    if device_id.is_empty() || device_id == "core" {
+        bail!("the Core device cannot be retired");
+    }
+    let now = Utc::now().to_rfc3339();
+    let state = match action.trim() {
+        "retire" => {
+            let result = sqlx::query(
+                "UPDATE devices SET retired_at = COALESCE(retired_at, ?1) WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            if result.rows_affected() == 0 {
+                bail!("library device was not found");
+            }
+            sqlx::query(
+                "UPDATE library_roots SET enabled = 0, retired_at = COALESCE(retired_at, ?1), updated_at = ?1 WHERE owner_device_id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'retired', updated_at = ?1 WHERE device_id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            "retired"
+        }
+        "restore" => {
+            let result = sqlx::query("UPDATE devices SET retired_at = NULL WHERE id = ?1")
+                .bind(device_id)
+                .execute(pool)
+                .await?;
+            if result.rows_affected() == 0 {
+                bail!("library device was not found");
+            }
+            sqlx::query(
+                "UPDATE library_roots SET enabled = 1, retired_at = NULL, updated_at = ?1 WHERE owner_device_id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'missing', updated_at = ?1 WHERE device_id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            "offline"
+        }
+        _ => bail!("unsupported library device action"),
+    };
+    Ok(LibraryManagementActionResult {
+        target_kind: "device".to_string(),
+        target_id: device_id.to_string(),
+        action: action.trim().to_string(),
+        state: state.to_string(),
+    })
+}
+
+pub async fn manage_library_source(
+    pool: &DbPool,
+    root_id: i64,
+    action: &str,
+) -> Result<LibraryManagementActionResult> {
+    let now = Utc::now().to_rfc3339();
+    let state = match action.trim() {
+        "retire" => {
+            let result = sqlx::query(
+                "UPDATE library_roots SET enabled = 0, retired_at = COALESCE(retired_at, ?1), updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(pool)
+            .await?;
+            if result.rows_affected() == 0 {
+                bail!("library source was not found");
+            }
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'retired', updated_at = ?1 WHERE library_root_id = ?2",
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(pool)
+            .await?;
+            "retired"
+        }
+        "restore" => {
+            let result = sqlx::query(
+                "UPDATE library_roots SET enabled = 1, retired_at = NULL, updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(pool)
+            .await?;
+            if result.rows_affected() == 0 {
+                bail!("library source was not found");
+            }
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'missing', updated_at = ?1 WHERE library_root_id = ?2",
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(pool)
+            .await?;
+            "offline"
+        }
+        _ => bail!("unsupported library source action"),
+    };
+    Ok(LibraryManagementActionResult {
+        target_kind: "source".to_string(),
+        target_id: root_id.to_string(),
+        action: action.trim().to_string(),
+        state: state.to_string(),
+    })
+}
+
+pub(crate) async fn refresh_file_management_issues(pool: &DbPool, file_id: i64) -> Result<()> {
+    let status: String = sqlx::query_scalar("SELECT scan_status FROM files WHERE id = ?1")
+        .bind(file_id)
+        .fetch_one(pool)
+        .await?;
+    resolve_all_file_issues(pool, file_id).await?;
+    match status.as_str() {
+        "tag_parse_error" => {
+            let message: Option<String> =
+                sqlx::query_scalar("SELECT scan_message FROM files WHERE id = ?1")
+                    .bind(file_id)
+                    .fetch_one(pool)
+                    .await?;
+            open_file_issue(pool, file_id, "tag_parse_error", message.as_deref()).await?;
+        }
+        "needs_attention" => {
+            let message: Option<String> =
+                sqlx::query_scalar("SELECT scan_message FROM files WHERE id = ?1")
+                    .bind(file_id)
+                    .fetch_one(pool)
+                    .await?;
+            open_file_issue(pool, file_id, "missing_required_tags", message.as_deref()).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+pub async fn audit_library_inventory(pool: &DbPool) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO library_file_issues (
+            file_id, issue_kind, state, message, created_at, updated_at
+        )
+        SELECT
+            id,
+            CASE scan_status
+                WHEN 'tag_parse_error' THEN 'tag_parse_error'
+                ELSE 'missing_required_tags'
+            END,
+            'open',
+            scan_message,
+            ?1,
+            ?1
+        FROM files
+        WHERE deleted_at IS NULL
+          AND scan_status IN ('needs_attention', 'tag_parse_error')
+        ON CONFLICT(file_id, issue_kind) DO UPDATE SET
+            state = 'open',
+            message = excluded.message,
+            updated_at = excluded.updated_at,
+            resolved_at = NULL
+        "#,
+    )
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn open_file_issue(
+    pool: &DbPool,
+    file_id: i64,
+    issue_kind: &str,
+    message: Option<&str>,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO library_file_issues (
+            file_id, issue_kind, state, message, created_at, updated_at
+        )
+        VALUES (?1, ?2, 'open', ?3, ?4, ?4)
+        ON CONFLICT(file_id, issue_kind) DO UPDATE SET
+            state = 'open',
+            message = excluded.message,
+            updated_at = excluded.updated_at,
+            resolved_at = NULL
+        "#,
+    )
+    .bind(file_id)
+    .bind(issue_kind)
+    .bind(message)
+    .bind(&now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn resolve_all_file_issues(pool: &DbPool, file_id: i64) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        UPDATE library_file_issues
+        SET state = 'resolved', resolved_at = ?1, updated_at = ?1
+        WHERE file_id = ?2 AND state = 'open'
+        "#,
+    )
+    .bind(now)
+    .bind(file_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}

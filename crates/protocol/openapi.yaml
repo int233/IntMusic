@@ -22,6 +22,48 @@ paths:
       responses:
         "200":
           description: Added root.
+  /library-management/summary:
+    get:
+      summary: Return whole-library file, availability, issue, device, source, and storage totals.
+      responses:
+        "200":
+          description: Library inventory summary.
+  /library-management/files:
+    get:
+      summary: List every physical library file across Core and Client sources with catalog, metadata, issue, and availability state.
+      responses:
+        "200":
+          description: Filtered and paged physical-file inventory.
+  /library-management/files/{file_id}:
+    get:
+      summary: Return one physical file with embedded metadata evidence and its complete issue history.
+      responses:
+        "200":
+          description: Physical file detail.
+  /library-management/files/{file_id}/action:
+    post:
+      summary: Request a metadata rescan, ignore, reset, restore, or remove one physical file from the catalog inventory.
+      responses:
+        "200":
+          description: Updated file lifecycle state.
+  /library-management/devices:
+    get:
+      summary: List Core and every known Client, including offline or retired devices and all of their library sources.
+      responses:
+        "200":
+          description: Global device and source inventory.
+  /library-management/devices/{device_id}/action:
+    post:
+      summary: Retire or restore a logical Client device without losing its catalog history.
+      responses:
+        "200":
+          description: Updated device lifecycle state.
+  /library-management/sources/{root_id}/action:
+    post:
+      summary: Retire or restore any Core or Client library source independently of the current Client installation.
+      responses:
+        "200":
+          description: Updated source lifecycle state.
   /client-library/manifests:
     get:
       summary: List device-owned library roots and their latest reconciliation state.

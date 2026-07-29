@@ -1,6 +1,7 @@
 use super::*;
 
 mod client_library_resolution;
+mod library_management;
 
 async fn test_pool() -> (DbPool, PathBuf) {
     let path =

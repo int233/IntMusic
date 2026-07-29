@@ -143,6 +143,7 @@ pub async fn upsert_scanned_file(
         _ => {}
     }
 
+    refresh_file_management_issues(pool, file_id).await?;
     Ok(file_id)
 }
 
@@ -663,7 +664,9 @@ pub async fn remove_client_library_root(
     let Some(root_id) = root_id else {
         return Ok(());
     };
-    sqlx::query("UPDATE library_roots SET enabled = 0, updated_at = ?1 WHERE id = ?2")
+    sqlx::query(
+        "UPDATE library_roots SET enabled = 0, retired_at = COALESCE(retired_at, ?1), updated_at = ?1 WHERE id = ?2",
+    )
         .bind(&now)
         .bind(root_id)
         .execute(pool)

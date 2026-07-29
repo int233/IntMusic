@@ -6,6 +6,34 @@ pub fn build_router(state: AppState) -> Router {
         .route("/library/roots", get(list_roots).post(add_root))
         .route("/library/roots/{id}", delete(remove_root))
         .route(
+            "/library-management/summary",
+            get(library_management_summary),
+        )
+        .route(
+            "/library-management/files",
+            get(list_library_management_files),
+        )
+        .route(
+            "/library-management/files/{file_id}",
+            get(library_management_file_detail),
+        )
+        .route(
+            "/library-management/files/{file_id}/action",
+            post(manage_library_file),
+        )
+        .route(
+            "/library-management/devices",
+            get(list_library_management_devices),
+        )
+        .route(
+            "/library-management/devices/{device_id}/action",
+            post(manage_library_device),
+        )
+        .route(
+            "/library-management/sources/{root_id}/action",
+            post(manage_library_source),
+        )
+        .route(
             "/client-library/manifests",
             get(list_client_library_roots).post(upsert_client_library_manifest),
         )

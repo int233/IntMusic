@@ -196,6 +196,132 @@ pub struct ClientLibraryRootStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryManagementSummary {
+    pub total_files: i64,
+    pub active_files: i64,
+    pub available_files: i64,
+    pub unavailable_files: i64,
+    pub attention_files: i64,
+    pub ignored_files: i64,
+    pub total_bytes: i64,
+    pub device_count: i64,
+    pub source_count: i64,
+    pub retired_device_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFileSummary {
+    pub file_id: i64,
+    pub root_id: i64,
+    pub root_kind: String,
+    pub root_external_id: Option<String>,
+    pub root_name: String,
+    pub root_path_hint: Option<String>,
+    pub device_id: String,
+    pub device_name: String,
+    pub device_platform: Option<String>,
+    pub relative_path: String,
+    pub extension: String,
+    pub size_bytes: i64,
+    pub modified_at: String,
+    pub codec: Option<String>,
+    pub sample_rate: Option<i64>,
+    pub channels: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub bitrate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub quick_hash: Option<String>,
+    pub content_hash: Option<String>,
+    pub scan_status: String,
+    pub scan_message: Option<String>,
+    pub presence_state: String,
+    pub metadata_state: String,
+    pub identity_state: String,
+    pub resolution_kind: Option<String>,
+    #[serde(default)]
+    pub issues: Vec<String>,
+    pub track_id: Option<i64>,
+    pub track_title: Option<String>,
+    pub album_id: Option<i64>,
+    pub album_title: Option<String>,
+    pub artist_display: Option<String>,
+    pub media_variant_id: Option<i64>,
+    pub last_verified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFilePage {
+    pub total: i64,
+    pub limit: u32,
+    pub offset: u32,
+    #[serde(default)]
+    pub items: Vec<LibraryFileSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFileIssue {
+    pub issue_kind: String,
+    pub state: String,
+    pub message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFileDetail {
+    pub file: LibraryFileSummary,
+    pub embedded_metadata: Option<ClientTrackManifest>,
+    #[serde(default)]
+    pub issues: Vec<LibraryFileIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibrarySourceSummary {
+    pub root_id: i64,
+    pub external_id: Option<String>,
+    pub display_name: String,
+    pub path_hint: Option<String>,
+    pub root_kind: String,
+    pub state: String,
+    pub file_count: i64,
+    pub available_file_count: i64,
+    pub attention_file_count: i64,
+    pub total_bytes: i64,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub retired_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryDeviceSummary {
+    pub device_id: String,
+    pub display_name: String,
+    pub platform: Option<String>,
+    pub state: String,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub retired_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub sources: Vec<LibrarySourceSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFileActionRequest {
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryLifecycleActionRequest {
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryManagementActionResult {
+    pub target_kind: String,
+    pub target_id: String,
+    pub action: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientMutation {
     pub id: String,
     pub kind: String,
