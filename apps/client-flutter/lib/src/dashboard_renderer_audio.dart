@@ -31,6 +31,23 @@ extension _DashboardRendererAudio on _CoreDashboardState {
         );
         player = _MediaKitRendererAudioPlayer(mediaKitPlayer);
         await mediaKitPlayer.setAudioDevice(device);
+        await _configureDesktopRendererAudio(mediaKitPlayer, outputId);
+        _audioParamsSubscriptions[outputId] = mediaKitPlayer.stream.audioParams
+            .distinct()
+            .listen((params) {
+              ClientLog.event(
+                'renderer.player.audio_params',
+                data: <String, Object?>{
+                  'output_id': outputId,
+                  'track_id': _rendererLoadedTrackByOutput[outputId],
+                  'format': params.format,
+                  'sample_rate': params.sampleRate,
+                  'channels': params.channels,
+                  'channel_count': params.channelCount,
+                  'human_readable_channels': params.hrChannels,
+                },
+              );
+            });
       } else {
         final mobilePlayer = ap.AudioPlayer();
         await mobilePlayer.setReleaseMode(ap.ReleaseMode.stop);
@@ -58,9 +75,36 @@ extension _DashboardRendererAudio on _CoreDashboardState {
     } catch (_) {
       await _audioCompleteSubscriptions.remove(outputId)?.cancel();
       await _audioPlayingSubscriptions.remove(outputId)?.cancel();
+      await _audioParamsSubscriptions.remove(outputId)?.cancel();
       await player?.dispose();
       rethrow;
     }
+  }
+
+  Future<void> _configureDesktopRendererAudio(
+    Player player,
+    String outputId,
+  ) async {
+    final nativePlayer = player.platform;
+    if (nativePlayer is! NativePlayer) {
+      ClientLog.event(
+        'renderer.player.channel_policy_unavailable',
+        level: 'warning',
+        data: <String, Object?>{'output_id': outputId},
+      );
+      return;
+    }
+    for (final property in rendererAudioOutputPolicy.nativeProperties.entries) {
+      await nativePlayer.setProperty(property.key, property.value);
+    }
+    ClientLog.event(
+      'renderer.player.channel_policy_configured',
+      data: <String, Object?>{
+        'output_id': outputId,
+        'channel_layout': rendererAudioOutputPolicy.channelLayout,
+        'normalize_downmix': rendererAudioOutputPolicy.normalizeDownmix,
+      },
+    );
   }
 
   Future<void> _disposeRendererPlayer(String outputId) async {
@@ -68,6 +112,8 @@ extension _DashboardRendererAudio on _CoreDashboardState {
     await subscription?.cancel();
     final playingSubscription = _audioPlayingSubscriptions.remove(outputId);
     await playingSubscription?.cancel();
+    final paramsSubscription = _audioParamsSubscriptions.remove(outputId);
+    await paramsSubscription?.cancel();
     final playerFuture = _audioPlayers.remove(outputId);
     if (playerFuture == null) {
       return;
