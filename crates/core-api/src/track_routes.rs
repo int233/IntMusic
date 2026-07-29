@@ -223,13 +223,8 @@ pub(crate) async fn track_stream(
     Path(track_id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let detail = core_db::track_detail(state.pool(), track_id).await?;
-    stream_file_response(
-        std::path::PathBuf::from(&detail.file_path),
-        &detail.extension,
-        &headers,
-    )
-    .await
+    let (path, extension) = core_db::track_stream_source(state.pool(), track_id).await?;
+    stream_file_response(std::path::PathBuf::from(path), &extension, &headers).await
 }
 
 pub(crate) async fn stream_file_response(

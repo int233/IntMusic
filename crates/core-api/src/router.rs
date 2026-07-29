@@ -18,6 +18,18 @@ pub fn build_router(state: AppState) -> Router {
             post(manage_library_files),
         )
         .route(
+            "/library-management/tracks/merge/preview",
+            post(preview_library_track_merge),
+        )
+        .route(
+            "/library-management/tracks/merge",
+            post(merge_library_tracks),
+        )
+        .route(
+            "/library-management/track-merges/{merge_id}/undo",
+            post(undo_library_track_merge),
+        )
+        .route(
             "/library-management/files/{file_id}",
             get(library_management_file_detail),
         )

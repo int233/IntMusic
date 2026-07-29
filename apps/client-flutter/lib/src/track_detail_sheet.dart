@@ -613,6 +613,7 @@ class _TrackMediaOverview extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
     final media = this.media ?? const <String, dynamic>{};
+    final work = _asMap(media['work']);
     final recording = _asMap(media['recording']);
     final release = media['release'] == null
         ? <String, dynamic>{}
@@ -620,10 +621,39 @@ class _TrackMediaOverview extends StatelessWidget {
     final variants = (media['variants'] as List? ?? const [])
         .map((item) => (item as Map).cast<String, dynamic>())
         .toList(growable: false);
-    final related = (media['related_release_tracks'] as List? ?? const [])
+    final allRelated = (media['related_release_tracks'] as List? ?? const [])
         .map((item) => (item as Map).cast<String, dynamic>())
+        .toList(growable: false);
+    final related = allRelated
         .where((item) => item['is_current'] != true)
         .toList(growable: false);
+    List<String> releaseLabelsFor(Map<String, dynamic> variant) {
+      final ids = (variant['release_track_ids'] as List? ?? const [])
+          .map(_intValue)
+          .whereType<int>()
+          .toSet();
+      return allRelated
+          .where((item) => ids.contains(_intValue(item['release_track_id'])))
+          .map((item) {
+            final itemRelease = item['release'] == null
+                ? <String, dynamic>{}
+                : _asMap(item['release']);
+            final title =
+                itemRelease['title']?.toString() ??
+                item['title']?.toString() ??
+                '';
+            return _joinParts([
+              title,
+              itemRelease['year'],
+              if (_intValue(item['disc_number']) case final disc?)
+                '${_tr(context, 'Disc')} $disc',
+              if (_intValue(item['track_number']) case final track?) '#$track',
+            ]);
+          })
+          .where((label) => label.isNotEmpty)
+          .toList(growable: false);
+    }
+
     final localCopy = detail['_client_local_copy'] == null
         ? null
         : _asMap(detail['_client_local_copy']);
@@ -683,6 +713,14 @@ class _TrackMediaOverview extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (work.isNotEmpty || recording.isNotEmpty) ...[
+            _MediaCatalogHierarchy(
+              work: work,
+              recording: recording,
+              releaseCount: allRelated.length,
+            ),
+            const SizedBox(height: 14),
+          ],
           if (_recordingKindLabel(
                     context,
                     recording['recording_kind']?.toString(),
@@ -717,6 +755,7 @@ class _TrackMediaOverview extends StatelessWidget {
             for (var index = 0; index < variants.length; index++) ...[
               _MediaVariantRow(
                 variant: variants[index],
+                releaseLabels: releaseLabelsFor(variants[index]),
                 legacyReplica: index == legacyVariantIndex
                     ? legacyReplica
                     : null,
@@ -728,6 +767,7 @@ class _TrackMediaOverview extends StatelessWidget {
           else ...[
             _MediaVariantRow(
               variant: const <String, dynamic>{},
+              releaseLabels: const [],
               legacyReplica: legacyReplica,
               localCopy: localCopy,
             ),

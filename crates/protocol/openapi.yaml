@@ -52,6 +52,24 @@ paths:
       responses:
         "200":
           description: Batch file action counts.
+  /library-management/tracks/merge/preview:
+    post:
+      summary: Compare selected physical files, choose a canonical track, and report identity conflicts before consolidation.
+      responses:
+        "200":
+          description: Non-mutating merge preview.
+  /library-management/tracks/merge:
+    post:
+      summary: Reversibly consolidate confirmed encodings and device copies into one release-track identity.
+      responses:
+        "200":
+          description: Merge audit ID and consolidation counts.
+  /library-management/track-merges/{merge_id}/undo:
+    post:
+      summary: Restore the catalog links and media relationships recorded before a track merge.
+      responses:
+        "200":
+          description: Reverted merge result.
   /library-management/devices:
     get:
       summary: List Core and every known Client, including offline or retired devices and all of their library sources.

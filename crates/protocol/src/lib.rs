@@ -339,6 +339,70 @@ pub struct LibraryBatchActionResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMergePreviewRequest {
+    #[serde(default)]
+    pub file_ids: Vec<i64>,
+    pub target_track_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMergeCandidate {
+    pub track_id: i64,
+    pub release_track_id: i64,
+    pub title: String,
+    pub artist_display: Option<String>,
+    pub album_id: Option<i64>,
+    pub album_title: Option<String>,
+    pub disc_number: Option<i64>,
+    pub track_number: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub recording_kind: String,
+    pub file_count: i64,
+    pub media_variant_count: i64,
+    pub is_target: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMergeConflict {
+    pub field: String,
+    pub target_value: Option<String>,
+    #[serde(default)]
+    pub source_values: Vec<String>,
+    pub severity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMergePreview {
+    pub target_track_id: i64,
+    #[serde(default)]
+    pub source_track_ids: Vec<i64>,
+    #[serde(default)]
+    pub candidates: Vec<TrackMergeCandidate>,
+    #[serde(default)]
+    pub conflicts: Vec<TrackMergeConflict>,
+    pub can_merge: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMergeRequest {
+    pub target_track_id: i64,
+    #[serde(default)]
+    pub source_track_ids: Vec<i64>,
+    #[serde(default)]
+    pub confirm_conflicts: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackMergeResult {
+    pub merge_id: String,
+    pub target_track_id: i64,
+    pub target_release_track_id: i64,
+    pub merged_tracks: u32,
+    pub linked_media_variants: u32,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientMutation {
     pub id: String,
     pub kind: String,
@@ -803,6 +867,8 @@ pub struct MediaReplicaSummary {
 pub struct MediaVariantSummary {
     pub id: i64,
     pub global_id: String,
+    #[serde(default)]
+    pub release_track_ids: Vec<i64>,
     pub relation_kind: String,
     pub is_preferred: bool,
     pub codec: Option<String>,

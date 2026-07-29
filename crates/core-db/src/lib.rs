@@ -27,7 +27,8 @@ use protocol::{
 use protocol::{
     LibraryBatchActionResult, LibraryDeviceSummary, LibraryFileDetail, LibraryFileIssue,
     LibraryFilePage, LibraryFileSummary, LibraryManagementActionResult, LibraryManagementSummary,
-    LibrarySourceSummary,
+    LibrarySourceSummary, TrackMergeCandidate, TrackMergeConflict, TrackMergePreview,
+    TrackMergeRequest, TrackMergeResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -62,6 +63,8 @@ mod metadata;
 mod playback_queue;
 mod playlists;
 mod track_edit;
+mod track_merge;
+mod track_snapshot;
 mod tracks;
 
 pub(crate) use artists::trimmed_option;
@@ -87,6 +90,8 @@ pub(crate) use metadata::*;
 pub use playback_queue::*;
 pub use playlists::*;
 pub use track_edit::*;
+pub use track_merge::*;
+pub use track_snapshot::*;
 pub use tracks::*;
 
 #[cfg(test)]

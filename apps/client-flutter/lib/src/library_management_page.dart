@@ -230,6 +230,69 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
     }
   }
 
+  Future<void> _mergeSelectedFiles(Set<int> fileIds) async {
+    if (fileIds.length < 2) return;
+    try {
+      final sortedFileIds = fileIds.toList()..sort();
+      final preview = _asMap(
+        await _api.postBulkJson(
+          '/library-management/tracks/merge/preview',
+          <String, dynamic>{'file_ids': sortedFileIds},
+        ),
+      );
+      if (!mounted) return;
+      final request = await showDialog<Map<String, dynamic>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _TrackMergeDialog(
+          api: _api,
+          fileIds: sortedFileIds,
+          initialPreview: preview,
+        ),
+      );
+      if (request == null) return;
+      final result = _asMap(
+        await _api.postBulkJson('/library-management/tracks/merge', request),
+      );
+      if (!mounted) return;
+      setState(_selectedFileIds.clear);
+      await _refreshAll();
+      await widget.onLibraryChanged();
+      if (!mounted) return;
+      final mergeId = result['merge_id']?.toString();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${_intValue(result['merged_tracks']) ?? 0} '
+            '${_tr(context, 'tracks merged as one song')}',
+          ),
+          action: mergeId == null
+              ? null
+              : SnackBarAction(
+                  label: _tr(context, 'Undo'),
+                  onPressed: () => unawaited(_undoTrackMerge(mergeId)),
+                ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
+  Future<void> _undoTrackMerge(String mergeId) async {
+    try {
+      await _api.postBulkJson(
+        '/library-management/track-merges/'
+        '${Uri.encodeComponent(mergeId)}/undo',
+        const <String, dynamic>{},
+      );
+      await _refreshAll();
+      await widget.onLibraryChanged();
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
   Future<void> _resolveFile(int fileId, Map<String, dynamic> resolution) async {
     try {
       await _api.postJson('/client-library/files/$fileId/resolve', resolution);
@@ -454,6 +517,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
                   },
                   onClearSelection: () => setState(_selectedFileIds.clear),
                   onBatchAction: _batchFileAction,
+                  onMerge: _mergeSelectedFiles,
                 ),
                 _LibraryInventoryTab.devices => _LibraryDevicesView(
                   key: const ValueKey('library-devices'),

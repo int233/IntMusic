@@ -252,9 +252,9 @@ pub(crate) async fn ensure_track_media_graph(
 
     let recording_kind = inferred_recording_kind(track.subtitle.as_deref());
     let mastering_kind = inferred_mastering_kind(track.subtitle.as_deref());
-    let master_label = track
-        .subtitle
-        .as_deref()
+    let master_label = (mastering_kind != "unknown")
+        .then_some(track.subtitle.as_deref())
+        .flatten()
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
@@ -605,12 +605,28 @@ pub(crate) async fn file_ingest_by_id(pool: &DbPool, file_id: i64) -> Result<Fil
 
 pub(crate) fn inferred_recording_kind(subtitle: Option<&str>) -> &'static str {
     let subtitle = subtitle.unwrap_or_default().to_ascii_lowercase();
-    if subtitle.contains("live") || subtitle.contains("现场") {
+    if subtitle.contains("cover") || subtitle.contains("翻唱") {
+        "cover"
+    } else if subtitle.contains("remix") || subtitle.contains("混音") {
+        "remix"
+    } else if subtitle.contains("radio edit")
+        || subtitle.contains("single edit")
+        || subtitle.contains("剪辑版")
+    {
+        "edit"
+    } else if subtitle.contains("live") || subtitle.contains("现场") {
         "live"
     } else if subtitle.contains("acoustic") || subtitle.contains("不插电") {
         "acoustic"
     } else if subtitle.contains("demo") {
         "demo"
+    } else if subtitle.contains("instrumental")
+        || subtitle.contains("伴奏")
+        || subtitle.contains("纯音乐")
+    {
+        "instrumental"
+    } else if subtitle.contains("karaoke") {
+        "karaoke"
     } else {
         "unknown"
     }
@@ -620,8 +636,6 @@ pub(crate) fn inferred_mastering_kind(subtitle: Option<&str>) -> &'static str {
     let subtitle = subtitle.unwrap_or_default().to_ascii_lowercase();
     if subtitle.contains("remaster") || subtitle.contains("重制") {
         "remaster"
-    } else if subtitle.contains("remix") {
-        "remix"
     } else {
         "unknown"
     }

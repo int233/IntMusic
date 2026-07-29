@@ -145,14 +145,143 @@ class _MediaIdentityChip extends StatelessWidget {
   }
 }
 
+class _MediaCatalogHierarchy extends StatelessWidget {
+  const _MediaCatalogHierarchy({
+    required this.work,
+    required this.recording,
+    required this.releaseCount,
+  });
+
+  final Map<String, dynamic> work;
+  final Map<String, dynamic> recording;
+  final int releaseCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
+    final recordingKind = _recordingKindLabel(
+      context,
+      recording['recording_kind']?.toString(),
+    );
+    final nodes = <(IconData, String, String)>[
+      (
+        Icons.music_note_outlined,
+        _tr(context, 'Composition'),
+        work['title']?.toString() ?? '-',
+      ),
+      (
+        recording['recording_kind'] == 'live'
+            ? Icons.mic_external_on_outlined
+            : Icons.graphic_eq,
+        _tr(context, 'Recording'),
+        _joinParts([recording['version_title'], recordingKind]).isEmpty
+            ? recording['title']?.toString() ?? '-'
+            : _joinParts([recording['version_title'], recordingKind]),
+      ),
+      (
+        Icons.album_outlined,
+        _tr(context, 'Release appearances'),
+        '$releaseCount',
+      ),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 620;
+        return Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: tokens.surfaceRaised.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(15),
+            border: Border.all(color: tokens.stroke),
+          ),
+          child: Flex(
+            direction: compact ? Axis.vertical : Axis.horizontal,
+            crossAxisAlignment: compact
+                ? CrossAxisAlignment.start
+                : CrossAxisAlignment.center,
+            children: [
+              for (var index = 0; index < nodes.length; index++) ...[
+                if (compact)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      bottom: index == nodes.length - 1 ? 0 : 10,
+                    ),
+                    child: _MediaHierarchyNode(node: nodes[index]),
+                  )
+                else
+                  Expanded(child: _MediaHierarchyNode(node: nodes[index])),
+                if (!compact && index != nodes.length - 1)
+                  Icon(
+                    Icons.chevron_right,
+                    size: 18,
+                    color: tokens.textSecondary,
+                  ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _MediaHierarchyNode extends StatelessWidget {
+  const _MediaHierarchyNode({required this.node});
+
+  final (IconData, String, String) node;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
+    return Row(
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: tokens.accent.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(node.$1, size: 17, color: tokens.accent),
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                node.$2,
+                style: Theme.of(
+                  context,
+                ).textTheme.labelSmall?.copyWith(color: tokens.textSecondary),
+              ),
+              Text(
+                node.$3,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _MediaVariantRow extends StatelessWidget {
   const _MediaVariantRow({
     required this.variant,
+    required this.releaseLabels,
     required this.legacyReplica,
     required this.localCopy,
   });
 
   final Map<String, dynamic> variant;
+  final List<String> releaseLabels;
   final Map<String, dynamic>? legacyReplica;
   final Map<String, dynamic>? localCopy;
 
@@ -254,6 +383,19 @@ class _MediaVariantRow extends StatelessWidget {
               ),
           ],
         ),
+        if (releaseLabels.isNotEmpty) ...[
+          const SizedBox(height: 9),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: releaseLabels
+                .map(
+                  (label) =>
+                      _TrackMetaPill(icon: Icons.album_outlined, label: label),
+                )
+                .toList(growable: false),
+          ),
+        ],
         const SizedBox(height: 12),
         if (replicas.isEmpty)
           DecoratedBox(
@@ -556,6 +698,11 @@ String? _recordingKindLabel(BuildContext context, String? kind) {
     'live' => _tr(context, 'Live recording'),
     'acoustic' => _tr(context, 'Acoustic recording'),
     'demo' => _tr(context, 'Demo recording'),
+    'cover' => _tr(context, 'Cover recording'),
+    'remix' => _tr(context, 'Remix recording'),
+    'edit' => _tr(context, 'Edited recording'),
+    'instrumental' => _tr(context, 'Instrumental recording'),
+    'karaoke' => _tr(context, 'Karaoke recording'),
     'studio' => _tr(context, 'Studio recording'),
     _ => null,
   };

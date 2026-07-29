@@ -27,6 +27,7 @@ class _LibraryFilesView extends StatelessWidget {
     required this.onSelectPage,
     required this.onClearSelection,
     required this.onBatchAction,
+    required this.onMerge,
   });
 
   final List<dynamic> files;
@@ -53,6 +54,7 @@ class _LibraryFilesView extends StatelessWidget {
   final void Function(Set<int>, bool) onSelectPage;
   final VoidCallback onClearSelection;
   final Future<void> Function(Set<int>, String) onBatchAction;
+  final Future<void> Function(Set<int>) onMerge;
 
   @override
   Widget build(BuildContext context) {
@@ -212,6 +214,15 @@ class _LibraryFilesView extends StatelessWidget {
                   onPressed: onClearSelection,
                   child: Text(_tr(context, 'Clear selection')),
                 ),
+                if (selectedFileIds.length >= 2)
+                  FilledButton.icon(
+                    onPressed: loading
+                        ? null
+                        : () => onMerge(Set<int>.of(selectedFileIds)),
+                    icon: const Icon(Icons.merge_type, size: 18),
+                    label: Text(_tr(context, 'Merge as one song')),
+                  ),
+                if (selectedFileIds.length >= 2) const SizedBox(width: 8),
                 PopupMenuButton<String>(
                   tooltip: _tr(context, 'Batch actions'),
                   enabled: !loading,
@@ -573,10 +584,17 @@ class _LibraryFileCard extends StatelessWidget {
                       value: 'details',
                       child: Text(_tr(context, 'View file details')),
                     ),
-                    if (canResolve)
+                    if (canResolve || _intValue(file['track_id']) != null)
                       PopupMenuItem(
                         value: 'resolve',
-                        child: Text(_tr(context, 'Identify or edit metadata')),
+                        child: Text(
+                          _tr(
+                            context,
+                            canResolve
+                                ? 'Identify or edit metadata'
+                                : 'Link to another song',
+                          ),
+                        ),
                       ),
                     if (file['scan_status']?.toString() == 'ignored')
                       PopupMenuItem(
@@ -682,43 +700,6 @@ class _LibraryStateChip extends StatelessWidget {
             ).textTheme.labelSmall?.copyWith(color: color),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _LibraryFilesEmpty extends StatelessWidget {
-  const _LibraryFilesEmpty({required this.attentionOnly});
-
-  final bool attentionOnly;
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              attentionOnly
-                  ? Icons.task_alt_outlined
-                  : Icons.audio_file_outlined,
-              size: 52,
-              color: IntMusicTheme.of(context).textSecondary,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              _tr(
-                context,
-                attentionOnly
-                    ? 'No files currently need attention'
-                    : 'No files match these filters',
-              ),
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-          ],
-        ),
       ),
     );
   }

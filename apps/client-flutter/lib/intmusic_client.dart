@@ -50,6 +50,7 @@ part 'src/playback_queue_sheet.dart';
 part 'src/history_page.dart';
 part 'src/library_management_page.dart';
 part 'src/library_management_files.dart';
+part 'src/library_management_merge.dart';
 part 'src/library_management_devices.dart';
 part 'src/library_management_formatting.dart';
 part 'src/playlist_pages.dart';

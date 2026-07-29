@@ -82,6 +82,54 @@ pub(crate) async fn manage_library_files(
     Ok(Json(result))
 }
 
+pub(crate) async fn preview_library_track_merge(
+    State(state): State<AppState>,
+    Json(payload): Json<TrackMergePreviewRequest>,
+) -> ApiResult<protocol::TrackMergePreview> {
+    Ok(Json(
+        core_db::preview_track_merge(state.pool(), &payload.file_ids, payload.target_track_id)
+            .await?,
+    ))
+}
+
+pub(crate) async fn merge_library_tracks(
+    State(state): State<AppState>,
+    Json(payload): Json<TrackMergeRequest>,
+) -> ApiResult<protocol::TrackMergeResult> {
+    let result = core_db::merge_tracks(state.pool(), &payload).await?;
+    state
+        .bump_library_revision("physical files merged into one release track")
+        .await;
+    state.emit(
+        "library.tracks_merged",
+        json!({
+            "merge_id": result.merge_id,
+            "target_track_id": result.target_track_id,
+            "merged_tracks": result.merged_tracks,
+        }),
+    );
+    Ok(Json(result))
+}
+
+pub(crate) async fn undo_library_track_merge(
+    State(state): State<AppState>,
+    Path(merge_id): Path<String>,
+) -> ApiResult<protocol::TrackMergeResult> {
+    let result = core_db::undo_track_merge(state.pool(), &merge_id).await?;
+    state
+        .bump_library_revision("physical file merge undone")
+        .await;
+    state.emit(
+        "library.tracks_merged",
+        json!({
+            "merge_id": result.merge_id,
+            "target_track_id": result.target_track_id,
+            "action": "undone",
+        }),
+    );
+    Ok(Json(result))
+}
+
 pub(crate) async fn manage_library_device(
     State(state): State<AppState>,
     Path(device_id): Path<String>,

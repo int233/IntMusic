@@ -1,5 +1,42 @@
 part of '../intmusic_client.dart';
 
+class _LibraryFilesEmpty extends StatelessWidget {
+  const _LibraryFilesEmpty({required this.attentionOnly});
+
+  final bool attentionOnly;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              attentionOnly
+                  ? Icons.task_alt_outlined
+                  : Icons.audio_file_outlined,
+              size: 52,
+              color: IntMusicTheme.of(context).textSecondary,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              _tr(
+                context,
+                attentionOnly
+                    ? 'No files currently need attention'
+                    : 'No files match these filters',
+              ),
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 String _libraryFilename(String path) {
   final parts = path.replaceAll('\\', '/').split('/');
   return parts.isEmpty ? path : parts.last;
