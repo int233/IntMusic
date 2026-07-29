@@ -89,7 +89,12 @@ pub async fn library_counts(pool: &DbPool) -> Result<LibraryCounts> {
         tracks: count(pool, "tracks", "1 = 1").await?,
         albums: count(pool, "albums", "1 = 1").await?,
         artists: count(pool, "artists", "1 = 1").await?,
-        scan_problems: count(pool, "files", "scan_status != 'ok' AND deleted_at IS NULL").await?,
+        scan_problems: count(
+            pool,
+            "files",
+            "scan_status IN ('needs_attention', 'tag_parse_error') AND deleted_at IS NULL",
+        )
+        .await?,
     })
 }
 

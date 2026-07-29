@@ -76,10 +76,10 @@ use protocol::{
     PlaybackEvent, PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
     PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
     RendererCommandPayload, RendererRegistration, RendererStateReport, RendererVolumeStateReport,
-    ReplacePlaybackQueue, ScanProgressPayload, SearchResponse, ServerSettingsUpdate,
-    TrackFavoriteUpdate, TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile,
-    UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneAliasUpdate, ZoneTransferRequest,
-    ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
+    ReplacePlaybackQueue, ResolveClientLibraryFileRequest, ScanProgressPayload, SearchResponse,
+    ServerSettingsUpdate, TrackFavoriteUpdate, TrackMetadataUpdate, UpdateArtistAsset,
+    UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneAliasUpdate,
+    ZoneTransferRequest, ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;

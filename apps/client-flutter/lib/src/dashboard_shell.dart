@@ -375,6 +375,8 @@ extension _DashboardShell on _CoreDashboardState {
           libraryRoots: _libraryRoots,
           clientLibraryRoots: _clientLibraryRoots,
           clientLibraryStatuses: _clientLibraryStatuses,
+          clientLibraryPendingFiles: _clientLibraryPendingFiles,
+          tracks: _tracks,
           clientLibrarySyncingRootIds: _clientLibrarySyncingRootIds,
           distributionJobs: _distributionJobs,
           transcodingStatus: _transcodingStatus,
@@ -398,6 +400,7 @@ extension _DashboardShell on _CoreDashboardState {
               unawaited(_syncAllClientLibraryRoots()),
           onRemoveClientLibraryRoot: (id) =>
               unawaited(_removeClientLibraryRoot(id)),
+          onResolveClientLibraryFile: _resolveClientLibraryFile,
           onRefreshDistributions: () => unawaited(_refreshDistributionJobs()),
           onCancelDistribution: (id) => unawaited(_cancelDistributionJob(id)),
           onSaveServerAlias: () => unawaited(_saveServerAlias()),

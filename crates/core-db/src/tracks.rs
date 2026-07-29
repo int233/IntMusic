@@ -388,7 +388,7 @@ pub async fn recording_link_candidates(
                 reasons.push("duration_within_10s".to_string());
             }
         }
-        if recording_kind == target_recording_kind {
+        if target_recording_kind != "unknown" && recording_kind == target_recording_kind {
             confidence += 0.1;
             reasons.push("same_recording_kind".to_string());
         }

@@ -114,6 +114,7 @@ extension _DashboardLibrary on _CoreDashboardState {
           '${DateTime.now().toUtc().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
       var accepted = 0;
       var batch = <Map<String, dynamic>>[];
+      var inspectionPaths = <String>[];
       final seenExternalIds = <String>{};
       Future<void> sendBatch({required bool complete}) async {
         final sentBatch = List<Map<String, dynamic>>.of(batch);
@@ -170,6 +171,19 @@ extension _DashboardLibrary on _CoreDashboardState {
         batch = <Map<String, dynamic>>[];
       }
 
+      Future<void> inspectPendingPaths() async {
+        if (inspectionPaths.isEmpty) return;
+        final paths = List<String>.of(inspectionPaths);
+        inspectionPaths = <String>[];
+        final inspected = await Isolate.run(
+          () => _clientFileManifestBatch(root.path, paths),
+        );
+        batch.addAll(inspected);
+        if (batch.length >= 50) {
+          await sendBatch(complete: false);
+        }
+      }
+
       await for (final entity in directory.list(
         recursive: true,
         followLinks: false,
@@ -177,11 +191,12 @@ extension _DashboardLibrary on _CoreDashboardState {
         if (entity is! File || !_isSupportedClientAudioPath(entity.path)) {
           continue;
         }
-        batch.add(await _clientFileManifest(root.path, entity));
-        if (batch.length >= 50) {
-          await sendBatch(complete: false);
+        inspectionPaths.add(entity.path);
+        if (inspectionPaths.length >= 20) {
+          await inspectPendingPaths();
         }
       }
+      await inspectPendingPaths();
       await sendBatch(complete: true);
       _offlineLibrary.retainRootFiles(root.externalId, seenExternalIds);
       await _OfflineLibraryStore.save(_offlineLibrary);
@@ -247,6 +262,23 @@ extension _DashboardLibrary on _CoreDashboardState {
       if (mounted) {
         _mutate(() => _error = 'Unable to remove local folder: $error');
       }
+    }
+  }
+
+  Future<void> _resolveClientLibraryFile(
+    int fileId,
+    Map<String, dynamic> resolution,
+  ) async {
+    final result = await _run<List<dynamic>>(() async {
+      await _api.postJson('/client-library/files/$fileId/resolve', resolution);
+      return await _api.getJson('/client-library/pending') as List<dynamic>;
+    });
+    if (!mounted || result == null) {
+      return;
+    }
+    _mutate(() => _clientLibraryPendingFiles = result);
+    if (resolution['action'] == 'match' || resolution['action'] == 'metadata') {
+      await _refreshAll();
     }
   }
 

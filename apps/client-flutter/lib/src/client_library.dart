@@ -140,42 +140,75 @@ bool _isSupportedClientAudioPath(String path) {
   return _clientAudioExtensions.contains(path.substring(dot + 1).toLowerCase());
 }
 
-Future<Map<String, dynamic>> _clientFileManifest(
+List<Map<String, dynamic>> _clientFileManifestBatch(
   String rootPath,
-  File file,
-) async {
-  final stat = await file.stat();
+  List<String> filePaths,
+) {
+  return filePaths
+      .map((path) => _clientFileManifestSync(rootPath, File(path)))
+      .toList(growable: false);
+}
+
+Map<String, dynamic> _clientFileManifestSync(String rootPath, File file) {
+  final stat = file.statSync();
   final relativePath = _relativeClientPath(rootPath, file.path);
   final normalized = relativePath.replaceAll('\\', '/');
-  final segments = normalized.split('/');
-  final filename = segments.last;
+  final filename = normalized.split('/').last;
   final dot = filename.lastIndexOf('.');
-  final stem = dot > 0 ? filename.substring(0, dot) : filename;
-  final parsed = RegExp(
-    r'^\s*(?:(\d{1,3})\s*[-._ ]+\s*)?(.+?)\s*$',
-  ).firstMatch(stem);
-  final title = parsed?.group(2)?.trim().isNotEmpty == true
-      ? parsed!.group(2)!.trim()
-      : stem;
-  final trackNumber = int.tryParse(parsed?.group(1) ?? '');
-  var album = segments.length >= 2 ? segments[segments.length - 2] : null;
-  int? discNumber;
-  if (album != null) {
-    final discMatch = RegExp(
-      r'^(?:cd|disc|disk|碟)\s*[-._ ]*(\d+)$',
-      caseSensitive: false,
-    ).firstMatch(album);
-    if (discMatch != null) {
-      discNumber = int.tryParse(discMatch.group(1) ?? '');
-      album = segments.length >= 3 ? segments[segments.length - 3] : null;
-    }
-  }
-  final artistIndex = discNumber == null
-      ? segments.length - 3
-      : segments.length - 4;
-  final artist = artistIndex >= 0 ? segments[artistIndex].trim() : '';
   final extension = dot >= 0 ? filename.substring(dot + 1).toLowerCase() : '';
-  final quickHash = await _quickClientFileHash(file, stat.size);
+  final quickHash = _quickClientFileHashSync(file, stat.size);
+  var metadata = const <String, dynamic>{};
+  var metadataStatus = 'needs_attention';
+  String? metadataMessage;
+  int? sampleRate;
+  int? bitrate;
+  int? durationMs;
+  try {
+    final embedded = readMetadata(file, getImage: false);
+    sampleRate = embedded.sampleRate;
+    bitrate = embedded.bitrate;
+    durationMs = embedded.duration?.inMilliseconds;
+    final title = _cleanEmbeddedText(embedded.title);
+    final artists = _embeddedTagValues(embedded.artist);
+    final missing = <String>[
+      if (title == null) 'TITLE',
+      if (artists.isEmpty) 'ARTIST',
+    ];
+    metadata = <String, dynamic>{
+      'title': title ?? '',
+      'album': _cleanEmbeddedText(embedded.album),
+      'track_artists': artists,
+      'album_artists': const <String>[],
+      'composers': const <String>[],
+      'lyricists': const <String>[],
+      'genres': embedded.genres
+          .map(_cleanEmbeddedText)
+          .whereType<String>()
+          .toList(growable: false),
+      'track_number': embedded.trackNumber,
+      'track_total': embedded.trackTotal,
+      'disc_number': embedded.discNumber,
+      'disc_total': embedded.totalDisc,
+      'duration_ms': durationMs,
+      'date': embedded.year == null || embedded.year!.year <= 0
+          ? null
+          : embedded.year!.year.toString(),
+      'year': embedded.year == null || embedded.year!.year <= 0
+          ? null
+          : embedded.year!.year,
+      'lyrics': _cleanEmbeddedText(embedded.lyrics),
+      'lyrics_kind': _embeddedLyricsKind(embedded.lyrics),
+    };
+    if (missing.isEmpty) {
+      metadataStatus = 'ready';
+    } else {
+      metadataMessage =
+          'Missing required embedded ${missing.join(' and ')} tags';
+    }
+  } catch (error) {
+    metadataStatus = 'tag_parse_error';
+    metadataMessage = error.toString();
+  }
   return <String, dynamic>{
     'external_id': normalized,
     'relative_path': normalized,
@@ -185,31 +218,51 @@ Future<Map<String, dynamic>> _clientFileManifest(
     'quick_hash': quickHash,
     'content_hash': null,
     'codec': extension,
-    'sample_rate': null,
+    'sample_rate': sampleRate,
     'channels': null,
-    'duration_ms': null,
-    'bitrate': null,
+    'duration_ms': durationMs,
+    'bitrate': bitrate,
     'bit_depth': null,
-    'metadata': <String, dynamic>{
-      'title': title,
-      'album': album?.trim().isEmpty == true ? null : album?.trim(),
-      'track_artists': artist.isEmpty ? <String>[] : <String>[artist],
-      'album_artists': artist.isEmpty ? <String>[] : <String>[artist],
-      'track_number': trackNumber,
-      'disc_number': discNumber,
-    },
+    'metadata_status': metadataStatus,
+    'metadata_message': metadataMessage,
+    'metadata_source': 'embedded_tag',
+    'metadata': metadata,
   };
 }
 
-Future<String> _quickClientFileHash(File file, int size) async {
+String? _cleanEmbeddedText(Object? value) {
+  final text = value?.toString().replaceAll('\u0000', '').trim();
+  return text == null || text.isEmpty ? null : text;
+}
+
+List<String> _embeddedTagValues(Object? value) {
+  final text = _cleanEmbeddedText(value);
+  if (text == null) return const [];
+  return text
+      .split(RegExp(r'\s*;\s*|\u0000+'))
+      .map(_cleanEmbeddedText)
+      .whereType<String>()
+      .toSet()
+      .toList(growable: false);
+}
+
+String? _embeddedLyricsKind(Object? value) {
+  final text = _cleanEmbeddedText(value);
+  if (text == null) return null;
+  return RegExp(r'\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]').hasMatch(text)
+      ? 'lrc'
+      : 'plain';
+}
+
+String _quickClientFileHashSync(File file, int size) {
   const sampleSize = 64 * 1024;
-  final handle = await file.open();
+  final handle = file.openSync();
   try {
-    final first = await handle.read(min(sampleSize, size));
+    final first = handle.readSync(min(sampleSize, size));
     var last = <int>[];
     if (size > sampleSize) {
-      await handle.setPosition(max(0, size - sampleSize));
-      last = await handle.read(min(sampleSize, size));
+      handle.setPositionSync(max(0, size - sampleSize));
+      last = handle.readSync(min(sampleSize, size));
     }
     return sha256.convert(<int>[
       ...first,
@@ -217,8 +270,13 @@ Future<String> _quickClientFileHash(File file, int size) async {
       for (var index = 0; index < 8; index++) (size >> (index * 8)) & 0xff,
     ]).toString();
   } finally {
-    await handle.close();
+    handle.closeSync();
   }
+}
+
+Future<String> _quickClientFileHash(File file, int size) {
+  final path = file.path;
+  return Isolate.run(() => _quickClientFileHashSync(File(path), size));
 }
 
 String _relativeClientPath(String rootPath, String filePath) {

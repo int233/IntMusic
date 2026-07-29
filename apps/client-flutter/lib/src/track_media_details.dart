@@ -202,7 +202,7 @@ class _MediaVariantRow extends StatelessWidget {
       _audioBitrateLabel(variant),
     ]);
     final masterLabel = _joinParts([
-      master['label'],
+      master['label'] == 'Library source' ? null : master['label'],
       master['mastering_kind'] == 'unknown' ? null : master['mastering_kind'],
     ]);
 
@@ -551,12 +551,13 @@ String _compactMediaDate(Object? value) {
       '${two(date.hour)}:${two(date.minute)}';
 }
 
-String _recordingKindLabel(BuildContext context, String? kind) {
+String? _recordingKindLabel(BuildContext context, String? kind) {
   return switch (kind) {
     'live' => _tr(context, 'Live recording'),
     'acoustic' => _tr(context, 'Acoustic recording'),
     'demo' => _tr(context, 'Demo recording'),
-    _ => _tr(context, 'Studio recording'),
+    'studio' => _tr(context, 'Studio recording'),
+    _ => null,
   };
 }
 

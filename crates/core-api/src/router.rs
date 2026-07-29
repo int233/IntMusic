@@ -10,6 +10,14 @@ pub fn build_router(state: AppState) -> Router {
             get(list_client_library_roots).post(upsert_client_library_manifest),
         )
         .route(
+            "/client-library/pending",
+            get(list_client_library_pending_files),
+        )
+        .route(
+            "/client-library/files/{file_id}/resolve",
+            post(resolve_client_library_file),
+        )
+        .route(
             "/client-library/devices/{device_id}/roots/{root_external_id}",
             delete(remove_client_library_root),
         )

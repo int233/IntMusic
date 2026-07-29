@@ -98,7 +98,15 @@ pub struct ClientLibraryFileManifest {
     pub duration_ms: Option<i64>,
     pub bitrate: Option<i64>,
     pub bit_depth: Option<i64>,
+    #[serde(default = "default_client_metadata_status")]
+    pub metadata_status: String,
+    pub metadata_message: Option<String>,
+    pub metadata_source: Option<String>,
     pub metadata: ClientTrackManifest,
+}
+
+fn default_client_metadata_status() -> String {
+    "ready".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +137,45 @@ pub struct ClientLibraryFileBinding {
     pub external_id: String,
     pub track_id: i64,
     pub media_variant_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryPendingFile {
+    pub file_id: i64,
+    pub device_id: String,
+    pub device_name: String,
+    pub root_external_id: String,
+    pub root_display_name: String,
+    pub client_file_id: String,
+    pub relative_path: String,
+    pub extension: String,
+    pub size_bytes: i64,
+    pub modified_at: String,
+    pub scan_status: String,
+    pub scan_message: Option<String>,
+    pub codec: Option<String>,
+    pub sample_rate: Option<i64>,
+    pub channels: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub bitrate: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub metadata: Option<ClientTrackManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveClientLibraryFileRequest {
+    pub action: String,
+    pub target_track_id: Option<i64>,
+    pub metadata: Option<ClientTrackManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveClientLibraryFileResult {
+    pub file_id: i64,
+    pub action: String,
+    pub track_id: Option<i64>,
+    pub media_variant_id: Option<i64>,
+    pub scan_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

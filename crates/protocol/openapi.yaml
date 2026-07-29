@@ -33,6 +33,18 @@ paths:
       responses:
         "200":
           description: Accepted and missing file counts.
+  /client-library/pending:
+    get:
+      summary: List local audio files whose embedded tags still require attention.
+      responses:
+        "200":
+          description: Persistent pending-file inventory across all Clients.
+  /client-library/files/{file_id}/resolve:
+    post:
+      summary: Match, manually describe, ignore, or reset a pending local audio file.
+      responses:
+        "200":
+          description: Updated file resolution and optional track/media binding.
   /client-library/devices/{device_id}/roots/{root_external_id}:
     delete:
       summary: Disable a device-owned root and mark all of its media replicas missing.

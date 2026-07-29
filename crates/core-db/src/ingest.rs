@@ -256,8 +256,7 @@ pub(crate) async fn ensure_track_media_graph(
         .subtitle
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Library source");
+        .filter(|value| !value.is_empty());
 
     if let Some(existing) = existing {
         let release_track_id: i64 = existing.try_get("release_track_id")?;
@@ -613,7 +612,7 @@ pub(crate) fn inferred_recording_kind(subtitle: Option<&str>) -> &'static str {
     } else if subtitle.contains("demo") {
         "demo"
     } else {
-        "studio"
+        "unknown"
     }
 }
 

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
 
+import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:crypto/crypto.dart';
@@ -242,6 +243,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   List<dynamic> _libraryRoots = const [];
   List<_ClientLibraryRoot> _clientLibraryRoots = const [];
   List<dynamic> _clientLibraryStatuses = const [];
+  List<dynamic> _clientLibraryPendingFiles = const [];
   List<dynamic> _distributionJobs = const [];
   Map<String, dynamic>? _transcodingStatus;
   final Set<String> _clientLibrarySyncingRootIds = <String>{};

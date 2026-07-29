@@ -13,6 +13,8 @@ class _SettingsPage extends StatelessWidget {
     required this.libraryRoots,
     required this.clientLibraryRoots,
     required this.clientLibraryStatuses,
+    required this.clientLibraryPendingFiles,
+    required this.tracks,
     required this.clientLibrarySyncingRootIds,
     required this.distributionJobs,
     required this.transcodingStatus,
@@ -33,6 +35,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onSyncClientLibraryRoot,
     required this.onSyncAllClientLibraryRoots,
     required this.onRemoveClientLibraryRoot,
+    required this.onResolveClientLibraryFile,
     required this.onRefreshDistributions,
     required this.onCancelDistribution,
     required this.onSaveServerAlias,
@@ -57,6 +60,8 @@ class _SettingsPage extends StatelessWidget {
   final List<dynamic> libraryRoots;
   final List<_ClientLibraryRoot> clientLibraryRoots;
   final List<dynamic> clientLibraryStatuses;
+  final List<dynamic> clientLibraryPendingFiles;
+  final List<dynamic> tracks;
   final Set<String> clientLibrarySyncingRootIds;
   final List<dynamic> distributionJobs;
   final Map<String, dynamic>? transcodingStatus;
@@ -77,6 +82,8 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<String> onSyncClientLibraryRoot;
   final VoidCallback onSyncAllClientLibraryRoots;
   final ValueChanged<String> onRemoveClientLibraryRoot;
+  final Future<void> Function(int, Map<String, dynamic>)
+  onResolveClientLibraryFile;
   final VoidCallback onRefreshDistributions;
   final ValueChanged<String> onCancelDistribution;
   final VoidCallback onSaveServerAlias;
@@ -215,6 +222,12 @@ class _SettingsPage extends StatelessWidget {
             onSyncFolder: onSyncClientLibraryRoot,
             onSyncAll: onSyncAllClientLibraryRoots,
             onRemoveFolder: onRemoveClientLibraryRoot,
+          ),
+          const SizedBox(height: 14),
+          _ClientLibraryPendingFilesPanel(
+            files: clientLibraryPendingFiles,
+            tracks: tracks,
+            onResolve: onResolveClientLibraryFile,
           ),
           const SizedBox(height: 14),
           _TranscodingPanel(status: transcodingStatus),

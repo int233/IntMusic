@@ -613,7 +613,6 @@ class _TrackMediaOverview extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
     final media = this.media ?? const <String, dynamic>{};
-    final work = _asMap(media['work']);
     final recording = _asMap(media['recording']);
     final release = media['release'] == null
         ? <String, dynamic>{}
@@ -684,27 +683,26 @@ class _TrackMediaOverview extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (work.isNotEmpty ||
-              recording.isNotEmpty ||
+          if (_recordingKindLabel(
+                    context,
+                    recording['recording_kind']?.toString(),
+                  ) !=
+                  null ||
               release.isNotEmpty) ...[
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
-                if ((work['title']?.toString() ?? '').isNotEmpty)
-                  _MediaIdentityChip(
-                    icon: Icons.music_note,
-                    label: work['title'].toString(),
-                  ),
-                if (recording.isNotEmpty)
+                if (_recordingKindLabel(
+                      context,
+                      recording['recording_kind']?.toString(),
+                    )
+                    case final recordingKind?)
                   _MediaIdentityChip(
                     icon: recording['recording_kind'] == 'live'
                         ? Icons.mic_external_on_outlined
                         : Icons.graphic_eq,
-                    label: _recordingKindLabel(
-                      context,
-                      recording['recording_kind']?.toString(),
-                    ),
+                    label: recordingKind,
                   ),
                 if ((release['title']?.toString() ?? '').isNotEmpty)
                   _MediaIdentityChip(
