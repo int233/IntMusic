@@ -176,7 +176,14 @@ Map<String, dynamic> _clientFileManifestSync(String rootPath, File file) {
   final dot = filename.lastIndexOf('.');
   final extension = dot >= 0 ? filename.substring(dot + 1).toLowerCase() : '';
   final quickHash = _quickClientFileHashSync(file, stat.size);
-  var metadata = const <String, dynamic>{};
+  var metadata = const <String, dynamic>{
+    'title': '',
+    'track_artists': <String>[],
+    'album_artists': <String>[],
+    'composers': <String>[],
+    'lyricists': <String>[],
+    'genres': <String>[],
+  };
   var metadataStatus = 'needs_attention';
   String? metadataMessage;
   int? sampleRate;

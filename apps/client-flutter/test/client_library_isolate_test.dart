@@ -21,5 +21,9 @@ void main() {
     expect(manifests.single['external_id'], 'sample.mp3');
     expect(manifests.single['size_bytes'], 4);
     expect(manifests.single['metadata_status'], 'tag_parse_error');
+    final metadata = (manifests.single['metadata'] as Map)
+        .cast<String, dynamic>();
+    expect(metadata['title'], '');
+    expect(metadata['track_artists'], isEmpty);
   });
 }

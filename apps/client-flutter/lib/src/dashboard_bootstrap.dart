@@ -330,13 +330,33 @@ extension _DashboardBootstrap on _CoreDashboardState {
   }
 
   Future<void> _exportDiagnosticLog() async {
+    File? temporaryExport;
     try {
       final timestamp = DateTime.now().toUtc().toIso8601String().replaceAll(
         RegExp(r'[:.]'),
         '-',
       );
+      final suggestedName = 'intmusic-client-$timestamp.jsonl';
+      if (Platform.isAndroid) {
+        final temporaryDirectory = await getTemporaryDirectory();
+        temporaryExport = File(
+          '${temporaryDirectory.path}${Platform.pathSeparator}$suggestedName',
+        );
+        await ClientLog.exportTo(temporaryExport.path);
+        final saved = await _IntMusicPlatform.instance.saveFile(
+          sourcePath: temporaryExport.path,
+          suggestedName: suggestedName,
+          mimeType: 'application/x-ndjson',
+        );
+        if (!saved) return;
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_tr(context, 'Diagnostic log exported'))),
+        );
+        return;
+      }
       final location = await getSaveLocation(
-        suggestedName: 'intmusic-client-$timestamp.jsonl',
+        suggestedName: suggestedName,
         acceptedTypeGroups: const <XTypeGroup>[
           XTypeGroup(label: 'JSON Lines log', extensions: <String>['jsonl']),
         ],
@@ -357,6 +377,17 @@ extension _DashboardBootstrap on _CoreDashboardState {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('${_tr(context, 'Export failed')}: $error')),
       );
+    } finally {
+      if (temporaryExport != null) {
+        try {
+          if (await temporaryExport.exists()) {
+            await temporaryExport.delete();
+          }
+        } catch (_) {
+          // Temporary export cleanup must not turn a successful save into an
+          // error shown to the user.
+        }
+      }
     }
   }
 

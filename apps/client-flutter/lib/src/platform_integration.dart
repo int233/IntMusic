@@ -265,6 +265,22 @@ class _IntMusicPlatform {
     }
   }
 
+  Future<bool> saveFile({
+    required String sourcePath,
+    required String suggestedName,
+    required String mimeType,
+  }) async {
+    final saved = await _channel.invokeMethod<bool>(
+      'saveFile',
+      <String, dynamic>{
+        'sourcePath': sourcePath,
+        'suggestedName': suggestedName,
+        'mimeType': mimeType,
+      },
+    );
+    return saved == true;
+  }
+
   Future<void> moveToBackground() async {
     try {
       await _channel.invokeMethod<void>('moveToBackground');

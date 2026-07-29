@@ -54,6 +54,7 @@ pub struct ClientLibraryRootManifest {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClientTrackManifest {
+    #[serde(default)]
     pub title: String,
     pub sort_title: Option<String>,
     pub subtitle: Option<String>,
@@ -102,6 +103,7 @@ pub struct ClientLibraryFileManifest {
     pub metadata_status: String,
     pub metadata_message: Option<String>,
     pub metadata_source: Option<String>,
+    #[serde(default)]
     pub metadata: ClientTrackManifest,
 }
 
