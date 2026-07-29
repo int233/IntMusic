@@ -84,6 +84,74 @@ pub async fn manage_library_file(
     })
 }
 
+pub async fn manage_library_files(
+    pool: &DbPool,
+    file_ids: &[i64],
+    action: &str,
+) -> Result<LibraryBatchActionResult> {
+    let mut file_ids = file_ids
+        .iter()
+        .copied()
+        .filter(|file_id| *file_id > 0)
+        .collect::<Vec<_>>();
+    file_ids.sort_unstable();
+    file_ids.dedup();
+    if file_ids.is_empty() {
+        bail!("select at least one library file");
+    }
+    if file_ids.len() > 500 {
+        bail!("a library batch action cannot exceed 500 files");
+    }
+    let action = action.trim();
+    if !matches!(
+        action,
+        "ignore" | "request_rescan" | "reset" | "restore" | "remove"
+    ) {
+        bail!("unsupported library file action");
+    }
+    let mut updated = 0_u32;
+    for file_id in &file_ids {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                file.scan_status,
+                file.deleted_at,
+                EXISTS(
+                    SELECT 1 FROM client_file_resolutions resolution
+                    WHERE resolution.file_id = file.id
+                ) AS has_resolution
+            FROM files file
+            WHERE file.id = ?1
+            "#,
+        )
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await?
+        .context("library file was not found")?;
+        let scan_status: String = row.try_get("scan_status")?;
+        let deleted_at: Option<String> = row.try_get("deleted_at")?;
+        let has_resolution = row.try_get::<i64, _>("has_resolution")? != 0;
+        let eligible = match action {
+            "ignore" => deleted_at.is_none() && scan_status != "ignored",
+            "request_rescan" => deleted_at.is_none(),
+            "reset" => scan_status == "ignored" || has_resolution,
+            "restore" => deleted_at.is_some(),
+            "remove" => deleted_at.is_none(),
+            _ => false,
+        };
+        if eligible {
+            manage_library_file(pool, *file_id, action).await?;
+            updated = updated.saturating_add(1);
+        }
+    }
+    Ok(LibraryBatchActionResult {
+        target_kind: "files".to_string(),
+        action: action.to_string(),
+        requested: u32::try_from(file_ids.len()).unwrap_or(u32::MAX),
+        updated,
+    })
+}
+
 pub async fn manage_library_device(
     pool: &DbPool,
     device_id: &str,
@@ -123,10 +191,12 @@ pub async fn manage_library_device(
             "retired"
         }
         "restore" => {
-            let result = sqlx::query("UPDATE devices SET retired_at = NULL WHERE id = ?1")
-                .bind(device_id)
-                .execute(pool)
-                .await?;
+            let result = sqlx::query(
+                "UPDATE devices SET retired_at = NULL, removed_at = NULL WHERE id = ?1",
+            )
+            .bind(device_id)
+            .execute(pool)
+            .await?;
             if result.rows_affected() == 0 {
                 bail!("library device was not found");
             }
@@ -145,6 +215,64 @@ pub async fn manage_library_device(
             .execute(pool)
             .await?;
             "offline"
+        }
+        "remove" => {
+            let result = sqlx::query(
+                "UPDATE devices SET retired_at = COALESCE(retired_at, ?1), removed_at = COALESCE(removed_at, ?1) WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            if result.rows_affected() == 0 {
+                bail!("library device was not found");
+            }
+            sqlx::query(
+                "UPDATE library_roots SET enabled = 0, retired_at = COALESCE(retired_at, ?1), updated_at = ?1 WHERE owner_device_id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE files
+                SET deleted_at = COALESCE(deleted_at, ?1),
+                    availability_state = 'missing',
+                    updated_at = ?1
+                WHERE library_root_id IN (
+                    SELECT id FROM library_roots WHERE owner_device_id = ?2
+                )
+                "#,
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'retired', updated_at = ?1 WHERE device_id = ?2",
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE library_file_issues
+                SET state = 'resolved', resolved_at = ?1, updated_at = ?1
+                WHERE state = 'open' AND file_id IN (
+                    SELECT file.id
+                    FROM files file
+                    JOIN library_roots root ON root.id = file.library_root_id
+                    WHERE root.owner_device_id = ?2
+                )
+                "#,
+            )
+            .bind(&now)
+            .bind(device_id)
+            .execute(pool)
+            .await?;
+            "removed"
         }
         _ => bail!("unsupported library device action"),
     };

@@ -489,10 +489,10 @@ extension _DashboardBootstrap on _CoreDashboardState {
       return;
     }
     final status = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.getJson('/status')),
+      () async => _asMap(await _api.getCriticalJson('/status')),
     );
     final zones = await _run<List<dynamic>>(
-      () async => await _api.getJson('/zones') as List<dynamic>,
+      () async => await _api.getCriticalJson('/zones') as List<dynamic>,
     );
     if (!mounted) {
       return;

@@ -232,7 +232,7 @@ extension _DashboardSync on _CoreDashboardState {
   }
 
   Future<void> _refreshFromCurrentCore() async {
-    final status = _asMap(await _api.getJson('/status'));
+    final status = _asMap(await _api.getCriticalJson('/status'));
     if (!_isIntMusicCoreStatus(status)) {
       throw StateError('Not an IntMusic core: ${_coreUrlController.text}');
     }
@@ -243,6 +243,9 @@ extension _DashboardSync on _CoreDashboardState {
     );
     _rendererRegisteredCoreUrl = coreUrl;
     await _connectEventStream();
+    // Once the Core has accepted registration, keep liveness independent from
+    // the larger metadata/cache refresh that follows.
+    _startRendererHeartbeat();
     final serverId = status['server_id']?.toString() ?? '';
     final syncSnapshot = await _fetchSyncSnapshot(
       status,
@@ -250,7 +253,7 @@ extension _DashboardSync on _CoreDashboardState {
     );
     final results = await Future.wait<dynamic>([
       _api.getJson('/outputs'),
-      _api.getJson('/zones'),
+      _api.getCriticalJson('/zones'),
       _api.getJson('/diagnostics'),
       _api.getJson('/settings/server'),
       _api.getJson('/playback/stats?top_limit=20'),

@@ -185,7 +185,9 @@ pub async fn upsert_client_library_manifest(
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             platform = COALESCE(excluded.platform, devices.platform),
-            last_seen_at = excluded.last_seen_at
+            last_seen_at = excluded.last_seen_at,
+            retired_at = NULL,
+            removed_at = NULL
         "#,
     )
     .bind(device_id)
@@ -213,6 +215,7 @@ pub async fn upsert_client_library_manifest(
             display_name = excluded.display_name,
             path_hint = excluded.path_hint,
             last_seen_at = excluded.last_seen_at,
+            retired_at = NULL,
             updated_at = excluded.updated_at
         "#,
     )

@@ -20,18 +20,10 @@ class CoreApiClient {
   }
 
   CoreApiClient._(this.baseUrl, this.timeout) {
-    _client = HttpClient()
-      ..connectionTimeout = timeout
-      ..idleTimeout = const Duration(seconds: 75)
-      ..maxConnectionsPerHost = 8
-      ..autoUncompress = true;
-    // Keep time-sensitive playback commands away from slow metadata,
-    // artwork, heartbeat, and synchronization requests.
-    _controlClient = HttpClient()
-      ..connectionTimeout = const Duration(seconds: 4)
-      ..idleTimeout = const Duration(seconds: 30)
-      ..maxConnectionsPerHost = 4
-      ..autoUncompress = true;
+    _backgroundClient = _createClient(_CoreApiChannel.background);
+    _controlClient = _createClient(_CoreApiChannel.control);
+    _criticalClient = _createClient(_CoreApiChannel.critical);
+    _bulkClient = _createClient(_CoreApiChannel.bulk);
   }
 
   static final Map<String, CoreApiClient> _instances =
@@ -39,8 +31,10 @@ class CoreApiClient {
 
   final String baseUrl;
   final Duration timeout;
-  late final HttpClient _client;
-  late final HttpClient _controlClient;
+  late HttpClient _backgroundClient;
+  late HttpClient _controlClient;
+  late HttpClient _criticalClient;
+  late HttpClient _bulkClient;
   bool _closed = false;
 
   static String normalizeBaseUrl(String value) =>
@@ -103,18 +97,67 @@ class CoreApiClient {
   void close() {
     if (_closed) return;
     _closed = true;
-    _client.close(force: true);
+    _backgroundClient.close(force: true);
     _controlClient.close(force: true);
+    _criticalClient.close(force: true);
+    _bulkClient.close(force: true);
   }
 
   Future<dynamic> getJson(String path, {Duration? requestTimeout}) =>
       _request('GET', path, requestTimeout: requestTimeout);
+
+  /// Reads latency-sensitive state without sharing sockets with metadata and
+  /// inventory work. Renderer heartbeats and connection health use this path.
+  Future<dynamic> getCriticalJson(
+    String path, {
+    Duration requestTimeout = const Duration(seconds: 5),
+  }) => _request(
+    'GET',
+    path,
+    requestTimeout: requestTimeout,
+    channel: _CoreApiChannel.critical,
+  );
+
+  /// Runs large, cancelable inventory reads on their own small connection pool.
+  Future<dynamic> getBulkJson(
+    String path, {
+    Duration requestTimeout = const Duration(seconds: 30),
+  }) => _request(
+    'GET',
+    path,
+    requestTimeout: requestTimeout,
+    channel: _CoreApiChannel.bulk,
+  );
 
   Future<dynamic> postJson(
     String path,
     Map<String, dynamic> body, {
     Duration? requestTimeout,
   }) => _request('POST', path, body: body, requestTimeout: requestTimeout);
+
+  Future<dynamic> postCriticalJson(
+    String path,
+    Map<String, dynamic> body, {
+    Duration requestTimeout = const Duration(seconds: 5),
+  }) => _request(
+    'POST',
+    path,
+    body: body,
+    requestTimeout: requestTimeout,
+    channel: _CoreApiChannel.critical,
+  );
+
+  Future<dynamic> postBulkJson(
+    String path,
+    Map<String, dynamic> body, {
+    Duration requestTimeout = const Duration(seconds: 30),
+  }) => _request(
+    'POST',
+    path,
+    body: body,
+    requestTimeout: requestTimeout,
+    channel: _CoreApiChannel.bulk,
+  );
 
   Future<dynamic> postControlJson(
     String path,
@@ -125,11 +168,23 @@ class CoreApiClient {
     path,
     body: body,
     requestTimeout: requestTimeout,
-    control: true,
+    channel: _CoreApiChannel.control,
   );
 
   Future<dynamic> deleteJson(String path, {Duration? requestTimeout}) =>
       _request('DELETE', path, requestTimeout: requestTimeout);
+
+  /// Cancels obsolete inventory reads before a newer filter/page request.
+  ///
+  /// `Future.timeout` alone does not cancel a queued `HttpClient` operation.
+  /// Recycling this isolated channel guarantees that stale work cannot retain
+  /// sockets or starve renderer health traffic.
+  void cancelBulkRequests() {
+    if (_closed) return;
+    final previous = _bulkClient;
+    _bulkClient = _createClient(_CoreApiChannel.bulk);
+    previous.close(force: true);
+  }
 
   Future<dynamic> uploadFile(
     String path,
@@ -190,9 +245,9 @@ class CoreApiClient {
     String path, {
     Map<String, dynamic>? body,
     Duration? requestTimeout,
-    bool control = false,
+    _CoreApiChannel channel = _CoreApiChannel.background,
   }) async {
-    final attempts = method == 'GET' ? 2 : 1;
+    final attempts = method == 'GET' && channel != _CoreApiChannel.bulk ? 2 : 1;
     Object? lastError;
     for (var attempt = 0; attempt < attempts; attempt += 1) {
       try {
@@ -201,7 +256,7 @@ class CoreApiClient {
           path,
           body: body,
           requestTimeout: requestTimeout,
-          control: control,
+          channel: channel,
         );
       } on SocketException catch (error) {
         lastError = error;
@@ -222,7 +277,7 @@ class CoreApiClient {
     String path, {
     Map<String, dynamic>? body,
     Duration? requestTimeout,
-    bool control = false,
+    _CoreApiChannel channel = _CoreApiChannel.background,
   }) async {
     if (_closed) {
       throw StateError('CoreApiClient for $baseUrl has been closed.');
@@ -230,6 +285,7 @@ class CoreApiClient {
     final effectiveTimeout = requestTimeout ?? timeout;
     final uri = Uri.parse(apiUrl(path));
     final stopwatch = Stopwatch()..start();
+    final client = _clientFor(channel);
     Duration remainingTimeout() {
       final remaining = effectiveTimeout - stopwatch.elapsed;
       if (remaining <= Duration.zero) {
@@ -248,23 +304,14 @@ class CoreApiClient {
         'method': method,
         'path': uri.path,
         'timeout_ms': effectiveTimeout.inMilliseconds,
-        'channel': control ? 'playback_control' : 'background',
+        'channel': channel.logName,
       },
     );
     try {
       final request = switch (method) {
-        'POST' =>
-          await (control ? _controlClient : _client)
-              .postUrl(uri)
-              .timeout(remainingTimeout()),
-        'DELETE' =>
-          await (control ? _controlClient : _client)
-              .deleteUrl(uri)
-              .timeout(remainingTimeout()),
-        _ =>
-          await (control ? _controlClient : _client)
-              .getUrl(uri)
-              .timeout(remainingTimeout()),
+        'POST' => await client.postUrl(uri).timeout(remainingTimeout()),
+        'DELETE' => await client.deleteUrl(uri).timeout(remainingTimeout()),
+        _ => await client.getUrl(uri).timeout(remainingTimeout()),
       };
       request.headers.contentType = ContentType.json;
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
@@ -285,7 +332,7 @@ class CoreApiClient {
           'status': response.statusCode,
           'elapsed_ms': stopwatch.elapsedMilliseconds,
           'response_characters': text.length,
-          'channel': control ? 'playback_control' : 'background',
+          'channel': channel.logName,
         },
       );
       if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -298,6 +345,9 @@ class CoreApiClient {
           ? Isolate.run<dynamic>(() => jsonDecode(text))
           : jsonDecode(text);
     } catch (error, stackTrace) {
+      if (error is TimeoutException) {
+        _recycleTimedOutClient(channel, client);
+      }
       ClientLog.error(
         'core.http.error',
         error,
@@ -306,10 +356,79 @@ class CoreApiClient {
           'method': method,
           'path': uri.path,
           'elapsed_ms': stopwatch.elapsedMilliseconds,
-          'channel': control ? 'playback_control' : 'background',
+          'channel': channel.logName,
         },
       );
       rethrow;
     }
   }
+
+  HttpClient _createClient(_CoreApiChannel channel) {
+    final client = HttpClient()..autoUncompress = true;
+    switch (channel) {
+      case _CoreApiChannel.background:
+        client
+          ..connectionTimeout = timeout
+          ..idleTimeout = const Duration(seconds: 75)
+          ..maxConnectionsPerHost = 8;
+      case _CoreApiChannel.control:
+        client
+          ..connectionTimeout = const Duration(seconds: 4)
+          ..idleTimeout = const Duration(seconds: 30)
+          ..maxConnectionsPerHost = 4;
+      case _CoreApiChannel.critical:
+        client
+          ..connectionTimeout = const Duration(seconds: 4)
+          ..idleTimeout = const Duration(seconds: 30)
+          ..maxConnectionsPerHost = 3;
+      case _CoreApiChannel.bulk:
+        client
+          ..connectionTimeout = const Duration(seconds: 8)
+          ..idleTimeout = const Duration(seconds: 20)
+          ..maxConnectionsPerHost = 2;
+    }
+    return client;
+  }
+
+  HttpClient _clientFor(_CoreApiChannel channel) => switch (channel) {
+    _CoreApiChannel.background => _backgroundClient,
+    _CoreApiChannel.control => _controlClient,
+    _CoreApiChannel.critical => _criticalClient,
+    _CoreApiChannel.bulk => _bulkClient,
+  };
+
+  void _recycleTimedOutClient(
+    _CoreApiChannel channel,
+    HttpClient timedOutClient,
+  ) {
+    if (_closed || !identical(_clientFor(channel), timedOutClient)) return;
+    final replacement = _createClient(channel);
+    switch (channel) {
+      case _CoreApiChannel.background:
+        _backgroundClient = replacement;
+      case _CoreApiChannel.control:
+        _controlClient = replacement;
+      case _CoreApiChannel.critical:
+        _criticalClient = replacement;
+      case _CoreApiChannel.bulk:
+        _bulkClient = replacement;
+    }
+    timedOutClient.close(force: true);
+    ClientLog.event(
+      'core.http.channel_recycled',
+      level: 'warning',
+      data: <String, Object?>{'channel': channel.logName},
+    );
+  }
+}
+
+enum _CoreApiChannel {
+  background('background'),
+  control('playback_control'),
+  critical('connection_health'),
+  bulk('library_inventory');
+
+  const _CoreApiChannel(this.logName);
+
+  final String logName;
 }

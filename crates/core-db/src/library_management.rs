@@ -16,7 +16,23 @@ pub struct LibraryFileQuery {
 }
 
 const INVENTORY_CTE: &str = r#"
-WITH inventory AS (
+WITH open_issues AS (
+    SELECT file_id, GROUP_CONCAT(issue_kind, ',') AS issue_kinds
+    FROM library_file_issues
+    WHERE state = 'open'
+    GROUP BY file_id
+),
+linked_catalog AS (
+    SELECT linked_replica.file_id, MIN(link.track_id) AS track_id
+    FROM media_replicas linked_replica
+    JOIN release_track_media_variants relation
+      ON relation.media_variant_id = linked_replica.media_variant_id
+    JOIN legacy_track_catalog_links link
+      ON link.release_track_id = relation.release_track_id
+    WHERE linked_replica.file_id IS NOT NULL
+    GROUP BY linked_replica.file_id
+),
+inventory AS (
     SELECT
         file.id AS file_id,
         file.library_root_id AS root_id,
@@ -50,29 +66,16 @@ WITH inventory AS (
         replica.media_variant_id,
         replica.last_verified_at,
         resolution.resolution_kind,
-        COALESCE(
-            direct_track.id,
-            (
-                SELECT MIN(link.track_id)
-                FROM media_replicas linked_replica
-                JOIN release_track_media_variants relation
-                  ON relation.media_variant_id = linked_replica.media_variant_id
-                JOIN legacy_track_catalog_links link
-                  ON link.release_track_id = relation.release_track_id
-                WHERE linked_replica.file_id = file.id
-            )
-        ) AS catalog_track_id,
-        (
-            SELECT GROUP_CONCAT(issue.issue_kind, ',')
-            FROM library_file_issues issue
-            WHERE issue.file_id = file.id AND issue.state = 'open'
-        ) AS issue_kinds
+        COALESCE(direct_track.id, linked_catalog.track_id) AS catalog_track_id,
+        open_issues.issue_kinds
     FROM files file
     JOIN library_roots root ON root.id = file.library_root_id
     LEFT JOIN devices device ON device.id = root.owner_device_id
     LEFT JOIN tracks direct_track ON direct_track.file_id = file.id
     LEFT JOIN media_replicas replica ON replica.file_id = file.id
     LEFT JOIN client_file_resolutions resolution ON resolution.file_id = file.id
+    LEFT JOIN linked_catalog ON linked_catalog.file_id = file.id
+    LEFT JOIN open_issues ON open_issues.file_id = file.id
 )
 "#;
 
@@ -171,16 +174,25 @@ pub async fn library_management_summary(pool: &DbPool) -> Result<LibraryManageme
     )
     .fetch_one(pool)
     .await?;
-    let device_count: i64 = sqlx::query_scalar("SELECT COUNT(*) + 1 FROM devices")
-        .fetch_one(pool)
-        .await?;
-    let source_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM library_roots")
-        .fetch_one(pool)
-        .await?;
-    let retired_device_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM devices WHERE retired_at IS NOT NULL")
+    let device_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) + 1 FROM devices WHERE removed_at IS NULL")
             .fetch_one(pool)
             .await?;
+    let source_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM library_roots root
+        LEFT JOIN devices device ON device.id = root.owner_device_id
+        WHERE root.owner_device_id IS NULL OR device.removed_at IS NULL
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let retired_device_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM devices WHERE retired_at IS NOT NULL AND removed_at IS NULL",
+    )
+    .fetch_one(pool)
+    .await?;
     Ok(LibraryManagementSummary {
         total_files: row.try_get("total_files")?,
         active_files: row.try_get("active_files")?,
@@ -302,10 +314,10 @@ fn library_file_from_row(row: sqlx::sqlite::SqliteRow) -> Result<LibraryFileSumm
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
             .map(|value| value.with_timezone(&Utc) >= Utc::now() - chrono::Duration::minutes(5))
             .unwrap_or(false);
-    let presence_state = if root_retired_at.is_some() || device_retired_at.is_some() {
-        "retired"
-    } else if deleted_at.is_some() {
+    let presence_state = if deleted_at.is_some() {
         "removed"
+    } else if root_retired_at.is_some() || device_retired_at.is_some() {
+        "retired"
     } else if availability_state != "ready" || !root_enabled {
         "missing"
     } else if !device_online {
@@ -456,7 +468,7 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
         },
     );
     let device_rows = sqlx::query(
-        "SELECT id, name, platform, last_seen_at, retired_at FROM devices ORDER BY name COLLATE NOCASE",
+        "SELECT id, name, platform, last_seen_at, retired_at FROM devices WHERE removed_at IS NULL ORDER BY name COLLATE NOCASE",
     )
     .fetch_all(pool)
     .await?;
@@ -509,6 +521,8 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
                 AS total_bytes
         FROM library_roots root
         LEFT JOIN files file ON file.library_root_id = root.id
+        LEFT JOIN devices owner ON owner.id = root.owner_device_id
+        WHERE root.owner_device_id IS NULL OR owner.removed_at IS NULL
         GROUP BY root.id
         ORDER BY display_name COLLATE NOCASE
         "#,

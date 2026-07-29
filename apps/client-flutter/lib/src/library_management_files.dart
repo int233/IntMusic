@@ -22,6 +22,11 @@ class _LibraryFilesView extends StatelessWidget {
     required this.onOpen,
     required this.onResolve,
     required this.onAction,
+    required this.selectedFileIds,
+    required this.onSelectionChanged,
+    required this.onSelectPage,
+    required this.onClearSelection,
+    required this.onBatchAction,
   });
 
   final List<dynamic> files;
@@ -43,6 +48,11 @@ class _LibraryFilesView extends StatelessWidget {
   final Future<void> Function(Map<String, dynamic>) onOpen;
   final Future<void> Function(Map<String, dynamic>) onResolve;
   final Future<void> Function(int, String) onAction;
+  final Set<int> selectedFileIds;
+  final void Function(int, bool) onSelectionChanged;
+  final void Function(Set<int>, bool) onSelectPage;
+  final VoidCallback onClearSelection;
+  final Future<void> Function(Set<int>, String) onBatchAction;
 
   @override
   Widget build(BuildContext context) {
@@ -52,6 +62,14 @@ class _LibraryFilesView extends StatelessWidget {
         .toList(growable: false);
     final pageEnd = min(offset + maps.length, total);
     final range = total == 0 ? '0' : '${offset + 1}–$pageEnd / $total';
+    final pageFileIds = maps
+        .map((file) => _intValue(file['file_id']))
+        .whereType<int>()
+        .toSet();
+    final selectedOnPage = pageFileIds.intersection(selectedFileIds).length;
+    final allPageSelected =
+        pageFileIds.isNotEmpty && selectedOnPage == pageFileIds.length;
+    final somePageSelected = selectedOnPage > 0 && !allPageSelected;
     return Column(
       children: [
         Padding(
@@ -156,9 +174,23 @@ class _LibraryFilesView extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
           child: Row(
             children: [
+              Checkbox(
+                value: allPageSelected
+                    ? true
+                    : somePageSelected
+                    ? null
+                    : false,
+                tristate: true,
+                onChanged: loading || pageFileIds.isEmpty
+                    ? null
+                    : (value) =>
+                          onSelectPage(pageFileIds, value ?? !somePageSelected),
+              ),
               Expanded(
                 child: Text(
-                  attentionOnly
+                  selectedFileIds.isNotEmpty
+                      ? '${selectedFileIds.length} ${_tr(context, 'files selected')}${selectedFileIds.length > selectedOnPage ? ' · $selectedOnPage ${_tr(context, 'on this page')}' : ''}'
+                      : attentionOnly
                       ? '$total ${_tr(context, 'files need attention')}'
                       : '$total ${_tr(context, 'physical files')}',
                   maxLines: 1,
@@ -174,6 +206,69 @@ class _LibraryFilesView extends StatelessWidget {
                   dimension: 14,
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
+              ],
+              if (selectedFileIds.isNotEmpty) ...[
+                TextButton(
+                  onPressed: onClearSelection,
+                  child: Text(_tr(context, 'Clear selection')),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: _tr(context, 'Batch actions'),
+                  enabled: !loading,
+                  onSelected: (action) async {
+                    if (!await _confirmLibraryBatchAction(
+                      context,
+                      action,
+                      selectedFileIds.length,
+                    )) {
+                      return;
+                    }
+                    await onBatchAction(Set<int>.of(selectedFileIds), action);
+                  },
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'request_rescan',
+                      child: _LibraryMenuLabel(
+                        icon: Icons.refresh,
+                        label: _tr(context, 'Request metadata rescan'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'ignore',
+                      child: _LibraryMenuLabel(
+                        icon: Icons.visibility_off_outlined,
+                        label: _tr(context, 'Ignore selected files'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'reset',
+                      child: _LibraryMenuLabel(
+                        icon: Icons.settings_backup_restore,
+                        label: _tr(context, 'Reset selected files'),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'restore',
+                      child: _LibraryMenuLabel(
+                        icon: Icons.restore_from_trash_outlined,
+                        label: _tr(context, 'Restore selected files'),
+                      ),
+                    ),
+                    const PopupMenuDivider(),
+                    PopupMenuItem(
+                      value: 'remove',
+                      child: _LibraryMenuLabel(
+                        icon: Icons.delete_outline,
+                        label: _tr(context, 'Remove selected from inventory'),
+                      ),
+                    ),
+                  ],
+                  child: _LibraryFilterPill(
+                    label: _tr(context, 'Batch actions'),
+                    icon: Icons.library_add_check_outlined,
+                  ),
+                ),
+                const SizedBox(width: 10),
               ],
               Text(
                 range,
@@ -208,6 +303,15 @@ class _LibraryFilesView extends StatelessWidget {
                   separatorBuilder: (_, _) => const SizedBox(height: 8),
                   itemBuilder: (context, index) => _LibraryFileCard(
                     file: maps[index],
+                    selected: selectedFileIds.contains(
+                      _intValue(maps[index]['file_id']),
+                    ),
+                    onSelectionChanged: (selected) {
+                      final fileId = _intValue(maps[index]['file_id']);
+                      if (fileId != null) {
+                        onSelectionChanged(fileId, selected);
+                      }
+                    },
                     onOpen: () => onOpen(maps[index]),
                     onResolve: () => onResolve(maps[index]),
                     onAction: (action) async {
@@ -319,12 +423,16 @@ class _LibraryFilterPill extends StatelessWidget {
 class _LibraryFileCard extends StatelessWidget {
   const _LibraryFileCard({
     required this.file,
+    required this.selected,
+    required this.onSelectionChanged,
     required this.onOpen,
     required this.onResolve,
     required this.onAction,
   });
 
   final Map<String, dynamic> file;
+  final bool selected;
+  final ValueChanged<bool> onSelectionChanged;
   final VoidCallback onOpen;
   final VoidCallback onResolve;
   final ValueChanged<String> onAction;
@@ -351,7 +459,9 @@ class _LibraryFileCard extends StatelessWidget {
         metadata == 'parse_error';
     final tokens = IntMusicTheme.of(context);
     return Material(
-      color: tokens.surfaceRaised,
+      color: selected
+          ? tokens.accent.withValues(alpha: 0.08)
+          : tokens.surfaceRaised,
       borderRadius: BorderRadius.circular(16),
       child: InkWell(
         onTap: onOpen,
@@ -359,9 +469,12 @@ class _LibraryFileCard extends StatelessWidget {
         child: DecoratedBox(
           decoration: BoxDecoration(
             border: Border.all(
-              color: issues.isEmpty
+              color: selected
+                  ? tokens.accent
+                  : issues.isEmpty
                   ? tokens.stroke
                   : tokens.accent.withValues(alpha: 0.38),
+              width: selected ? 1.5 : 1,
             ),
             borderRadius: BorderRadius.circular(16),
           ),
@@ -369,6 +482,10 @@ class _LibraryFileCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
             child: Row(
               children: [
+                Checkbox(
+                  value: selected,
+                  onChanged: (value) => onSelectionChanged(value ?? false),
+                ),
                 _LibraryFileIcon(
                   extension: file['extension']?.toString() ?? '',
                   state: presence,
@@ -929,117 +1046,42 @@ Future<bool> _confirmLibraryFileAction(
       false;
 }
 
-String _libraryFilename(String path) {
-  final parts = path.replaceAll('\\', '/').split('/');
-  return parts.isEmpty ? path : parts.last;
-}
-
-String _libraryDeviceName(List<dynamic> devices, String id) {
-  for (final value in devices.whereType<Map>()) {
-    if (value['device_id']?.toString() == id) {
-      return value['display_name']?.toString() ?? id;
-    }
-  }
-  return id;
-}
-
-String _libraryStatusLabel(BuildContext context, String value) => _tr(
-  context,
-  const {
-        'all': 'All states',
-        'available': 'Available',
-        'offline': 'Offline',
-        'missing': 'Missing',
-        'unresolved': 'Unresolved',
-        'ignored': 'Ignored',
-        'retired': 'Retired',
-        'removed': 'Removed',
-      }[value] ??
-      value,
-);
-
-String _libraryStateLabel(BuildContext context, String value) => _tr(
-  context,
-  const {
-        'available': 'Available',
-        'offline': 'Offline',
-        'missing': 'Missing',
-        'retired': 'Retired',
-        'removed': 'Removed',
-        'online': 'Online',
-      }[value] ??
-      value,
-);
-
-String _libraryMetadataLabel(BuildContext context, String value) => _tr(
-  context,
-  const {
-        'verified': 'Tags verified',
-        'manual': 'Manual metadata',
-        'legacy_unverified': 'Legacy unverified',
-        'missing_required': 'Missing tags',
-        'parse_error': 'Tag error',
-        'awaiting_rescan': 'Awaiting rescan',
-        'ignored': 'Ignored',
-      }[value] ??
-      value,
-);
-
-String _libraryIssueLabel(BuildContext context, String value) => _tr(
-  context,
-  const {
-        'legacy_unverified': 'Legacy unverified metadata',
-        'missing_required_tags': 'Missing required tags',
-        'tag_parse_error': 'Tag parsing error',
-        'rescan_requested': 'Metadata rescan requested',
-      }[value] ??
-      value,
-);
-
-IconData _libraryPresenceIcon(String state) => switch (state) {
-  'available' => Icons.check_circle_outline,
-  'offline' => Icons.cloud_off_outlined,
-  'retired' => Icons.archive_outlined,
-  'removed' => Icons.delete_outline,
-  _ => Icons.warning_amber_outlined,
-};
-
-Color _libraryStateTone(BuildContext context, String state) => switch (state) {
-  'available' || 'online' => const Color(0xFF2BAA7B),
-  'offline' => const Color(0xFFE5A13A),
-  'retired' || 'removed' => IntMusicTheme.of(context).textSecondary,
-  _ => Theme.of(context).colorScheme.error,
-};
-
-String _librarySampleRate(Object? value) {
-  final rate = _intValue(value);
-  if (rate == null || rate <= 0) return '-';
-  return '${(rate / 1000).toStringAsFixed(rate % 1000 == 0 ? 0 : 1)} kHz';
-}
-
-String _libraryBitrate(Object? value) {
-  final bitrate = _intValue(value);
-  if (bitrate == null || bitrate <= 0) return '-';
-  return '${(bitrate / 1000).round()} kbps';
-}
-
-String _libraryDate(Object? value) {
-  final date = DateTime.tryParse(value?.toString() ?? '')?.toLocal();
-  if (date == null) return '-';
-  return '${date.year.toString().padLeft(4, '0')}-'
-      '${date.month.toString().padLeft(2, '0')}-'
-      '${date.day.toString().padLeft(2, '0')} '
-      '${date.hour.toString().padLeft(2, '0')}:'
-      '${date.minute.toString().padLeft(2, '0')}';
-}
-
-String _libraryListText(Object? value) {
-  if (value is List) {
-    final texts = value
-        .map((item) => item.toString().trim())
-        .where((item) => item.isNotEmpty)
-        .toList(growable: false);
-    return texts.isEmpty ? '-' : texts.join('; ');
-  }
-  return value?.toString() ?? '-';
+Future<bool> _confirmLibraryBatchAction(
+  BuildContext context,
+  String action,
+  int count,
+) async {
+  if (action != 'remove' && action != 'ignore') return true;
+  final destructive = action == 'remove';
+  return await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(
+            _tr(
+              context,
+              destructive
+                  ? 'Remove selected files from inventory?'
+                  : 'Ignore selected files?',
+            ),
+          ),
+          content: Text(
+            destructive
+                ? '${_tr(context, 'This removes')} $count '
+                      '${_tr(context, 'catalog copy records. Physical files are not deleted.')}'
+                : '${_tr(context, 'Ignore')} $count '
+                      '${_tr(context, 'selected files? They remain on their devices.')}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text(_tr(context, 'Cancel')),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(_tr(context, destructive ? 'Remove' : 'Ignore')),
+            ),
+          ],
+        ),
+      ) ??
+      false;
 }

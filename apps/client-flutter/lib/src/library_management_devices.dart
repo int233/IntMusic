@@ -220,6 +220,16 @@ class _LibraryDeviceCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                    if (!isCore) ...[
+                      const PopupMenuDivider(),
+                      PopupMenuItem(
+                        value: 'remove',
+                        child: _LibraryMenuLabel(
+                          icon: Icons.delete_outline,
+                          label: _tr(context, 'Remove device and inventory'),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ],
@@ -505,16 +515,29 @@ Future<bool> _confirmLibraryLifecycleAction(
   required String targetKind,
 }) async {
   final restore = action == 'restore';
+  final remove = action == 'remove';
   final subject = targetKind == 'device' ? 'device' : 'source';
   return await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
           title: Text(
-            _tr(context, restore ? 'Restore $subject' : 'Retire $subject'),
+            _tr(
+              context,
+              restore
+                  ? 'Restore $subject'
+                  : remove
+                  ? 'Remove $subject'
+                  : 'Retire $subject',
+            ),
           ),
           content: Text(
             restore
                 ? '${_tr(context, 'Restore')} “$target”?'
+                : remove
+                ? _tr(
+                    context,
+                    'This removes the device, its sources, and all related copy records from active management. Physical music files on that device are not deleted. If the same Client reconnects later, it can register the files again.',
+                  )
                 : _tr(
                     context,
                     'The files remain in management history, but this source will no longer be considered active.',
@@ -527,7 +550,16 @@ Future<bool> _confirmLibraryLifecycleAction(
             ),
             FilledButton(
               onPressed: () => Navigator.of(context).pop(true),
-              child: Text(_tr(context, restore ? 'Restore' : 'Retire')),
+              child: Text(
+                _tr(
+                  context,
+                  restore
+                      ? 'Restore'
+                      : remove
+                      ? 'Remove'
+                      : 'Retire',
+                ),
+              ),
             ),
           ],
         ),

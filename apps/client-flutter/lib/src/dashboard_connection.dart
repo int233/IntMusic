@@ -5,7 +5,7 @@ extension _DashboardConnection on _CoreDashboardState {
     if (_zoneRefreshBusy) return;
     _zoneRefreshBusy = true;
     try {
-      final zones = await _api.getJson('/zones') as List<dynamic>;
+      final zones = await _api.getCriticalJson('/zones') as List<dynamic>;
       _zoneRefreshFailures = 0;
       if (!mounted) {
         return;

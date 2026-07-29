@@ -415,6 +415,7 @@ class _DeviceSheet extends StatefulWidget {
 class _DeviceSheetState extends State<_DeviceSheet> {
   late _DeviceSheetSnapshot _snapshot = widget.snapshot;
   Timer? _timer;
+  bool _refreshing = false;
 
   @override
   void initState() {
@@ -439,9 +440,15 @@ class _DeviceSheetState extends State<_DeviceSheet> {
   }
 
   Future<void> _refresh() async {
-    final snapshot = await widget.onRefresh();
-    if (mounted) {
-      setState(() => _snapshot = snapshot);
+    if (_refreshing) return;
+    _refreshing = true;
+    try {
+      final snapshot = await widget.onRefresh();
+      if (mounted) {
+        setState(() => _snapshot = snapshot);
+      }
+    } finally {
+      _refreshing = false;
     }
   }
 

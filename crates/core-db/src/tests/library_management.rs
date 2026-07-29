@@ -209,6 +209,127 @@ async fn offline_and_retired_devices_keep_their_sources_and_files_manageable() {
 }
 
 #[tokio::test]
+async fn batch_actions_and_device_removal_keep_physical_files_safe() {
+    let (pool, path) = test_pool().await;
+    let metadata = ClientTrackManifest {
+        title: "Portable copy".to_string(),
+        album: Some("Portable album".to_string()),
+        track_artists: vec!["Portable artist".to_string()],
+        album_artists: vec!["Portable artist".to_string()],
+        duration_ms: Some(240_000),
+        ..Default::default()
+    };
+    upsert_client_library_manifest(
+        &pool,
+        &client_manifest(
+            "removable-client",
+            "portable-root",
+            "copy-a.flac",
+            "ready",
+            metadata.clone(),
+        ),
+    )
+    .await
+    .expect("ingest first client file");
+    upsert_client_library_manifest(
+        &pool,
+        &client_manifest(
+            "removable-client",
+            "portable-root",
+            "copy-b.flac",
+            "ready",
+            metadata.clone(),
+        ),
+    )
+    .await
+    .expect("ingest second client file");
+
+    let files = list_library_files(
+        &pool,
+        &LibraryFileQuery {
+            device_id: Some("removable-client".to_string()),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("list removable files");
+    assert_eq!(files.total, 2);
+    let file_ids = files
+        .items
+        .iter()
+        .map(|file| file.file_id)
+        .collect::<Vec<_>>();
+    let batch = manage_library_files(&pool, &file_ids, "ignore")
+        .await
+        .expect("ignore selected files");
+    assert_eq!(batch.requested, 2);
+    assert_eq!(batch.updated, 2);
+    let ignored = list_library_files(
+        &pool,
+        &LibraryFileQuery {
+            device_id: Some("removable-client".to_string()),
+            status: Some("ignored".to_string()),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("list ignored files");
+    assert_eq!(ignored.total, 2);
+
+    manage_library_device(&pool, "removable-client", "remove")
+        .await
+        .expect("remove logical device");
+    let devices = list_library_devices(&pool)
+        .await
+        .expect("list devices after removal");
+    assert!(
+        devices
+            .iter()
+            .all(|device| device.device_id != "removable-client"),
+        "removed device should leave the active management view"
+    );
+    let removed = list_library_files(
+        &pool,
+        &LibraryFileQuery {
+            device_id: Some("removable-client".to_string()),
+            status: Some("removed".to_string()),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("removed copy records remain auditable");
+    assert_eq!(removed.total, 2);
+    assert!(removed
+        .items
+        .iter()
+        .all(|file| file.presence_state == "removed"));
+
+    upsert_client_library_manifest(
+        &pool,
+        &client_manifest(
+            "removable-client",
+            "portable-root",
+            "copy-a.flac",
+            "ready",
+            metadata,
+        ),
+    )
+    .await
+    .expect("same Client identity may safely register again");
+    let devices = list_library_devices(&pool)
+        .await
+        .expect("list restored device");
+    assert!(devices
+        .iter()
+        .any(|device| device.device_id == "removable-client"));
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
 async fn matching_a_legacy_catalogued_file_removes_its_placeholder_track() {
     let (pool, path) = test_pool().await;
     let target_track_id = ingest_test_track(

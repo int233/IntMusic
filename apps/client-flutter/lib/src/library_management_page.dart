@@ -35,6 +35,8 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
   bool _loading = true;
   String? _error;
   Timer? _searchDebounce;
+  final Set<int> _selectedFileIds = <int>{};
+  int _loadGeneration = 0;
 
   CoreApiClient get _api => CoreApiClient(widget.coreBaseUrl);
 
@@ -54,39 +56,57 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
 
   @override
   void dispose() {
+    _loadGeneration += 1;
+    _api.cancelBulkRequests();
     _searchDebounce?.cancel();
     _searchController.dispose();
     super.dispose();
   }
 
   Future<void> _refreshAll() async {
+    final generation = ++_loadGeneration;
+    _api.cancelBulkRequests();
     if (mounted) {
       setState(() {
         _loading = true;
         _error = null;
       });
     }
+    final overviewRefresh = _refreshOverview();
     try {
-      final values = await Future.wait<dynamic>([
-        _api.getJson('/library-management/summary'),
-        _api.getJson('/library-management/devices'),
-        _fetchFiles(),
-      ]);
-      if (!mounted) return;
-      final page = _asMap(values[2]);
+      final page = await _fetchFiles();
+      await overviewRefresh;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
-        _summary = _asMap(values[0]);
-        _devices = values[1] as List<dynamic>;
         _files = (page['items'] as List?) ?? const [];
         _fileTotal = _intValue(page['total']) ?? _files.length;
         _loading = false;
       });
     } catch (error) {
-      if (!mounted) return;
+      await overviewRefresh;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _loading = false;
         _error = error.toString();
       });
+    }
+  }
+
+  Future<void> _refreshOverview() async {
+    try {
+      final values = await Future.wait<dynamic>([
+        _api.getJson('/library-management/summary'),
+        _api.getJson('/library-management/devices'),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _summary = _asMap(values[0]);
+        _devices = values[1] as List<dynamic>;
+      });
+    } catch (error) {
+      if (mounted && _summary.isEmpty && _devices.isEmpty) {
+        setState(() => _error = error.toString());
+      }
     }
   }
 
@@ -113,10 +133,12 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
               '${Uri.encodeQueryComponent(entry.value)}',
         )
         .join('&');
-    return _asMap(await _api.getJson('/library-management/files?$query'));
+    return _asMap(await _api.getBulkJson('/library-management/files?$query'));
   }
 
   Future<void> _refreshFiles({bool resetOffset = false}) async {
+    final generation = ++_loadGeneration;
+    _api.cancelBulkRequests();
     if (mounted) {
       setState(() {
         if (resetOffset) _fileOffset = 0;
@@ -126,14 +148,14 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
     }
     try {
       final page = await _fetchFiles();
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _files = (page['items'] as List?) ?? const [];
         _fileTotal = _intValue(page['total']) ?? _files.length;
         _loading = false;
       });
     } catch (error) {
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
         _loading = false;
         _error = error.toString();
@@ -143,7 +165,10 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
 
   void _selectTab(_LibraryInventoryTab tab) {
     if (_tab == tab) return;
-    setState(() => _tab = tab);
+    setState(() {
+      _tab = tab;
+      _selectedFileIds.clear();
+    });
     if (tab == _LibraryInventoryTab.files ||
         tab == _LibraryInventoryTab.attention) {
       unawaited(_refreshFiles(resetOffset: true));
@@ -152,6 +177,9 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
 
   void _searchChanged(String value) {
     _searchDebounce?.cancel();
+    if (_selectedFileIds.isNotEmpty) {
+      setState(_selectedFileIds.clear);
+    }
     _searchDebounce = Timer(
       const Duration(milliseconds: 260),
       () => unawaited(_refreshFiles(resetOffset: true)),
@@ -160,10 +188,41 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
 
   Future<void> _fileAction(int fileId, String action) async {
     try {
-      await _api.postJson(
+      await _api.postBulkJson(
         '/library-management/files/$fileId/action',
         <String, dynamic>{'action': action},
       );
+      await _refreshAll();
+      await widget.onLibraryChanged();
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
+  Future<void> _batchFileAction(Set<int> fileIds, String action) async {
+    if (fileIds.isEmpty) return;
+    try {
+      final sortedIds = fileIds.toList()..sort();
+      var updated = 0;
+      for (var offset = 0; offset < sortedIds.length; offset += 500) {
+        final end = min(offset + 500, sortedIds.length);
+        final result = _asMap(
+          await _api.postBulkJson(
+            '/library-management/files/actions',
+            <String, dynamic>{
+              'action': action,
+              'file_ids': sortedIds.sublist(offset, end),
+            },
+          ),
+        );
+        updated += _intValue(result['updated']) ?? end - offset;
+      }
+      if (mounted) {
+        setState(_selectedFileIds.clear);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$updated ${_tr(context, 'files updated')}')),
+        );
+      }
       await _refreshAll();
       await widget.onLibraryChanged();
     } catch (error) {
@@ -187,7 +246,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
     var resolverFile = file;
     try {
       final detail = _asMap(
-        await _api.getJson('/library-management/files/$fileId'),
+        await _api.getBulkJson('/library-management/files/$fileId'),
       );
       resolverFile = <String, dynamic>{
         ...file,
@@ -215,7 +274,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
     if (fileId == null) return;
     try {
       final detail = _asMap(
-        await _api.getJson('/library-management/files/$fileId'),
+        await _api.getBulkJson('/library-management/files/$fileId'),
       );
       if (!mounted) return;
       await showDialog<void>(
@@ -235,7 +294,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
 
   Future<void> _deviceAction(String deviceId, String action) async {
     try {
-      await _api.postJson(
+      await _api.postBulkJson(
         '/library-management/devices/${Uri.encodeComponent(deviceId)}/action',
         <String, dynamic>{'action': action},
       );
@@ -248,7 +307,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
 
   Future<void> _sourceAction(int rootId, String action) async {
     try {
-      await _api.postJson(
+      await _api.postBulkJson(
         '/library-management/sources/$rootId/action',
         <String, dynamic>{'action': action},
       );
@@ -347,15 +406,24 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
                   searchController: _searchController,
                   onSearchChanged: _searchChanged,
                   onStatusChanged: (value) {
-                    setState(() => _fileStatus = value);
+                    setState(() {
+                      _fileStatus = value;
+                      _selectedFileIds.clear();
+                    });
                     unawaited(_refreshFiles(resetOffset: true));
                   },
                   onDeviceChanged: (value) {
-                    setState(() => _deviceFilter = value);
+                    setState(() {
+                      _deviceFilter = value;
+                      _selectedFileIds.clear();
+                    });
                     unawaited(_refreshFiles(resetOffset: true));
                   },
                   onExtensionChanged: (value) {
-                    setState(() => _extensionFilter = value);
+                    setState(() {
+                      _extensionFilter = value;
+                      _selectedFileIds.clear();
+                    });
                     unawaited(_refreshFiles(resetOffset: true));
                   },
                   onPageChanged: (offset) {
@@ -365,6 +433,27 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
                   onOpen: _openFileDetail,
                   onResolve: _openResolver,
                   onAction: _fileAction,
+                  selectedFileIds: _selectedFileIds,
+                  onSelectionChanged: (fileId, selected) {
+                    setState(() {
+                      if (selected) {
+                        _selectedFileIds.add(fileId);
+                      } else {
+                        _selectedFileIds.remove(fileId);
+                      }
+                    });
+                  },
+                  onSelectPage: (fileIds, selected) {
+                    setState(() {
+                      if (selected) {
+                        _selectedFileIds.addAll(fileIds);
+                      } else {
+                        _selectedFileIds.removeAll(fileIds);
+                      }
+                    });
+                  },
+                  onClearSelection: () => setState(_selectedFileIds.clear),
+                  onBatchAction: _batchFileAction,
                 ),
                 _LibraryInventoryTab.devices => _LibraryDevicesView(
                   key: const ValueKey('library-devices'),

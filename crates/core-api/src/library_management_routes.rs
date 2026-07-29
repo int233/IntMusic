@@ -70,6 +70,18 @@ pub(crate) async fn manage_library_file(
     Ok(Json(result))
 }
 
+pub(crate) async fn manage_library_files(
+    State(state): State<AppState>,
+    Json(payload): Json<protocol::LibraryFileBatchActionRequest>,
+) -> ApiResult<protocol::LibraryBatchActionResult> {
+    let result =
+        core_db::manage_library_files(state.pool(), &payload.file_ids, &payload.action).await?;
+    state
+        .bump_library_revision("library file inventory batch changed")
+        .await;
+    Ok(Json(result))
+}
+
 pub(crate) async fn manage_library_device(
     State(state): State<AppState>,
     Path(device_id): Path<String>,

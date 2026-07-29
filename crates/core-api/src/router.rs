@@ -14,6 +14,10 @@ pub fn build_router(state: AppState) -> Router {
             get(list_library_management_files),
         )
         .route(
+            "/library-management/files/actions",
+            post(manage_library_files),
+        )
+        .route(
             "/library-management/files/{file_id}",
             get(library_management_file_detail),
         )

@@ -13,7 +13,12 @@ extension _DashboardRendererDevices on _CoreDashboardState {
         final localOutputId = entry.key.startsWith(outputPrefix)
             ? entry.key.substring(outputPrefix.length)
             : entry.key;
-        final systemVolume = await _readSystemVolumeForOutput(entry.key);
+        // Registration is the renderer liveness heartbeat. Never block it on
+        // native audio endpoint probing; the independent volume monitor
+        // refreshes and reports these capabilities every five seconds.
+        final systemVolume =
+            _rendererSystemVolumeByOutput[entry.key] ??
+            const _SystemVolumeState.unsupported();
         return <String, dynamic>{
           'id': localOutputId,
           'name': _rendererAudioDeviceLabel(device),
@@ -27,7 +32,7 @@ extension _DashboardRendererDevices on _CoreDashboardState {
         };
       }),
     );
-    await _api.postJson('/renderers/register', <String, dynamic>{
+    await _api.postCriticalJson('/renderers/register', <String, dynamic>{
       'client_id': _clientId,
       'name': _clientAlias(),
       'platform': Platform.operatingSystem,

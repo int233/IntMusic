@@ -46,6 +46,12 @@ paths:
       responses:
         "200":
           description: Updated file lifecycle state.
+  /library-management/files/actions:
+    post:
+      summary: Apply one inventory action to as many as 500 explicitly selected physical files.
+      responses:
+        "200":
+          description: Batch file action counts.
   /library-management/devices:
     get:
       summary: List Core and every known Client, including offline or retired devices and all of their library sources.
@@ -54,7 +60,7 @@ paths:
           description: Global device and source inventory.
   /library-management/devices/{device_id}/action:
     post:
-      summary: Retire or restore a logical Client device without losing its catalog history.
+      summary: Retire, restore, or remove a logical Client device and its related inventory records without deleting physical music.
       responses:
         "200":
           description: Updated device lifecycle state.

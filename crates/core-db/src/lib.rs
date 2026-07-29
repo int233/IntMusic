@@ -25,8 +25,9 @@ use protocol::{
     UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
 };
 use protocol::{
-    LibraryDeviceSummary, LibraryFileDetail, LibraryFileIssue, LibraryFilePage, LibraryFileSummary,
-    LibraryManagementActionResult, LibraryManagementSummary, LibrarySourceSummary,
+    LibraryBatchActionResult, LibraryDeviceSummary, LibraryFileDetail, LibraryFileIssue,
+    LibraryFilePage, LibraryFileSummary, LibraryManagementActionResult, LibraryManagementSummary,
+    LibrarySourceSummary,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -309,6 +309,13 @@ pub struct LibraryFileActionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryFileBatchActionRequest {
+    pub action: String,
+    #[serde(default)]
+    pub file_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LibraryLifecycleActionRequest {
     pub action: String,
 }
@@ -319,6 +326,14 @@ pub struct LibraryManagementActionResult {
     pub target_id: String,
     pub action: String,
     pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LibraryBatchActionResult {
+    pub target_kind: String,
+    pub action: String,
+    pub requested: u32,
+    pub updated: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
