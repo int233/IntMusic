@@ -376,6 +376,7 @@ const _zh = <String, String>{
   'Confirm match': '确认匹配',
   'Create track': '创建歌曲',
   'Folder unavailable': '文件夹不可访问',
+  'Sync failed': '同步失败',
   'Not synced yet': '尚未同步',
   'Offline · This device': '离线 · 此设备',
   'Offline library': '离线曲库',

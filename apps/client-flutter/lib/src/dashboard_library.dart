@@ -175,8 +175,9 @@ extension _DashboardLibrary on _CoreDashboardState {
         if (inspectionPaths.isEmpty) return;
         final paths = List<String>.of(inspectionPaths);
         inspectionPaths = <String>[];
-        final inspected = await Isolate.run(
-          () => _clientFileManifestBatch(root.path, paths),
+        final inspected = await inspectClientFilesInBackground(
+          rootPath: root.path,
+          filePaths: paths,
         );
         batch.addAll(inspected);
         if (batch.length >= 50) {

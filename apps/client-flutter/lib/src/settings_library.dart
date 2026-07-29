@@ -110,7 +110,7 @@ class _ClientLibraryRootRow extends StatelessWidget {
         _intValue(remoteStatus?['ready_file_count']) ?? root.fileCount;
     final lastSynced = root.lastSyncedAt?.toLocal();
     final statusText = root.lastError != null
-        ? _tr(context, 'Folder unavailable')
+        ? _clientLibraryRootErrorLabel(context, root.lastError!)
         : lastSynced == null
         ? _tr(context, 'Not synced yet')
         : '$readyCount ${_tr(context, 'tracks')} · '
@@ -196,6 +196,15 @@ class _ClientLibraryRootRow extends StatelessWidget {
       ),
     );
   }
+}
+
+String _clientLibraryRootErrorLabel(BuildContext context, String error) {
+  final normalized = error.toLowerCase();
+  if (normalized.contains('folder is unavailable') ||
+      normalized.contains('cannot find the path')) {
+    return _tr(context, 'Folder unavailable');
+  }
+  return _tr(context, 'Sync failed');
 }
 
 class _LibraryRootsPanel extends StatelessWidget {

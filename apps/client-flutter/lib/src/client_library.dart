@@ -149,6 +149,25 @@ List<Map<String, dynamic>> _clientFileManifestBatch(
       .toList(growable: false);
 }
 
+Future<List<Map<String, dynamic>>> inspectClientFilesInBackground({
+  required String rootPath,
+  required List<String> filePaths,
+}) {
+  return compute(_clientFileManifestBatchFromMessage, <String, Object>{
+    'rootPath': rootPath,
+    'filePaths': List<String>.of(filePaths),
+  });
+}
+
+List<Map<String, dynamic>> _clientFileManifestBatchFromMessage(
+  Map<String, Object> message,
+) {
+  return _clientFileManifestBatch(
+    message['rootPath']! as String,
+    (message['filePaths']! as List).cast<String>(),
+  );
+}
+
 Map<String, dynamic> _clientFileManifestSync(String rootPath, File file) {
   final stat = file.statSync();
   final relativePath = _relativeClientPath(rootPath, file.path);

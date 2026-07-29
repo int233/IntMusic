@@ -9,6 +9,7 @@ import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:crypto/crypto.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
