@@ -22,6 +22,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'core/navigation_history.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
+import 'core/renderer_audio_output_policy.dart';
 import 'core/renderer_command_sequences.dart';
 import 'core/task_scheduler.dart';
 import 'src/app_theme.dart';
@@ -171,6 +172,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, Future<_RendererAudioPlayer>> _audioPlayers = {};
   final Map<String, StreamSubscription<bool>> _audioCompleteSubscriptions = {};
   final Map<String, StreamSubscription<bool>> _audioPlayingSubscriptions = {};
+  final Map<String, StreamSubscription<AudioParams>> _audioParamsSubscriptions =
+      {};
   final Map<String, AudioDevice> _rendererAudioDevicesByOutput = {};
   final Map<String, _SystemVolumeState> _rendererSystemVolumeByOutput = {};
   final Map<String, Map<String, dynamic>> _rendererPlaybackByOutput = {};
@@ -336,6 +339,9 @@ class _CoreDashboardState extends State<CoreDashboard>
       unawaited(subscription.cancel());
     }
     for (final subscription in _audioPlayingSubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    for (final subscription in _audioParamsSubscriptions.values) {
       unawaited(subscription.cancel());
     }
     unawaited(_rendererDeviceSubscription?.cancel() ?? Future<void>.value());
