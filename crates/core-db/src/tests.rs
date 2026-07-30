@@ -1008,7 +1008,8 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
     let statuses = list_client_library_roots(&pool)
         .await
         .expect("list client roots");
-    assert_eq!(statuses.len(), 2);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses.iter().all(|status| status.device_id != "dev-b"));
     assert_eq!(
         list_library_roots(&pool)
             .await

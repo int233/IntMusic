@@ -108,13 +108,15 @@ List<_ClientLibraryRoot> _decodeClientLibraryRoots(String? encoded) {
   }
 }
 
-String _newClientLibraryRootId() {
-  final random = Random.secure();
-  final suffix = List<int>.generate(
-    12,
-    (_) => random.nextInt(256),
-  ).map((value) => value.toRadixString(16).padLeft(2, '0')).join();
-  return 'root-$suffix';
+String _stableClientLibraryRootId(String path) {
+  var identity = _normalizeLocalRootPath(path).replaceAll('\\', '/');
+  if (Platform.isWindows) {
+    identity = identity.toLowerCase();
+  }
+  final digest = sha256.convert(
+    utf8.encode('${Platform.operatingSystem}\u0000$identity'),
+  );
+  return 'root-path-${digest.toString().substring(0, 32)}';
 }
 
 String _normalizeLocalRootPath(String path) {

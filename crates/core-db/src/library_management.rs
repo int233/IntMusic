@@ -183,7 +183,8 @@ pub async fn library_management_summary(pool: &DbPool) -> Result<LibraryManageme
         SELECT COUNT(*)
         FROM library_roots root
         LEFT JOIN devices device ON device.id = root.owner_device_id
-        WHERE root.owner_device_id IS NULL OR device.removed_at IS NULL
+        WHERE root.removed_at IS NULL
+          AND (root.owner_device_id IS NULL OR device.removed_at IS NULL)
         "#,
     )
     .fetch_one(pool)
@@ -522,7 +523,8 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
         FROM library_roots root
         LEFT JOIN files file ON file.library_root_id = root.id
         LEFT JOIN devices owner ON owner.id = root.owner_device_id
-        WHERE root.owner_device_id IS NULL OR owner.removed_at IS NULL
+        WHERE root.removed_at IS NULL
+          AND (root.owner_device_id IS NULL OR owner.removed_at IS NULL)
         GROUP BY root.id
         ORDER BY display_name COLLATE NOCASE
         "#,

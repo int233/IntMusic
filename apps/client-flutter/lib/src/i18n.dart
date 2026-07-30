@@ -168,6 +168,10 @@ const _zh = <String, String>{
       '此设备没有已注册的来源，但仍保留设备身份以供管理和追溯。',
   'Restore source': '恢复来源',
   'Retire source': '停用来源',
+  'Remove source': '移除来源',
+  'Remove source and inventory': '移除来源及其清单',
+  'This removes the source and all of its copy records from active management. Physical music files are not deleted. Adding the same folder again will register it as a source.':
+      '这会从当前管理中移除该来源及其全部副本记录，但不会删除设备上的实际音乐文件。以后再次添加同一文件夹时，会重新注册该来源。',
   'Client device': '客户端设备',
   'No recent connection': '近期没有连接记录',
   'Last seen': '上次连接',

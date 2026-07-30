@@ -96,7 +96,7 @@ paths:
           description: Updated device lifecycle state.
   /library-management/sources/{root_id}/action:
     post:
-      summary: Retire or restore any Core or Client library source independently of the current Client installation.
+      summary: Retire or restore a library source, or remove a Client source and its copy inventory without deleting physical files.
       responses:
         "200":
           description: Updated source lifecycle state.

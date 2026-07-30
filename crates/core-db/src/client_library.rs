@@ -216,6 +216,7 @@ pub async fn upsert_client_library_manifest(
             path_hint = excluded.path_hint,
             last_seen_at = excluded.last_seen_at,
             retired_at = NULL,
+            removed_at = NULL,
             updated_at = excluded.updated_at
         "#,
     )
@@ -652,7 +653,6 @@ pub async fn remove_client_library_root(
     device_id: &str,
     root_external_id: &str,
 ) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
     let root_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT id
@@ -667,37 +667,7 @@ pub async fn remove_client_library_root(
     let Some(root_id) = root_id else {
         return Ok(());
     };
-    sqlx::query(
-        "UPDATE library_roots SET enabled = 0, retired_at = COALESCE(retired_at, ?1), updated_at = ?1 WHERE id = ?2",
-    )
-        .bind(&now)
-        .bind(root_id)
-        .execute(pool)
-        .await?;
-    sqlx::query(
-        r#"
-        UPDATE files
-        SET availability_state = 'missing',
-            deleted_at = COALESCE(deleted_at, ?1),
-            updated_at = ?1
-        WHERE library_root_id = ?2
-        "#,
-    )
-    .bind(&now)
-    .bind(root_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE media_replicas
-        SET availability_state = 'missing', updated_at = ?1
-        WHERE library_root_id = ?2
-        "#,
-    )
-    .bind(&now)
-    .bind(root_id)
-    .execute(pool)
-    .await?;
+    manage_library_source(pool, root_id, "remove").await?;
     Ok(())
 }
 
@@ -728,7 +698,7 @@ pub async fn list_client_library_roots(pool: &DbPool) -> Result<Vec<ClientLibrar
         LEFT JOIN client_library_sync_state sync
           ON sync.device_id = root.owner_device_id
          AND sync.root_external_id = root.external_id
-        WHERE root.root_kind = 'client'
+        WHERE root.root_kind = 'client' AND root.removed_at IS NULL
         GROUP BY root.id
         ORDER BY device.name COLLATE NOCASE, display_name COLLATE NOCASE
         "#,

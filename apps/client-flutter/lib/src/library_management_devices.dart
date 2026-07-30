@@ -328,6 +328,7 @@ class _LibrarySourceTile extends StatelessWidget {
     final rootId = _intValue(source['root_id']);
     final state = source['state']?.toString() ?? 'offline';
     final retired = state == 'retired';
+    final isCore = source['root_kind'] == 'core';
     final hint = source['path_hint']?.toString();
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -418,6 +419,16 @@ class _LibrarySourceTile extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (!isCore) ...[
+                  const PopupMenuDivider(),
+                  PopupMenuItem(
+                    value: 'remove',
+                    child: _LibraryMenuLabel(
+                      icon: Icons.delete_outline,
+                      label: _tr(context, 'Remove source and inventory'),
+                    ),
+                  ),
+                ],
               ],
             ),
           ],
@@ -516,7 +527,8 @@ Future<bool> _confirmLibraryLifecycleAction(
 }) async {
   final restore = action == 'restore';
   final remove = action == 'remove';
-  final subject = targetKind == 'device' ? 'device' : 'source';
+  final device = targetKind == 'device';
+  final subject = device ? 'device' : 'source';
   return await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
@@ -536,7 +548,9 @@ Future<bool> _confirmLibraryLifecycleAction(
                 : remove
                 ? _tr(
                     context,
-                    'This removes the device, its sources, and all related copy records from active management. Physical music files on that device are not deleted. If the same Client reconnects later, it can register the files again.',
+                    device
+                        ? 'This removes the device, its sources, and all related copy records from active management. Physical music files on that device are not deleted. If the same Client reconnects later, it can register the files again.'
+                        : 'This removes the source and all of its copy records from active management. Physical music files are not deleted. Adding the same folder again will register it as a source.',
                   )
                 : _tr(
                     context,

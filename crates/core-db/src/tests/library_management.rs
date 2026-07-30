@@ -205,6 +205,34 @@ async fn offline_and_retired_devices_keep_their_sources_and_files_manageable() {
         .expect("file remains addressable after lifecycle changes");
     assert_eq!(detail.file.device_id, "retained-client");
 
+    manage_library_source(&pool, root_id, "remove")
+        .await
+        .expect("remove stale source");
+    let devices = list_library_devices(&pool)
+        .await
+        .expect("list device after source removal");
+    let device = devices
+        .iter()
+        .find(|device| device.device_id == "retained-client")
+        .expect("device identity remains");
+    assert!(
+        device.sources.is_empty(),
+        "removed sources must disappear while the device remains manageable"
+    );
+    let removed = list_library_files(
+        &pool,
+        &LibraryFileQuery {
+            device_id: Some("retained-client".to_string()),
+            status: Some("removed".to_string()),
+            limit: 100,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("removed source files remain auditable");
+    assert_eq!(removed.total, 1);
+    assert_eq!(removed.items[0].presence_state, "removed");
+
     close_test_pool(pool, path).await;
 }
 

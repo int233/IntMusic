@@ -62,7 +62,7 @@ extension _DashboardLibrary on _CoreDashboardState {
         return;
       }
       final root = _ClientLibraryRoot(
-        externalId: _newClientLibraryRootId(),
+        externalId: _stableClientLibraryRootId(normalizedPath),
         path: normalizedPath,
         displayName:
             androidSelection?.displayName ??

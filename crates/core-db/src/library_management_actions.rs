@@ -313,7 +313,7 @@ pub async fn manage_library_source(
         }
         "restore" => {
             let result = sqlx::query(
-                "UPDATE library_roots SET enabled = 1, retired_at = NULL, updated_at = ?1 WHERE id = ?2",
+                "UPDATE library_roots SET enabled = 1, retired_at = NULL, removed_at = NULL, updated_at = ?1 WHERE id = ?2",
             )
             .bind(&now)
             .bind(root_id)
@@ -330,6 +330,73 @@ pub async fn manage_library_source(
             .execute(pool)
             .await?;
             "offline"
+        }
+        "remove" => {
+            let root = sqlx::query(
+                "SELECT root_kind, owner_device_id, external_id FROM library_roots WHERE id = ?1",
+            )
+            .bind(root_id)
+            .fetch_optional(pool)
+            .await?
+            .context("library source was not found")?;
+            let root_kind: String = root.try_get("root_kind")?;
+            if root_kind != "client" {
+                bail!("Core library sources must be removed from the music folder settings");
+            }
+            let owner_device_id: Option<String> = root.try_get("owner_device_id")?;
+            let external_id: Option<String> = root.try_get("external_id")?;
+            let mut transaction = pool.begin().await?;
+            sqlx::query(
+                "UPDATE library_roots SET enabled = 0, retired_at = COALESCE(retired_at, ?1), removed_at = COALESCE(removed_at, ?1), updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE files
+                SET deleted_at = COALESCE(deleted_at, ?1),
+                    availability_state = 'missing',
+                    updated_at = ?1
+                WHERE library_root_id = ?2
+                "#,
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'retired', updated_at = ?1 WHERE library_root_id = ?2",
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                r#"
+                UPDATE library_file_issues
+                SET state = 'resolved', resolved_at = ?1, updated_at = ?1
+                WHERE state = 'open' AND file_id IN (
+                    SELECT id FROM files WHERE library_root_id = ?2
+                )
+                "#,
+            )
+            .bind(&now)
+            .bind(root_id)
+            .execute(&mut *transaction)
+            .await?;
+            if let (Some(device_id), Some(root_external_id)) = (owner_device_id, external_id) {
+                sqlx::query(
+                    "DELETE FROM client_library_sync_state WHERE device_id = ?1 AND root_external_id = ?2",
+                )
+                .bind(device_id)
+                .bind(root_external_id)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            transaction.commit().await?;
+            "removed"
         }
         _ => bail!("unsupported library source action"),
     };
