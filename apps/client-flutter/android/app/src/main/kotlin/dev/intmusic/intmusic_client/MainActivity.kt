@@ -9,6 +9,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -680,29 +681,82 @@ class MainActivity : FlutterActivity() {
                 "application/octet-stream",
                 temporaryName,
             ) ?: throw IllegalStateException("Unable to create the temporary destination file")
-        contentResolver.openOutputStream(temporary, "w")?.use { output ->
-            source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
-        } ?: throw IllegalStateException("Unable to open the destination file for writing")
+        try {
+            writeDocumentFile(temporary, source)
+        } catch (error: Exception) {
+            runCatching { DocumentsContract.deleteDocument(contentResolver, temporary) }
+            throw error
+        }
 
         findDocumentChild(treeUri, parent, finalName)?.let {
             DocumentsContract.deleteDocument(contentResolver, it.first)
         }
-        val renamed =
-            DocumentsContract.renameDocument(contentResolver, temporary, finalName)
-        if (renamed == null) {
-            val destination =
+        val renameFailure =
+            try {
+                if (DocumentsContract.renameDocument(contentResolver, temporary, finalName) != null) {
+                    return
+                }
+                "the storage provider returned no destination"
+            } catch (error: Exception) {
+                error.message ?: error.javaClass.simpleName
+            }
+        findDocumentChild(treeUri, parent, finalName)?.let { existing ->
+            val size = documentSize(existing.first)
+            if (size < 0 || size == source.length()) {
+                return
+            }
+            DocumentsContract.deleteDocument(contentResolver, existing.first)
+        }
+        var destination: Uri? = null
+        try {
+            val created =
                 DocumentsContract.createDocument(
                     contentResolver,
                     parent,
-                    "application/octet-stream",
+                    mimeTypeForFileName(finalName),
                     finalName,
                 ) ?: throw IllegalStateException("Unable to create the destination file")
-            contentResolver.openOutputStream(destination, "w")?.use { output ->
-                source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
-            } ?: throw IllegalStateException("Unable to open the destination file for writing")
-            DocumentsContract.deleteDocument(contentResolver, temporary)
+            destination = created
+            writeDocumentFile(created, source)
+            val size = documentSize(created)
+            if (size >= 0 && size != source.length()) {
+                throw IllegalStateException(
+                    "Saved size $size does not match downloaded size ${source.length()}",
+                )
+            }
+            findDocumentChild(treeUri, parent, temporaryName)?.let {
+                DocumentsContract.deleteDocument(contentResolver, it.first)
+            }
+        } catch (error: Exception) {
+            destination?.let {
+                runCatching { DocumentsContract.deleteDocument(contentResolver, it) }
+            }
+            runCatching {
+                findDocumentChild(treeUri, parent, temporaryName)?.let {
+                    DocumentsContract.deleteDocument(contentResolver, it.first)
+                }
+            }
+            throw IllegalStateException(
+                "Unable to finalize $finalName: rename failed ($renameFailure); " +
+                    "fallback copy failed (${error.message})",
+                error,
+            )
         }
     }
+
+    private fun writeDocumentFile(destination: Uri, source: File) {
+        contentResolver.openOutputStream(destination, "w")?.use { output ->
+            source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
+        } ?: throw IllegalStateException("Unable to open the destination file for writing")
+    }
+
+    private fun documentSize(uri: Uri): Long =
+        contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+
+    private fun mimeTypeForFileName(fileName: String): String =
+        MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(fileName.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
 
     private fun findDocumentChild(
         treeUri: Uri,
