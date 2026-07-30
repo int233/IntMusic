@@ -64,6 +64,18 @@ paths:
       responses:
         "200":
           description: Merge audit ID and consolidation counts.
+  /library-management/tracks/auto-merge/preview:
+    post:
+      summary: Find conservatively matched duplicate release tracks using authoritative title, artist, album, position, version, year, kind, and duration metadata.
+      responses:
+        "200":
+          description: Non-mutating exact-duplicate groups and aggregate counts.
+  /library-management/tracks/auto-merge:
+    post:
+      summary: Revalidate and reversibly consolidate explicitly selected exact-duplicate groups.
+      responses:
+        "200":
+          description: Batch merge counts, audit IDs, and any groups skipped after revalidation.
   /library-management/track-merges/{merge_id}/undo:
     post:
       summary: Restore the catalog links and media relationships recorded before a track merge.

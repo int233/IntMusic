@@ -111,6 +111,37 @@ pub(crate) async fn merge_library_tracks(
     Ok(Json(result))
 }
 
+pub(crate) async fn preview_exact_library_track_merges(
+    State(state): State<AppState>,
+    Json(payload): Json<AutoTrackMergePreviewRequest>,
+) -> ApiResult<protocol::AutoTrackMergePreview> {
+    Ok(Json(
+        core_db::preview_exact_track_merges(state.pool(), payload.limit).await?,
+    ))
+}
+
+pub(crate) async fn merge_exact_library_track_groups(
+    State(state): State<AppState>,
+    Json(payload): Json<AutoTrackMergeRequest>,
+) -> ApiResult<protocol::AutoTrackMergeResult> {
+    let result = core_db::merge_exact_track_groups(state.pool(), &payload).await?;
+    if result.merged_groups > 0 {
+        state
+            .bump_library_revision("exact duplicate tracks merged")
+            .await;
+        state.emit(
+            "library.tracks_merged",
+            json!({
+                "action": "auto_merge_exact_duplicates",
+                "merged_groups": result.merged_groups,
+                "merged_tracks": result.merged_tracks,
+                "merge_ids": result.merge_ids,
+            }),
+        );
+    }
+    Ok(Json(result))
+}
+
 pub(crate) async fn undo_library_track_merge(
     State(state): State<AppState>,
     Path(merge_id): Path<String>,

@@ -403,6 +403,65 @@ pub struct TrackMergeResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTrackMergePreviewRequest {
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTrackMergeGroup {
+    pub group_id: String,
+    pub target_track_id: i64,
+    #[serde(default)]
+    pub source_track_ids: Vec<i64>,
+    pub title: String,
+    pub artist_display: String,
+    pub album_title: String,
+    pub subtitle: Option<String>,
+    pub year: Option<i64>,
+    pub disc_number: Option<i64>,
+    pub track_number: Option<i64>,
+    pub recording_kind: String,
+    pub duration_min_ms: i64,
+    pub duration_max_ms: i64,
+    pub track_count: u32,
+    pub file_count: u32,
+    pub media_variant_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTrackMergePreview {
+    #[serde(default)]
+    pub groups: Vec<AutoTrackMergeGroup>,
+    pub duplicate_groups: u32,
+    pub duplicate_tracks: u32,
+    pub physical_files: u32,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTrackMergeRequest {
+    #[serde(default)]
+    pub group_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTrackMergeFailure {
+    pub group_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoTrackMergeResult {
+    pub merged_groups: u32,
+    pub merged_tracks: u32,
+    pub skipped_groups: u32,
+    #[serde(default)]
+    pub merge_ids: Vec<String>,
+    #[serde(default)]
+    pub failures: Vec<AutoTrackMergeFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientMutation {
     pub id: String,
     pub kind: String,

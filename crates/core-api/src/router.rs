@@ -26,6 +26,14 @@ pub fn build_router(state: AppState) -> Router {
             post(merge_library_tracks),
         )
         .route(
+            "/library-management/tracks/auto-merge/preview",
+            post(preview_exact_library_track_merges),
+        )
+        .route(
+            "/library-management/tracks/auto-merge",
+            post(merge_exact_library_track_groups),
+        )
+        .route(
             "/library-management/track-merges/{merge_id}/undo",
             post(undo_library_track_merge),
         )

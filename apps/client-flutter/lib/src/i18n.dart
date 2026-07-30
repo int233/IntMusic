@@ -50,6 +50,30 @@ const _zh = <String, String>{
   'Total size': '总大小',
   'Sources': '来源',
   'Management model': '管理方式',
+  'Find exact duplicate songs': '查找完全重复歌曲',
+  'Exact duplicate songs': '完全重复歌曲',
+  'Review matches before folding device copies and encodings into one release track.':
+      '合并前先检查匹配结果，再将不同设备副本和编码格式折叠为一个发行曲目。',
+  'duplicate groups': '组重复项',
+  'catalog songs': '个资料库歌曲',
+  'Physical files': '实际文件',
+  'Only verified files with matching title, primary artist, album, disc and track position, year, version, recording type, and a duration difference of at most 2 seconds are included.':
+      '仅纳入标签已验证，且标题、主要艺术家、专辑、碟号与曲号、年份、版本、录音类型完全一致，时长差不超过 2 秒的文件。',
+  'Only the first 200 groups are shown. Run the scan again after this batch.':
+      '当前仅显示前 200 组；完成本批次后可再次扫描。',
+  'Matched groups': '匹配分组',
+  'Select all': '全选',
+  'Deselect all': '取消全选',
+  'Every merge keeps an audit record and can still be undone individually.':
+      '每次合并都会保留审计记录，并且仍可单独撤销。',
+  'Merge': '合并',
+  'groups': '组',
+  'The richest available copy is kept as canonical metadata.':
+      '将元数据最完整且当前可用的副本作为主记录。',
+  'No safe exact duplicates were found.': '没有找到可以安全自动合并的完全重复歌曲。',
+  'duplicate groups merged': '组重复项已合并',
+  'duplicate songs folded': '个重复歌曲已折叠',
+  'groups skipped': '组已跳过',
   'Core keeps every physical file in this inventory. Offline and retired devices remain manageable; attention is a filter, not a separate library.':
       'Core 会在清单中保留每一个实际文件。离线或已停用的设备仍可管理；待处理只是筛选条件，并不是独立的资料库。',
   'Search filenames, tracks, albums, devices, and sources': '搜索文件名、歌曲、专辑、设备与来源',

@@ -25,10 +25,11 @@ use protocol::{
     UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
 };
 use protocol::{
-    LibraryBatchActionResult, LibraryDeviceSummary, LibraryFileDetail, LibraryFileIssue,
-    LibraryFilePage, LibraryFileSummary, LibraryManagementActionResult, LibraryManagementSummary,
-    LibrarySourceSummary, TrackMergeCandidate, TrackMergeConflict, TrackMergePreview,
-    TrackMergeRequest, TrackMergeResult,
+    AutoTrackMergeFailure, AutoTrackMergeGroup, AutoTrackMergePreview, AutoTrackMergeRequest,
+    AutoTrackMergeResult, LibraryBatchActionResult, LibraryDeviceSummary, LibraryFileDetail,
+    LibraryFileIssue, LibraryFilePage, LibraryFileSummary, LibraryManagementActionResult,
+    LibraryManagementSummary, LibrarySourceSummary, TrackMergeCandidate, TrackMergeConflict,
+    TrackMergePreview, TrackMergeRequest, TrackMergeResult,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -46,6 +47,7 @@ pub type DbPool = SqlitePool;
 static MIGRATOR: Migrator = sqlx::migrate!("./src/migrations");
 
 mod artists;
+mod auto_track_merge;
 mod client_file_resolution;
 mod client_library;
 mod client_mutations;
@@ -69,6 +71,7 @@ mod tracks;
 
 pub(crate) use artists::trimmed_option;
 pub use artists::*;
+pub use auto_track_merge::*;
 pub use client_file_resolution::*;
 pub(crate) use client_file_resolution::{
     attach_client_file_to_track, mark_client_replica_ready, normalize_client_metadata_status,

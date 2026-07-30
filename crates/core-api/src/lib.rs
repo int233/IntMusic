@@ -70,19 +70,19 @@ use lofty::{
 };
 use playback::PlaybackController;
 use protocol::{
-    AddPlaybackQueueItems, ApiErrorBody, ClientLibraryManifestRequest, ClientMutationBatchRequest,
-    ClientSyncChanges, ClientSyncSnapshot, CoreStatus, CreateDistributionRequest,
-    DistributionTaskProgress, EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload,
-    LinkTrackRecordingRequest, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
-    MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
-    PlaybackEvent, PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
-    PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
-    RendererCommandPayload, RendererRegistration, RendererStateReport, RendererVolumeStateReport,
-    ReplacePlaybackQueue, ResolveClientLibraryFileRequest, ScanProgressPayload, SearchResponse,
-    ServerSettingsUpdate, TrackFavoriteUpdate, TrackMergePreviewRequest, TrackMergeRequest,
-    TrackMetadataUpdate, UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual,
-    UpdatePlaylist, VolumeControlMode, ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume,
-    API_PREFIX, EVENTS_WS_PATH,
+    AddPlaybackQueueItems, ApiErrorBody, AutoTrackMergePreviewRequest, AutoTrackMergeRequest,
+    ClientLibraryManifestRequest, ClientMutationBatchRequest, ClientSyncChanges,
+    ClientSyncSnapshot, CoreStatus, CreateDistributionRequest, DistributionTaskProgress,
+    EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload, LinkTrackRecordingRequest,
+    MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest, MusicBrainzArtistPreview,
+    MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist, PlaybackEvent, PlaybackMode,
+    PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState, PlaybackStats,
+    PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation, RendererCommandPayload,
+    RendererRegistration, RendererStateReport, RendererVolumeStateReport, ReplacePlaybackQueue,
+    ResolveClientLibraryFileRequest, ScanProgressPayload, SearchResponse, ServerSettingsUpdate,
+    TrackFavoriteUpdate, TrackMergePreviewRequest, TrackMergeRequest, TrackMetadataUpdate,
+    UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, VolumeControlMode,
+    ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;

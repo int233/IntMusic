@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::*;
 
 #[tokio::test]
@@ -130,6 +132,118 @@ async fn different_releases_are_not_offered_as_physical_file_merge() {
         .conflicts
         .iter()
         .any(|conflict| conflict.field == "album" && conflict.severity == "error"));
+    let automatic = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("scan exact duplicates");
+    assert!(
+        automatic.groups.is_empty(),
+        "same title and artist on different albums must remain separate release tracks"
+    );
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicate_scan_previews_and_merges_device_or_encoding_copies() {
+    let (pool, path) = test_pool().await;
+    let first = ingest_test_track(&pool, "copy.flac", "Exact album", "Exact song").await;
+    let second = ingest_test_track(&pool, "copy.mp3", "Exact album", "Exact song").await;
+    let second_file: i64 = sqlx::query_scalar("SELECT file_id FROM tracks WHERE id = ?1")
+        .bind(second)
+        .fetch_one(&pool)
+        .await
+        .expect("second file");
+    sqlx::query(
+        "UPDATE files SET extension = 'mp3', codec = 'mp3', bitrate = 320000, duration_ms = duration_ms + 1500 WHERE id = ?1",
+    )
+    .bind(second_file)
+    .execute(&pool)
+    .await
+    .expect("make a distinct encoding");
+    sqlx::query("UPDATE tracks SET duration_ms = duration_ms + 1500 WHERE id = ?1")
+        .bind(second)
+        .execute(&pool)
+        .await
+        .expect("allow a small encoding duration difference");
+
+    let preview = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("preview exact copies");
+    assert_eq!(preview.duplicate_groups, 1);
+    assert_eq!(preview.duplicate_tracks, 2);
+    assert_eq!(preview.physical_files, 2);
+    let group = preview.groups.first().expect("duplicate group");
+    let members = std::iter::once(group.target_track_id)
+        .chain(group.source_track_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(members, BTreeSet::from([first, second]));
+
+    let merged = merge_exact_track_groups(
+        &pool,
+        &AutoTrackMergeRequest {
+            group_ids: vec![group.group_id.clone()],
+        },
+    )
+    .await
+    .expect("merge exact copies");
+    assert_eq!(merged.merged_groups, 1);
+    assert_eq!(merged.merged_tracks, 1);
+    assert!(merged.failures.is_empty());
+    assert_eq!(
+        list_tracks(&pool, 100, 0)
+            .await
+            .expect("folded songs")
+            .iter()
+            .filter(|track| track.title == "Exact song")
+            .count(),
+        1
+    );
+    assert!(preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("rescan exact copies")
+        .groups
+        .is_empty());
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicate_scan_rejects_version_position_and_duration_differences() {
+    let (pool, path) = test_pool().await;
+    let baseline = ingest_test_track(&pool, "baseline.flac", "Album", "Song").await;
+    let version = ingest_test_track(&pool, "version.flac", "Album", "Song").await;
+    let position = ingest_test_track(&pool, "position.flac", "Album", "Song").await;
+    let duration = ingest_test_track(&pool, "duration.flac", "Album", "Song").await;
+    let year = ingest_test_track(&pool, "year.flac", "Album", "Song").await;
+    sqlx::query("UPDATE tracks SET subtitle = 'Live' WHERE id = ?1")
+        .bind(version)
+        .execute(&pool)
+        .await
+        .expect("set version");
+    sqlx::query("UPDATE tracks SET track_number = 2 WHERE id = ?1")
+        .bind(position)
+        .execute(&pool)
+        .await
+        .expect("set position");
+    sqlx::query("UPDATE tracks SET duration_ms = duration_ms + 3000 WHERE id = ?1")
+        .bind(duration)
+        .execute(&pool)
+        .await
+        .expect("set duration");
+    sqlx::query("UPDATE tracks SET year = year + 1 WHERE id = ?1")
+        .bind(year)
+        .execute(&pool)
+        .await
+        .expect("set year");
+
+    let preview = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("scan guarded duplicates");
+    assert!(preview.groups.is_empty());
+    assert!(preview
+        .groups
+        .iter()
+        .all(|group| group.target_track_id != baseline));
 
     close_test_pool(pool, path).await;
 }

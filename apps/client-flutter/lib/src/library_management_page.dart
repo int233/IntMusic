@@ -293,6 +293,56 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
     }
   }
 
+  Future<void> _autoMergeExactDuplicates() async {
+    try {
+      final preview = _asMap(
+        await _api.postBulkJson(
+          '/library-management/tracks/auto-merge/preview',
+          const <String, dynamic>{'limit': 200},
+        ),
+      );
+      if (!mounted) return;
+      final groups = preview['groups'] as List? ?? const [];
+      if (groups.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(_tr(context, 'No safe exact duplicates were found.')),
+          ),
+        );
+        return;
+      }
+      final groupIds = await showDialog<List<String>>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => _AutoTrackMergeDialog(preview: preview),
+      );
+      if (groupIds == null || groupIds.isEmpty) return;
+      final result = _asMap(
+        await _api.postBulkJson(
+          '/library-management/tracks/auto-merge',
+          <String, dynamic>{'group_ids': groupIds},
+        ),
+      );
+      await _refreshAll();
+      await widget.onLibraryChanged();
+      if (!mounted) return;
+      final failures = result['failures'] as List? ?? const [];
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${_intValue(result['merged_groups']) ?? 0} '
+            '${_tr(context, 'duplicate groups merged')}, '
+            '${_intValue(result['merged_tracks']) ?? 0} '
+            '${_tr(context, 'duplicate songs folded')}'
+            '${failures.isEmpty ? '' : ' · ${failures.length} ${_tr(context, 'groups skipped')}'}',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
+  }
+
   Future<void> _resolveFile(int fileId, Map<String, dynamic> resolution) async {
     try {
       await _api.postJson('/client-library/files/$fileId/resolve', resolution);
@@ -452,6 +502,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
                   onOpenAttention: () =>
                       _selectTab(_LibraryInventoryTab.attention),
                   onOpenDevices: () => _selectTab(_LibraryInventoryTab.devices),
+                  onFindDuplicates: _autoMergeExactDuplicates,
                 ),
                 _LibraryInventoryTab.files ||
                 _LibraryInventoryTab.attention => _LibraryFilesView(
@@ -588,6 +639,7 @@ class _LibraryOverviewView extends StatelessWidget {
     required this.onOpenFiles,
     required this.onOpenAttention,
     required this.onOpenDevices,
+    required this.onFindDuplicates,
   });
 
   final Map<String, dynamic> summary;
@@ -596,6 +648,7 @@ class _LibraryOverviewView extends StatelessWidget {
   final VoidCallback onOpenFiles;
   final VoidCallback onOpenAttention;
   final VoidCallback onOpenDevices;
+  final VoidCallback onFindDuplicates;
 
   @override
   Widget build(BuildContext context) {
@@ -678,15 +731,26 @@ class _LibraryOverviewView extends StatelessWidget {
           const SizedBox(height: 16),
           _HomePanel(
             title: _tr(context, 'Management model'),
-            child: Text(
-              _tr(
-                context,
-                'Core keeps every physical file in this inventory. Offline and retired devices remain manageable; attention is a filter, not a separate library.',
-              ),
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                color: IntMusicTheme.of(context).textSecondary,
-                height: 1.5,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _tr(
+                    context,
+                    'Core keeps every physical file in this inventory. Offline and retired devices remain manageable; attention is a filter, not a separate library.',
+                  ),
+                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
+                    color: IntMusicTheme.of(context).textSecondary,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                FilledButton.tonalIcon(
+                  onPressed: loading ? null : onFindDuplicates,
+                  icon: const Icon(Icons.auto_awesome_outlined),
+                  label: Text(_tr(context, 'Find exact duplicate songs')),
+                ),
+              ],
             ),
           ),
         ],
