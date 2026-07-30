@@ -310,6 +310,46 @@ pub async fn upsert_client_library_manifest(
                 .bind(&shadow_path)
                 .fetch_optional(pool)
                 .await?;
+        let existing_replica_state = if let Some(file_id) = existing_file_id {
+            sqlx::query(
+                r#"
+                SELECT
+                    replica.media_variant_id,
+                    EXISTS (
+                        SELECT 1
+                        FROM release_track_media_variants relation
+                        JOIN legacy_track_catalog_links links
+                          ON links.release_track_id = relation.release_track_id
+                        WHERE relation.media_variant_id = replica.media_variant_id
+                    ) AS has_catalog_binding,
+                    EXISTS (
+                        SELECT 1
+                        FROM tracks direct_track
+                        JOIN legacy_track_catalog_links direct_link
+                          ON direct_link.track_id = direct_track.id
+                        JOIN release_track_media_variants direct_relation
+                          ON direct_relation.release_track_id = direct_link.release_track_id
+                        WHERE direct_track.file_id = replica.file_id
+                          AND direct_relation.media_variant_id = replica.media_variant_id
+                    ) AS belongs_to_direct_track
+                FROM media_replicas replica
+                WHERE replica.file_id = ?1
+                LIMIT 1
+                "#,
+            )
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await?
+        } else {
+            None
+        };
+        let preserve_existing_replica_binding =
+            if let Some(existing_replica_state) = existing_replica_state.as_ref() {
+                existing_replica_state.try_get::<i64, _>("has_catalog_binding")? != 0
+                    && existing_replica_state.try_get::<i64, _>("belongs_to_direct_track")? == 0
+            } else {
+                false
+            };
         let existing_resolution = if let Some(file_id) = existing_file_id {
             sqlx::query(
                 r#"
@@ -415,7 +455,8 @@ pub async fn upsert_client_library_manifest(
             || (!manually_ignored
                 && !manually_matched
                 && embedded_metadata_ready
-                && matching_variant_id.is_none());
+                && matching_variant_id.is_none()
+                && !preserve_existing_replica_binding);
         let scan_status = if manually_ignored {
             "ignored".to_string()
         } else if manually_matched || matching_variant_id.is_some() {

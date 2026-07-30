@@ -482,6 +482,12 @@ pub(crate) async fn ensure_track_media_graph(
             availability_state, is_primary, last_verified_at, created_at, updated_at
         )
         VALUES (?1, ?2, ?3, 'core', 'ready', 1, ?4, ?4, ?4)
+        ON CONFLICT(file_id) DO UPDATE SET
+            media_variant_id = excluded.media_variant_id,
+            library_root_id = excluded.library_root_id,
+            availability_state = 'ready',
+            last_verified_at = excluded.last_verified_at,
+            updated_at = excluded.updated_at
         "#,
     )
     .bind(media_variant_id)
