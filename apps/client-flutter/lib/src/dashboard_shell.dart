@@ -367,7 +367,7 @@ extension _DashboardShell on _CoreDashboardState {
           coreBaseUrl: _coreUrlController.text,
           tracks: _tracks,
           onOpenTrack: _openTrackDetail,
-          onLibraryChanged: _refreshAll,
+          onLibraryChanged: _refreshAfterLibraryManagementChange,
         );
       case _AppRouteKind.settings:
         return _SettingsPage(

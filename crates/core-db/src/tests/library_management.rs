@@ -131,7 +131,7 @@ async fn offline_and_retired_devices_keep_their_sources_and_files_manageable() {
         duration_ms: Some(240_000),
         ..Default::default()
     };
-    upsert_client_library_manifest(
+    let manifest_result = upsert_client_library_manifest(
         &pool,
         &client_manifest(
             "retained-client",
@@ -143,6 +143,7 @@ async fn offline_and_retired_devices_keep_their_sources_and_files_manageable() {
     )
     .await
     .expect("ingest client file");
+    let track_id = manifest_result.bindings[0].track_id;
 
     let devices = list_library_devices(&pool)
         .await
@@ -204,6 +205,20 @@ async fn offline_and_retired_devices_keep_their_sources_and_files_manageable() {
         .await
         .expect("file remains addressable after lifecycle changes");
     assert_eq!(detail.file.device_id, "retained-client");
+    let active_track = track_detail(&pool, track_id)
+        .await
+        .expect("load active track detail");
+    assert_eq!(
+        active_track
+            .media
+            .as_ref()
+            .into_iter()
+            .flat_map(|media| &media.variants)
+            .flat_map(|variant| &variant.replicas)
+            .filter(|replica| replica.device_id.as_deref() == Some("retained-client"))
+            .count(),
+        1
+    );
 
     manage_library_source(&pool, root_id, "remove")
         .await
@@ -232,6 +247,25 @@ async fn offline_and_retired_devices_keep_their_sources_and_files_manageable() {
     .expect("removed source files remain auditable");
     assert_eq!(removed.total, 1);
     assert_eq!(removed.items[0].presence_state, "removed");
+    let track_after_removal = track_detail(&pool, track_id)
+        .await
+        .expect("load track detail after source removal");
+    assert!(
+        track_after_removal.file_path.is_empty(),
+        "a removed primary file must not be exposed as a legacy source"
+    );
+    assert_eq!(
+        track_after_removal
+            .media
+            .as_ref()
+            .into_iter()
+            .flat_map(|media| &media.variants)
+            .flat_map(|variant| &variant.replicas)
+            .filter(|replica| replica.device_id.as_deref() == Some("retained-client"))
+            .count(),
+        0,
+        "removed sources must not remain in normal track availability"
+    );
 
     close_test_pool(pool, path).await;
 }

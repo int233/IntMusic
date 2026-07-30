@@ -213,8 +213,24 @@ pub async fn track_media_profile(
                   ON member.track_id = active_link.track_id
                 WHERE active_link.release_track_id = related_track.id
                   AND member.track_id IS NULL
-              )
+                )
         )
+          AND replica.availability_state NOT IN ('retired', 'ignored')
+          AND (
+              root.id IS NULL
+              OR (
+                  root.removed_at IS NULL
+                  AND root.retired_at IS NULL
+                  AND root.enabled = 1
+              )
+          )
+          AND (
+              device.id IS NULL
+              OR (
+                  device.removed_at IS NULL
+                  AND device.retired_at IS NULL
+              )
+          )
         ORDER BY replica.media_variant_id,
                  replica.is_primary DESC,
                  device_name,
@@ -702,11 +718,24 @@ pub async fn track_detail(pool: &DbPool, track_id: i64) -> Result<TrackDetail> {
         SELECT f.path, f.relative_path, f.extension, f.size_bytes, f.modified_at, f.scan_status
         FROM tracks t
         JOIN files f ON f.id = t.file_id
+        JOIN library_roots root ON root.id = f.library_root_id
+        LEFT JOIN devices device ON device.id = root.owner_device_id
         WHERE t.id = ?1
+          AND f.deleted_at IS NULL
+          AND root.enabled = 1
+          AND root.retired_at IS NULL
+          AND root.removed_at IS NULL
+          AND (
+              device.id IS NULL
+              OR (
+                  device.retired_at IS NULL
+                  AND device.removed_at IS NULL
+              )
+          )
         "#,
     )
     .bind(track_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
 
     let genres = sqlx::query(
@@ -757,41 +786,45 @@ pub async fn track_detail(pool: &DbPool, track_id: i64) -> Result<TrackDetail> {
     })
     .transpose()?;
 
+    let file_path = file_row
+        .as_ref()
+        .and_then(|row| row.try_get("path").ok())
+        .unwrap_or_default();
+    let relative_path = file_row
+        .as_ref()
+        .and_then(|row| row.try_get("relative_path").ok())
+        .unwrap_or_default();
+    let extension = file_row
+        .as_ref()
+        .and_then(|row| row.try_get("extension").ok())
+        .unwrap_or_default();
+    let size_bytes = file_row
+        .as_ref()
+        .and_then(|row| row.try_get("size_bytes").ok())
+        .unwrap_or_default();
+    let modified_at = file_row
+        .as_ref()
+        .and_then(|row| row.try_get::<String, _>("modified_at").ok())
+        .map(parse_datetime)
+        .transpose()?
+        .unwrap_or_else(Utc::now);
+    let scan_status = file_row
+        .as_ref()
+        .and_then(|row| row.try_get("scan_status").ok())
+        .unwrap_or_else(|| "missing".to_string());
+
     Ok(TrackDetail {
         track,
-        file_path: file_row.try_get("path")?,
-        relative_path: file_row.try_get("relative_path")?,
-        extension: file_row.try_get("extension")?,
-        size_bytes: file_row.try_get("size_bytes")?,
-        modified_at: parse_datetime(file_row.try_get::<String, _>("modified_at")?)?,
-        scan_status: file_row.try_get("scan_status")?,
+        file_path,
+        relative_path,
+        extension,
+        size_bytes,
+        modified_at,
+        scan_status,
         genres,
         composers,
         lyricists,
         lyrics,
         media: track_media_profile(pool, track_id).await?,
     })
-}
-
-pub(crate) async fn track_artist_role_names(
-    pool: &DbPool,
-    track_id: i64,
-    role: &str,
-) -> Result<Vec<String>> {
-    Ok(sqlx::query(
-        r#"
-        SELECT ar.name
-        FROM track_artists ta
-        JOIN artists ar ON ar.id = ta.artist_id
-        WHERE ta.track_id = ?1 AND ta.role = ?2
-        ORDER BY ta.position, ar.name
-        "#,
-    )
-    .bind(track_id)
-    .bind(role)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|row| row.try_get("name"))
-    .collect::<Result<Vec<String>, sqlx::Error>>()?)
 }

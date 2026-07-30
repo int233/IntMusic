@@ -71,6 +71,16 @@ extension _DashboardConnection on _CoreDashboardState {
             _mutate(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
             ClientLog.event('core.websocket.closed', level: 'warning');
+            unawaited(
+              Future<void>.delayed(
+                const Duration(milliseconds: 1200),
+                () async {
+                  if (mounted && _eventSocket == null) {
+                    await _failoverActiveCoreStreams('core_websocket_closed');
+                  }
+                },
+              ),
+            );
             _scheduleEventReconnect(requestPlaybackSync: true);
           }
         },
@@ -80,6 +90,16 @@ extension _DashboardConnection on _CoreDashboardState {
             _mutate(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
             ClientLog.error('core.websocket.error', error);
+            unawaited(
+              Future<void>.delayed(
+                const Duration(milliseconds: 1200),
+                () async {
+                  if (mounted && _eventSocket == null) {
+                    await _failoverActiveCoreStreams('core_websocket_error');
+                  }
+                },
+              ),
+            );
             _scheduleEventReconnect(requestPlaybackSync: true);
           }
         },

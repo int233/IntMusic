@@ -47,6 +47,13 @@ pub async fn manage_library_file(
             .bind(file_id)
             .execute(pool)
             .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'missing', updated_at = ?1 WHERE file_id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
             open_file_issue(
                 pool,
                 file_id,
@@ -65,7 +72,7 @@ pub async fn manage_library_file(
             .execute(pool)
             .await?;
             sqlx::query(
-                "UPDATE media_replicas SET availability_state = 'missing', updated_at = ?1 WHERE file_id = ?2",
+                "UPDATE media_replicas SET availability_state = 'retired', updated_at = ?1 WHERE file_id = ?2",
             )
             .bind(&now)
             .bind(file_id)

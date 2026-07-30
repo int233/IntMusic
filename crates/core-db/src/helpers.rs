@@ -1,5 +1,28 @@
 use super::*;
 
+pub(crate) async fn track_artist_role_names(
+    pool: &DbPool,
+    track_id: i64,
+    role: &str,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query(
+        r#"
+        SELECT ar.name
+        FROM track_artists ta
+        JOIN artists ar ON ar.id = ta.artist_id
+        WHERE ta.track_id = ?1 AND ta.role = ?2
+        ORDER BY ta.position, ar.name
+        "#,
+    )
+    .bind(track_id)
+    .bind(role)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| row.try_get("name"))
+    .collect::<Result<Vec<String>, sqlx::Error>>()?)
+}
+
 pub(crate) fn row_to_library_root(row: sqlx::sqlite::SqliteRow) -> Result<LibraryRoot> {
     Ok(LibraryRoot {
         id: row.try_get("id")?,
@@ -397,6 +420,7 @@ pub(crate) fn push_smart_rule(
             };
             push_bool_rule(query, expression, value)
         }
+        "library_source" | "source" => push_library_source_rule(query, &operator, value),
         _ => false,
     }
 }

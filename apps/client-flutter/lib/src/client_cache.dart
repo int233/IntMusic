@@ -458,6 +458,19 @@ class _ClientCacheStore {
     return _writeQueue;
   }
 
+  static Future<void> invalidateDetails(String coreUrl, String kind) {
+    final normalized = _normalizedCoreUrl(coreUrl);
+    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
+      final database = await _open();
+      await database.delete(
+        'cache_entries',
+        where: 'core_url = ? AND kind = ?',
+        whereArgs: <Object?>[normalized, '${kind}_detail'],
+      );
+    });
+    return _writeQueue;
+  }
+
   static Future<void> markDetailsForRefresh(
     String coreUrl,
     String serverId,

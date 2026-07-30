@@ -33,6 +33,13 @@ extension _DashboardRendererCommands on _CoreDashboardState {
   ) async {
     final action = command['action']?.toString();
     final outputId = command['target_output_id']?.toString() ?? _clientOutputId;
+    if (action == 'play' || action == 'resume') {
+      _desiredTransportStateByZone[outputId] = 'playing';
+    } else if (action == 'pause') {
+      _desiredTransportStateByZone[outputId] = 'paused';
+    } else if (action == 'stop') {
+      _desiredTransportStateByZone[outputId] = 'stopped';
+    }
     try {
       final intentId = command['intent_id']?.toString();
       if (intentId != null && _locallyAppliedPlaybackIntents.remove(intentId)) {

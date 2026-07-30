@@ -436,6 +436,7 @@ const _smartFields = [
   'favorite',
   'extension',
   'path',
+  'library_source',
 ];
 
 const _numericSmartFields = {'year', 'rating', 'duration_ms', 'tag_rating'};

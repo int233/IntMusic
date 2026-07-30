@@ -281,6 +281,10 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, DateTime> _optimisticLocalStartedAtByOutput =
       <String, DateTime>{};
   final Map<String, bool> _rendererLocalFileByOutput = <String, bool>{};
+  final Map<String, bool> _rendererPlayingByOutput = <String, bool>{};
+  final Map<String, int> _rendererAudioOperationDepthByOutput = <String, int>{};
+  final Map<String, Timer> _rendererFailoverTimers = <String, Timer>{};
+  final Set<String> _rendererFailoverBusy = <String>{};
   DateTime? _offlinePlaybackStartedAt;
   int _offlinePlaybackStartPositionMs = 0;
   List<dynamic> _playbackHistory = const [];
@@ -349,6 +353,9 @@ class _CoreDashboardState extends State<CoreDashboard>
     _eventHealthTimer?.cancel();
     _offlineReconnectTimer?.cancel();
     _searchDebounce?.cancel();
+    for (final timer in _rendererFailoverTimers.values) {
+      timer.cancel();
+    }
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
     for (final subscription in _audioCompleteSubscriptions.values) {

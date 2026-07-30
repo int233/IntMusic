@@ -56,11 +56,21 @@ extension _DashboardRendererAudio on _CoreDashboardState {
       _audioCompleteSubscriptions[outputId] = player.completed
           .where((completed) => completed)
           .listen((_) {
+            _rendererFailoverTimers.remove(outputId)?.cancel();
             unawaited(_handleOutputComplete(outputId).catchError((_) {}));
           });
       _audioPlayingSubscriptions[outputId] = player.playing.distinct().listen((
         playing,
       ) {
+        _rendererPlayingByOutput[outputId] = playing;
+        if (playing) {
+          _rendererFailoverTimers.remove(outputId)?.cancel();
+        } else {
+          _scheduleRendererSourceFailover(
+            outputId,
+            reason: 'core_stream_inactive',
+          );
+        }
         ClientLog.event(
           playing
               ? 'renderer.player.audio_started'
@@ -114,6 +124,10 @@ extension _DashboardRendererAudio on _CoreDashboardState {
     await playingSubscription?.cancel();
     final paramsSubscription = _audioParamsSubscriptions.remove(outputId);
     await paramsSubscription?.cancel();
+    _rendererFailoverTimers.remove(outputId)?.cancel();
+    _rendererPlayingByOutput.remove(outputId);
+    _rendererAudioOperationDepthByOutput.remove(outputId);
+    _rendererFailoverBusy.remove(outputId);
     final playerFuture = _audioPlayers.remove(outputId);
     if (playerFuture == null) {
       return;
@@ -135,6 +149,167 @@ extension _DashboardRendererAudio on _CoreDashboardState {
       return;
     }
     await _reportRendererState('stopped', outputId: outputId);
+  }
+
+  void _scheduleRendererSourceFailover(
+    String outputId, {
+    required String reason,
+    Duration delay = const Duration(milliseconds: 800),
+  }) {
+    if (_rendererLocalFileByOutput[outputId] == true ||
+        _rendererLoadedTrackByOutput[outputId] == null) {
+      return;
+    }
+    _rendererFailoverTimers.remove(outputId)?.cancel();
+    _rendererFailoverTimers[outputId] = Timer(delay, () {
+      _rendererFailoverTimers.remove(outputId);
+      unawaited(
+        _failoverRendererSource(
+          outputId,
+          reason: reason,
+          requireInactive: true,
+        ),
+      );
+    });
+  }
+
+  Future<void> _failoverActiveCoreStreams(
+    String reason, {
+    bool requireInactive = false,
+  }) async {
+    final outputs = _rendererLoadedTrackByOutput.keys
+        .where((outputId) => _rendererLocalFileByOutput[outputId] != true)
+        .toList(growable: false);
+    for (final outputId in outputs) {
+      await _failoverRendererSource(
+        outputId,
+        reason: reason,
+        requireInactive: requireInactive,
+      );
+    }
+  }
+
+  Future<bool> _failoverRendererSource(
+    String outputId, {
+    required String reason,
+    required bool requireInactive,
+  }) async {
+    if (_rendererFailoverBusy.contains(outputId) ||
+        (_rendererAudioOperationDepthByOutput[outputId] ?? 0) > 0 ||
+        _rendererLocalFileByOutput[outputId] == true ||
+        (requireInactive && _rendererPlayingByOutput[outputId] == true)) {
+      return false;
+    }
+    final trackId = _rendererLoadedTrackByOutput[outputId];
+    if (trackId == null) return false;
+    final desiredState =
+        _desiredTransportStateByZone[outputId] ??
+        _playback?['state']?.toString();
+    if (desiredState != 'playing' && desiredState != 'loading') {
+      return false;
+    }
+    final copy = await _availableOfflineCopy(trackId);
+    final path = copy == null
+        ? null
+        : _offlineCopyPath(copy, _clientLibraryRoots);
+    if (path == null || !await File(path).exists()) {
+      ClientLog.event(
+        'playback.failover.unavailable',
+        level: 'warning',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'output_id': outputId,
+          'reason': reason,
+        },
+      );
+      return false;
+    }
+
+    _rendererFailoverBusy.add(outputId);
+    final player = await _playerForOutput(outputId);
+    final positionMs =
+        await player.currentPositionMs() ??
+        _estimatedPlaybackPositionMs(
+          _rendererPlaybackByOutput[outputId] ?? _playback,
+        );
+    final durationMs = await player.durationMs();
+    if (durationMs != null &&
+        durationMs > 0 &&
+        durationMs - positionMs <= 1500) {
+      _rendererFailoverBusy.remove(outputId);
+      return false;
+    }
+    ClientLog.event(
+      'playback.failover.started',
+      level: 'warning',
+      data: <String, Object?>{
+        'track_id': trackId,
+        'output_id': outputId,
+        'position_ms': positionMs,
+        'reason': reason,
+      },
+    );
+    try {
+      await _runRendererAudioOperation(outputId, 'failover_stop', player.stop);
+      await _runRendererAudioOperation(
+        outputId,
+        'failover_open_local',
+        () => player.open(path, localFile: true),
+        timeout: const Duration(seconds: 6),
+      );
+      if (positionMs > 0) {
+        await _runRendererAudioOperation(
+          outputId,
+          'failover_seek',
+          () => player.seek(Duration(milliseconds: positionMs)),
+        );
+      }
+      _rendererLocalFileByOutput[outputId] = true;
+      _rendererPlayingByOutput[outputId] = true;
+      final previous = _rendererPlaybackByOutput[outputId] ?? _playback;
+      final playback = _withPlaybackTimestamp(<String, dynamic>{
+        ...?previous,
+        'zone_id': outputId,
+        'state': 'playing',
+        'track_id': trackId,
+        'position_ms': positionMs,
+      });
+      _rendererPlaybackByOutput[outputId] = playback;
+      if (mounted) {
+        _mutatePlayback(() {
+          _applyPlayback(playback);
+          _rendererStatus = _tr(
+            context,
+            'Weak connection · switched to local copy',
+          );
+        });
+      }
+      ClientLog.event(
+        'playback.failover.completed',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'output_id': outputId,
+          'position_ms': positionMs,
+          'reason': reason,
+        },
+      );
+      return true;
+    } catch (error, stackTrace) {
+      ClientLog.error(
+        'playback.failover.failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'track_id': trackId,
+          'output_id': outputId,
+          'position_ms': positionMs,
+          'reason': reason,
+        },
+      );
+      return false;
+    } finally {
+      _rendererFailoverBusy.remove(outputId);
+    }
   }
 
   bool _isClientOutputId(String? outputId) =>
