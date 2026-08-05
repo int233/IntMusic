@@ -164,9 +164,15 @@ class _PlaybackBar extends StatelessWidget {
     // On a weak link the track can already be playing from a local copy while
     // its detail payload is still loading.
     final canNavigate = hasTrack;
+    final compactScreen = MediaQuery.sizeOf(context).width < 560;
 
     final bar = Padding(
-      padding: const EdgeInsets.fromLTRB(10, 0, 10, 10),
+      padding: EdgeInsets.fromLTRB(
+        compactScreen ? 8 : 10,
+        0,
+        compactScreen ? 8 : 10,
+        compactScreen ? 6 : 10,
+      ),
       child: IntMusicGlass(
         blur: 26,
         borderRadius: BorderRadius.circular(18),
@@ -174,7 +180,12 @@ class _PlaybackBar extends StatelessWidget {
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOutCubic,
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+            padding: EdgeInsets.fromLTRB(
+              compactScreen ? 10 : 14,
+              compactScreen ? 4 : 8,
+              compactScreen ? 10 : 14,
+              compactScreen ? 4 : 8,
+            ),
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final width = constraints.maxWidth;
@@ -384,11 +395,11 @@ class _PlaybackBar extends StatelessWidget {
                 }
 
                 return SizedBox(
-                  height: 112,
+                  height: tight ? 92 : 104,
                   child: Column(
                     children: [
                       topRow,
-                      const SizedBox(height: 4),
+                      SizedBox(height: tight ? 0 : 2),
                       Expanded(child: progress),
                     ],
                   ),

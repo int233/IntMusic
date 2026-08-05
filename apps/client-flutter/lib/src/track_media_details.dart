@@ -288,7 +288,9 @@ class _MediaVariantRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
-    final master = _asMap(variant['master']);
+    final master = variant['master'] is Map
+        ? _asMap(variant['master'])
+        : <String, dynamic>{};
     final replicas = (variant['replicas'] as List? ?? const [])
         .map((item) => (item as Map).cast<String, dynamic>())
         .toList();
@@ -410,7 +412,13 @@ class _MediaVariantRow extends StatelessWidget {
                 children: [
                   Icon(Icons.cloud_off_outlined, color: tokens.textSecondary),
                   const SizedBox(width: 9),
-                  Text(_tr(context, 'No physical copies are available')),
+                  Expanded(
+                    child: Text(
+                      _tr(context, 'No physical copies are available'),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 ],
               ),
             ),

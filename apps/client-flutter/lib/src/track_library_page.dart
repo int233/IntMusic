@@ -708,6 +708,11 @@ class _TrackActions extends StatefulWidget {
 class _TrackActionsState extends State<_TrackActions> {
   bool? _favoriteOverride;
 
+  Future<void> _toggleFavorite(bool favorite) async {
+    setState(() => _favoriteOverride = !favorite);
+    await widget.onToggleFavorite(widget.track);
+  }
+
   @override
   void didUpdateWidget(covariant _TrackActions oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -722,17 +727,92 @@ class _TrackActionsState extends State<_TrackActions> {
     final favorite = _favoriteOverride ?? widget.track['is_favorite'] == true;
     final trackId = _intValue(widget.track['id']);
     final queueActions = _TrackActionScope.maybeOf(context);
+    final condensed = widget.compact && MediaQuery.sizeOf(context).width < 560;
     final hasMoreActions =
         widget.onAddToPlaylist != null ||
         (trackId != null && queueActions != null);
+    if (condensed) {
+      final actions = <Widget>[
+        PopupMenuButton<_TrackMoreAction>(
+          tooltip: _tr(context, 'More'),
+          icon: const Icon(Icons.more_horiz),
+          onSelected: (action) {
+            switch (action) {
+              case _TrackMoreAction.toggleFavorite:
+                unawaited(_toggleFavorite(favorite));
+              case _TrackMoreAction.playNext:
+                unawaited(queueActions!.onPlayNext(trackId!));
+              case _TrackMoreAction.addToQueue:
+                unawaited(queueActions!.onAddToQueue(trackId!));
+              case _TrackMoreAction.addToPlaylist:
+                widget.onAddToPlaylist?.call();
+              case _TrackMoreAction.distribute:
+                unawaited(queueActions!.onDistributeCollection([trackId!]));
+            }
+          },
+          itemBuilder: (context) => [
+            PopupMenuItem(
+              value: _TrackMoreAction.toggleFavorite,
+              child: ListTile(
+                leading: Icon(
+                  favorite ? Icons.favorite : Icons.favorite_border,
+                ),
+                title: Text(favorite ? 'Unfavorite' : 'Favorite'),
+              ),
+            ),
+            if (trackId != null && queueActions != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.playNext,
+                child: ListTile(
+                  leading: const Icon(Icons.playlist_play),
+                  title: Text(_tr(context, 'Play next')),
+                ),
+              ),
+            if (trackId != null && queueActions != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.addToQueue,
+                child: ListTile(
+                  leading: const Icon(Icons.queue_music),
+                  title: Text(_tr(context, 'Add to queue')),
+                ),
+              ),
+            if (widget.onAddToPlaylist != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.addToPlaylist,
+                child: ListTile(
+                  leading: const Icon(Icons.playlist_add),
+                  title: Text(_tr(context, 'Add to playlist')),
+                ),
+              ),
+            if (trackId != null && queueActions != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.distribute,
+                child: ListTile(
+                  leading: const Icon(Icons.send_to_mobile_outlined),
+                  title: Text(_tr(context, 'Distribute to device')),
+                ),
+              ),
+          ],
+        ),
+        if (widget.onPlay != null)
+          _AppTooltip(
+            message: 'Play',
+            child: IconButton(
+              onPressed: widget.onPlay,
+              icon: const Icon(Icons.play_arrow),
+            ),
+          ),
+      ];
+      return SizedBox(
+        width: actions.length * 48.0,
+        child: Row(mainAxisAlignment: MainAxisAlignment.end, children: actions),
+      );
+    }
     final actions = <Widget>[
       _AppTooltip(
         message: favorite ? 'Unfavorite' : 'Favorite',
         child: IconButton(
-          onPressed: () async {
-            setState(() => _favoriteOverride = !favorite);
-            await widget.onToggleFavorite(widget.track);
-          },
+          onPressed: () => unawaited(_toggleFavorite(favorite)),
           icon: Icon(favorite ? Icons.favorite : Icons.favorite_border),
         ),
       ),
@@ -742,6 +822,8 @@ class _TrackActionsState extends State<_TrackActions> {
           icon: const Icon(Icons.more_horiz),
           onSelected: (action) {
             switch (action) {
+              case _TrackMoreAction.toggleFavorite:
+                unawaited(_toggleFavorite(favorite));
               case _TrackMoreAction.playNext:
                 unawaited(queueActions!.onPlayNext(trackId!));
               case _TrackMoreAction.addToQueue:
@@ -804,7 +886,13 @@ class _TrackActionsState extends State<_TrackActions> {
   }
 }
 
-enum _TrackMoreAction { playNext, addToQueue, addToPlaylist, distribute }
+enum _TrackMoreAction {
+  toggleFavorite,
+  playNext,
+  addToQueue,
+  addToPlaylist,
+  distribute,
+}
 
 int _compareLibraryText(
   Object? a,
