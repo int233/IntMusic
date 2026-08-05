@@ -22,6 +22,7 @@ import 'package:sqflite/sqflite.dart' as mobile_sqlite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/navigation_history.dart';
+import 'core/artwork_cache_coordinator.dart';
 import 'core/json_values.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
@@ -65,6 +66,7 @@ part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
 part 'src/track_detail_sheet.dart';
 part 'src/track_media_details.dart';
+part 'src/track_availability.dart';
 part 'src/track_version_manager.dart';
 part 'src/artist_editor.dart';
 part 'src/artist_editor_sections.dart';
@@ -83,6 +85,7 @@ part 'src/platform_integration.dart';
 part 'src/renderer_audio.dart';
 part 'src/dashboard_bootstrap.dart';
 part 'src/dashboard_navigation.dart';
+part 'src/dashboard_artwork_cache.dart';
 part 'src/dashboard_sync.dart';
 part 'src/dashboard_renderer_devices.dart';
 part 'src/dashboard_distribution.dart';
@@ -116,7 +119,7 @@ final CacheManager _artworkCacheManager = CacheManager(
   Config(
     'intmusicArtworkCache',
     stalePeriod: const Duration(days: 60),
-    maxNrOfCacheObjects: Platform.isAndroid ? 2500 : 8000,
+    maxNrOfCacheObjects: Platform.isAndroid ? 4000 : 8000,
   ),
 );
 
@@ -247,6 +250,9 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<int, Map<String, dynamic>> _albumDetailCache = {};
   final Map<int, Map<String, dynamic>> _artistDetailCache = {};
   final Map<int, Map<String, dynamic>> _playlistDetailCache = {};
+  final Map<int, Map<String, dynamic>> _trackAvailabilityById = {};
+  final Map<int, double> _playlistScrollOffsets = <int, double>{};
+  String? _trackAvailabilityPresenceSignature;
   final Map<String, Map<String, dynamic>> _searchResultCache = {};
   Map<String, dynamic>? _playbackStats;
   int? _activeTrackDetailId;
@@ -269,6 +275,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   int _cacheCursor = 0;
   bool _backgroundSyncBusy = false;
   bool _detailWarmupBusy = false;
+  bool _artworkWarmupBusy = false;
+  bool _artworkWarmupRequested = false;
   bool _zoneRefreshBusy = false;
   bool _eventConnectBusy = false;
   int _backgroundSyncTicks = 0;

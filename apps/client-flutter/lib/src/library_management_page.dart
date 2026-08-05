@@ -298,7 +298,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
       final preview = _asMap(
         await _api.postBulkJson(
           '/library-management/tracks/auto-merge/preview',
-          const <String, dynamic>{'limit': 200},
+          const <String, dynamic>{'limit': 500},
         ),
       );
       if (!mounted) return;

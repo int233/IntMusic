@@ -757,3 +757,61 @@ async fn merge_user_track_state(
     }
     Ok(())
 }
+
+pub(crate) async fn preserve_recording_user_state(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    recording_id: i64,
+    now: &str,
+) -> Result<()> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+            MIN(links.track_id) AS canonical_track_id,
+            MAX(COALESCE(state.is_favorite, 0)) AS is_favorite,
+            MAX(state.user_rating) AS user_rating
+        FROM legacy_track_catalog_links links
+        JOIN release_tracks release_track
+          ON release_track.id = links.release_track_id
+        LEFT JOIN track_merge_members member ON member.track_id = links.track_id
+        LEFT JOIN user_track_state state ON state.track_id = links.track_id
+        WHERE release_track.recording_id = ?1
+          AND member.track_id IS NULL
+        "#,
+    )
+    .bind(recording_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    let canonical_track_id: Option<i64> = row.try_get("canonical_track_id")?;
+    let is_favorite: i64 = row.try_get("is_favorite")?;
+    let user_rating: Option<i64> = row.try_get("user_rating")?;
+    let Some(canonical_track_id) = canonical_track_id else {
+        return Ok(());
+    };
+    if is_favorite == 0 && user_rating.is_none() {
+        return Ok(());
+    }
+    sqlx::query(
+        r#"
+        INSERT INTO user_track_state (
+            track_id, is_favorite, user_rating, rating_source,
+            favorite_updated_at, rating_updated_at, created_at, updated_at
+        )
+        VALUES (?1, ?2, ?3, 'recording_link', ?4, ?4, ?4, ?4)
+        ON CONFLICT(track_id) DO UPDATE SET
+            is_favorite = MAX(user_track_state.is_favorite, excluded.is_favorite),
+            user_rating = COALESCE(
+                MAX(user_track_state.user_rating, excluded.user_rating),
+                user_track_state.user_rating,
+                excluded.user_rating
+            ),
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(canonical_track_id)
+    .bind(is_favorite)
+    .bind(user_rating)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}

@@ -426,6 +426,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
   void _applyPlaybackQueue(Map<String, dynamic> queue) {
     _playbackQueue = queue;
     _playbackMode = _PlaybackMode.fromApi(queue['mode']?.toString());
+    _decoratePlaybackQueueAvailability();
   }
 
   List<Map<String, dynamic>> _queueItems() =>

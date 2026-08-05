@@ -79,6 +79,22 @@ extension _DashboardSync on _CoreDashboardState {
         'position_ms': 0,
       },
     );
+    final availableLocalTrackIds = <int>{};
+    final localCopies = _offlineLibrary.distinctTracks.toList(growable: false);
+    for (var start = 0; start < localCopies.length; start += 32) {
+      final end = min(start + 32, localCopies.length);
+      final availability = await Future.wait(
+        localCopies.sublist(start, end).map((copy) async {
+          final path = _offlineCopyPath(copy, _clientLibraryRoots);
+          return path != null && await File(path).exists();
+        }),
+      );
+      for (var index = 0; index < availability.length; index += 1) {
+        if (availability[index]) {
+          availableLocalTrackIds.add(localCopies[start + index].trackId);
+        }
+      }
+    }
     final localTracks = <int, Map<String, dynamic>>{
       for (final value in _offlineTrackSummaries(
         _offlineLibrary,
@@ -101,7 +117,9 @@ extension _DashboardSync on _CoreDashboardState {
             'is_favorite': local['is_favorite'] ?? cached['is_favorite'],
             'play_count': local['play_count'] ?? cached['play_count'],
             '_offline': true,
-            '_local_available': true,
+            '_local_available': availableLocalTrackIds.contains(
+              _intValue(cached['id']),
+            ),
           };
         })
         .toList(growable: true);
@@ -116,7 +134,7 @@ extension _DashboardSync on _CoreDashboardState {
           .map(
             (entry) => <String, dynamic>{
               ...entry.value,
-              '_local_available': true,
+              '_local_available': availableLocalTrackIds.contains(entry.key),
               '_metadata_pending': true,
             },
           ),
@@ -187,6 +205,7 @@ extension _DashboardSync on _CoreDashboardState {
         'treat_max_rating_as_favorite': true,
         'write_rating_on_favorite': false,
       };
+      _refreshTrackAvailabilityProjection();
     });
     final activeOutput = _offlineOutputForZone(offlineSelectedOutput);
     if (_rendererLocalFileByOutput[activeOutput] == true &&
@@ -292,6 +311,7 @@ extension _DashboardSync on _CoreDashboardState {
     // the larger metadata/cache refresh that follows.
     _startRendererHeartbeat();
     final serverId = status['server_id']?.toString() ?? '';
+    artworkCacheCoordinator.registerServer(serverId);
     final syncSnapshot = await _fetchSyncSnapshot(
       status,
       force: _cacheServerId != serverId || _tracks.isEmpty,
@@ -373,8 +393,10 @@ extension _DashboardSync on _CoreDashboardState {
         _rendererLoadedTrackByOutput[continuingOutputId] != null;
     if (wasOffline) {
       await _finishOfflinePlayback('reconnected');
+      artworkCacheCoordinator.retryFailedImages();
     }
     _offlineMode = false;
+    _refreshTrackAvailabilityProjection();
     _offlineReconnectTimer?.cancel();
     _offlineReconnectFailures = 0;
     _startRendererHeartbeat();
@@ -443,6 +465,7 @@ extension _DashboardSync on _CoreDashboardState {
       if (_playbackQueue != null) 'playback_queue': _playbackQueue,
     });
     unawaited(_warmDetailCache());
+    unawaited(_warmOfflineArtworkCache());
   }
 
   Future<Map<String, dynamic>?> _fetchSyncSnapshot(
@@ -645,10 +668,10 @@ extension _DashboardSync on _CoreDashboardState {
     var retryPending = false;
     try {
       for (final kind in const <String>[
+        'track',
         'artist',
         'album',
         'playlist',
-        'track',
       ]) {
         if (!_detailRefreshScopes.contains(kind)) continue;
         final target = switch (kind) {
@@ -716,8 +739,14 @@ extension _DashboardSync on _CoreDashboardState {
         _detailWarmAfterIds.remove(kind);
         _detailWarmTargetCursors.remove(kind);
         _detailRefreshScopes.remove(kind);
+        if (kind == 'track' && mounted) {
+          _mutate(() => _refreshTrackAvailabilityProjection());
+        }
       }
-      if (mounted) _mutate(() {});
+      if (mounted) {
+        _mutate(() => _refreshTrackAvailabilityProjection());
+      }
+      unawaited(_warmOfflineArtworkCache());
     } on HttpException catch (error) {
       // A 404 means an older Core: details are then cached on first visit.
       // Transient HTTP failures keep their durable cursor and retry later.

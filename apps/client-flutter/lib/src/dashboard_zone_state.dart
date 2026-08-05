@@ -6,8 +6,6 @@ extension _DashboardZoneState on _CoreDashboardState {
     return ((zone?['volume'] as num?)?.toDouble() ?? 1.0).clamp(0.0, 1.0);
   }
 
-  bool _activeZoneMuted() => _zoneById(_activeZoneId())?['muted'] == true;
-
   String _activeZoneVolumeMode() =>
       _zoneById(_activeZoneId())?['volume_mode']?.toString() == 'system'
       ? 'system'
@@ -34,31 +32,13 @@ extension _DashboardZoneState on _CoreDashboardState {
     return zone?[key] == true;
   }
 
-  Future<void> _setActiveZoneVolumeMode(String mode) async {
-    final normalizedMode = mode == 'system' ? 'system' : 'player';
-    if (normalizedMode == 'system' && !_activeZoneSystemVolumeSupported()) {
-      return;
-    }
-    if (normalizedMode == 'system') {
-      final localOutputId = _clientOutputForZone(_activeZoneId());
-      if (localOutputId != null) {
-        final current = await _readSystemVolumeForOutput(localOutputId);
-        if (current.supported && current.writable) {
-          await _setActiveZoneVolume(
-            current.volume,
-            muted: current.muted,
-            mode: normalizedMode,
-          );
-          return;
-        }
-      }
-    }
-    await _setActiveZoneVolume(
-      _activeZoneVolumeForMode(normalizedMode),
-      muted: _activeZoneMutedForMode(normalizedMode),
-      mode: normalizedMode,
-    );
-  }
+  _DualVolumeState _activeZoneDualVolumeState() => _DualVolumeState(
+    playerVolume: _activeZoneVolumeForMode('player'),
+    playerMuted: _activeZoneMutedForMode('player'),
+    systemVolume: _activeZoneVolumeForMode('system'),
+    systemMuted: _activeZoneMutedForMode('system'),
+    systemVolumeSupported: _activeZoneSystemVolumeSupported(),
+  );
 
   Future<void> _setActiveZoneVolume(
     double volume, {

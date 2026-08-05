@@ -106,10 +106,7 @@ class _PlaybackBar extends StatelessWidget {
     required this.trackDetail,
     required this.targetLabel,
     required this.playbackMode,
-    required this.volume,
-    required this.muted,
-    required this.volumeMode,
-    required this.systemVolumeSupported,
+    required this.volumeState,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
@@ -117,7 +114,6 @@ class _PlaybackBar extends StatelessWidget {
     required this.onSeek,
     required this.onVolumeChanged,
     required this.onToggleMute,
-    required this.onVolumeModeChanged,
     required this.onCycleMode,
     required this.onShowModeMenu,
     required this.onShowQueue,
@@ -134,18 +130,14 @@ class _PlaybackBar extends StatelessWidget {
   final Map<String, dynamic>? trackDetail;
   final String targetLabel;
   final _PlaybackMode playbackMode;
-  final double volume;
-  final bool muted;
-  final String volumeMode;
-  final bool systemVolumeSupported;
+  final _DualVolumeState volumeState;
   final VoidCallback onResume;
   final VoidCallback onPause;
   final VoidCallback onPrevious;
   final VoidCallback onNext;
   final Future<void> Function(int) onSeek;
-  final ValueChanged<double> onVolumeChanged;
-  final VoidCallback onToggleMute;
-  final ValueChanged<String> onVolumeModeChanged;
+  final void Function(String mode, double volume) onVolumeChanged;
+  final ValueChanged<String> onToggleMute;
   final VoidCallback onCycleMode;
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
@@ -330,14 +322,10 @@ class _PlaybackBar extends StatelessWidget {
                     if (showVolumeInline) ...[
                       const SizedBox(width: 4),
                       _VolumeControl(
-                        volume: volume,
-                        muted: muted,
-                        mode: volumeMode,
-                        systemVolumeSupported: systemVolumeSupported,
+                        state: volumeState,
                         targetLabel: targetLabel,
                         onChanged: onVolumeChanged,
                         onToggleMute: onToggleMute,
-                        onModeChanged: onVolumeModeChanged,
                       ),
                     ],
                     if (!showModeInline || !showDeviceInline)
@@ -430,31 +418,39 @@ class _PlaybackBar extends StatelessWidget {
   }
 }
 
-class _VolumeControl extends StatelessWidget {
-  const _VolumeControl({
-    required this.volume,
-    required this.muted,
-    required this.onChanged,
-    required this.onToggleMute,
-    this.mode = 'player',
-    this.systemVolumeSupported = false,
-    this.targetLabel,
-    this.onModeChanged,
+class _DualVolumeState {
+  const _DualVolumeState({
+    required this.playerVolume,
+    required this.playerMuted,
+    required this.systemVolume,
+    required this.systemMuted,
+    required this.systemVolumeSupported,
   });
 
-  final double volume;
-  final bool muted;
-  final ValueChanged<double> onChanged;
-  final VoidCallback onToggleMute;
-  final String mode;
+  final double playerVolume;
+  final bool playerMuted;
+  final double systemVolume;
+  final bool systemMuted;
   final bool systemVolumeSupported;
+}
+
+class _VolumeControl extends StatelessWidget {
+  const _VolumeControl({
+    required this.state,
+    required this.onChanged,
+    required this.onToggleMute,
+    this.targetLabel,
+  });
+
+  final _DualVolumeState state;
+  final void Function(String mode, double volume) onChanged;
+  final ValueChanged<String> onToggleMute;
   final String? targetLabel;
-  final ValueChanged<String>? onModeChanged;
 
   @override
   Widget build(BuildContext context) {
-    final value = volume.clamp(0.0, 1.0);
-    final icon = muted || value <= 0.001
+    final value = state.playerVolume.clamp(0.0, 1.0);
+    final icon = state.playerMuted || value <= 0.001
         ? Icons.volume_off_rounded
         : value < 0.5
         ? Icons.volume_down_rounded
@@ -467,17 +463,13 @@ class _VolumeControl extends StatelessWidget {
             _showAnchoredPopup<void>(
               context: buttonContext,
               anchorContext: buttonContext,
-              width: 248,
+              width: 286,
               maxHeight: 360,
               child: _VerticalVolumePanel(
-                volume: value,
-                muted: muted,
-                mode: mode,
-                systemVolumeSupported: systemVolumeSupported,
+                state: state,
                 targetLabel: targetLabel,
                 onChanged: onChanged,
                 onToggleMute: onToggleMute,
-                onModeChanged: onModeChanged,
               ),
             ),
           ),
@@ -490,38 +482,115 @@ class _VolumeControl extends StatelessWidget {
 
 class _VerticalVolumePanel extends StatefulWidget {
   const _VerticalVolumePanel({
-    required this.volume,
-    required this.muted,
+    required this.state,
     required this.onChanged,
     required this.onToggleMute,
-    required this.mode,
-    required this.systemVolumeSupported,
     this.targetLabel,
-    this.onModeChanged,
   });
 
-  final double volume;
-  final bool muted;
-  final ValueChanged<double> onChanged;
-  final VoidCallback onToggleMute;
-  final String mode;
-  final bool systemVolumeSupported;
+  final _DualVolumeState state;
+  final void Function(String mode, double volume) onChanged;
+  final ValueChanged<String> onToggleMute;
   final String? targetLabel;
-  final ValueChanged<String>? onModeChanged;
 
   @override
   State<_VerticalVolumePanel> createState() => _VerticalVolumePanelState();
 }
 
 class _VerticalVolumePanelState extends State<_VerticalVolumePanel> {
-  late double _value = widget.volume.clamp(0.0, 1.0);
-  late bool _muted = widget.muted;
+  late double _playerValue = widget.state.playerVolume.clamp(0.0, 1.0);
+  late bool _playerMuted = widget.state.playerMuted;
+  late double _systemValue = widget.state.systemVolume.clamp(0.0, 1.0);
+  late bool _systemMuted = widget.state.systemMuted;
 
-  IconData get _icon => _muted || _value <= 0.001
+  IconData _volumeIcon(double value, bool muted) => muted || value <= 0.001
       ? Icons.volume_off_rounded
-      : _value < 0.5
+      : value < 0.5
       ? Icons.volume_down_rounded
       : Icons.volume_up_rounded;
+
+  Widget _channel(
+    BuildContext context, {
+    required String mode,
+    required String label,
+    required IconData channelIcon,
+    required double value,
+    required bool muted,
+    required bool enabled,
+  }) {
+    final theme = IntMusicTheme.of(context);
+    return Expanded(
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 160),
+        opacity: enabled ? 1 : 0.48,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(channelIcon, size: 18, color: theme.accent),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(
+                context,
+              ).textTheme.labelMedium?.copyWith(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              '${(value * 100).round()}%',
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: theme.textSecondary,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+            const SizedBox(height: 2),
+            SizedBox(
+              height: 132,
+              child: RotatedBox(
+                quarterTurns: 3,
+                child: Slider(
+                  value: value,
+                  onChanged: enabled
+                      ? (next) => setState(() {
+                          if (mode == 'system') {
+                            _systemValue = next;
+                            if (next > 0.001) _systemMuted = false;
+                          } else {
+                            _playerValue = next;
+                            if (next > 0.001) _playerMuted = false;
+                          }
+                        })
+                      : null,
+                  onChangeEnd: enabled
+                      ? (next) => widget.onChanged(mode, next)
+                      : null,
+                ),
+              ),
+            ),
+            _AppTooltip(
+              message: _tr(context, muted ? 'Unmute' : 'Mute'),
+              child: IconButton(
+                onPressed: enabled
+                    ? () {
+                        setState(() {
+                          if (mode == 'system') {
+                            _systemMuted = !_systemMuted;
+                          } else {
+                            _playerMuted = !_playerMuted;
+                          }
+                        });
+                        widget.onToggleMute(mode);
+                      }
+                    : null,
+                icon: Icon(_volumeIcon(value, muted)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -542,75 +611,45 @@ class _VerticalVolumePanelState extends State<_VerticalVolumePanel> {
             ),
             const SizedBox(height: 10),
           ],
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<String>(
-              showSelectedIcon: false,
-              segments: <ButtonSegment<String>>[
-                ButtonSegment<String>(
-                  value: 'player',
-                  icon: const Icon(Icons.graphic_eq_rounded, size: 17),
-                  label: Text(_tr(context, 'Player')),
-                ),
-                ButtonSegment<String>(
-                  value: 'system',
-                  enabled: widget.systemVolumeSupported,
-                  icon: const Icon(Icons.computer_rounded, size: 17),
-                  label: Text(_tr(context, 'System')),
-                ),
-              ],
-              selected: <String>{widget.mode == 'system' ? 'system' : 'player'},
-              onSelectionChanged: widget.onModeChanged == null
-                  ? null
-                  : (selection) {
-                      final mode = selection.first;
-                      if (mode == widget.mode) return;
-                      widget.onModeChanged!(mode);
-                      Navigator.of(context).maybePop();
-                    },
-            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _channel(
+                context,
+                mode: 'player',
+                label: _tr(context, 'Player'),
+                channelIcon: Icons.graphic_eq_rounded,
+                value: _playerValue,
+                muted: _playerMuted,
+                enabled: true,
+              ),
+              Container(
+                width: 1,
+                height: 206,
+                margin: const EdgeInsets.symmetric(horizontal: 8),
+                color: IntMusicTheme.of(context).stroke,
+              ),
+              _channel(
+                context,
+                mode: 'system',
+                label: _tr(context, 'System'),
+                channelIcon: Icons.speaker_outlined,
+                value: _systemValue,
+                muted: _systemMuted,
+                enabled: widget.state.systemVolumeSupported,
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          Text(
-            '${(_value * 100).round()}%',
-            style: Theme.of(
-              context,
-            ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
-          ),
-          Text(
-            _tr(context, widget.mode == 'system' ? 'System' : 'Player'),
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: IntMusicTheme.of(context).textSecondary,
-            ),
-          ),
-          const SizedBox(height: 4),
-          SizedBox(
-            height: 125,
-            child: RotatedBox(
-              quarterTurns: 3,
-              child: Slider(
-                value: _value,
-                onChanged: (next) => setState(() {
-                  _value = next;
-                  if (next > 0.001) {
-                    _muted = false;
-                  }
-                }),
-                onChangeEnd: widget.onChanged,
+          if (!widget.state.systemVolumeSupported) ...[
+            const SizedBox(height: 4),
+            Text(
+              _tr(context, 'System volume is unavailable for this output'),
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: IntMusicTheme.of(context).textSecondary,
               ),
             ),
-          ),
-          const SizedBox(height: 2),
-          _AppTooltip(
-            message: _tr(context, _muted ? 'Unmute' : 'Mute'),
-            child: IconButton(
-              onPressed: () {
-                setState(() => _muted = !_muted);
-                widget.onToggleMute();
-              },
-              icon: Icon(_icon),
-            ),
-          ),
+          ],
         ],
       ),
     );

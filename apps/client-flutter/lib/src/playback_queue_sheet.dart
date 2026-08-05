@@ -26,9 +26,26 @@ class _QueueSheet extends StatefulWidget {
 }
 
 class _QueueSheetState extends State<_QueueSheet> {
+  static const _rowExtent = 64.0;
+
   late List<Map<String, dynamic>> _items = widget.items;
   late int? _currentIndex = widget.currentIndex;
+  late final ScrollController _scrollController;
   bool _mutating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController(
+      initialScrollOffset: max(0, (widget.currentIndex ?? 0) - 2) * _rowExtent,
+    );
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   void _applyQueue(Map<String, dynamic> queue) {
     _items = ((queue['items'] as List?) ?? const [])
@@ -138,6 +155,8 @@ class _QueueSheetState extends State<_QueueSheet> {
               child: _items.isEmpty
                   ? Center(child: Text(_tr(context, 'No upcoming tracks')))
                   : ReorderableListView.builder(
+                      scrollController: _scrollController,
+                      itemExtent: _rowExtent,
                       buildDefaultDragHandles: false,
                       onReorderItem: (oldIndex, newIndex) =>
                           unawaited(_move(oldIndex, newIndex)),
@@ -187,6 +206,11 @@ class _QueueSheetState extends State<_QueueSheet> {
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                _TrackAvailabilityBadge(
+                                  track: track,
+                                  compact: true,
+                                ),
+                                const SizedBox(width: 4),
                                 IconButton(
                                   onPressed: itemId == null || _mutating
                                       ? null

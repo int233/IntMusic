@@ -165,6 +165,16 @@ async fn exact_duplicate_scan_previews_and_merges_device_or_encoding_copies() {
         .execute(&pool)
         .await
         .expect("allow a small encoding duration difference");
+    set_track_favorite(
+        &pool,
+        second,
+        TrackFavoriteUpdate {
+            is_favorite: true,
+            user_rating: Some(100),
+        },
+    )
+    .await
+    .expect("favorite a duplicate source");
 
     let preview = preview_exact_track_merges(&pool, Some(100))
         .await
@@ -189,20 +199,48 @@ async fn exact_duplicate_scan_previews_and_merges_device_or_encoding_copies() {
     assert_eq!(merged.merged_groups, 1);
     assert_eq!(merged.merged_tracks, 1);
     assert!(merged.failures.is_empty());
-    assert_eq!(
-        list_tracks(&pool, 100, 0)
-            .await
-            .expect("folded songs")
-            .iter()
-            .filter(|track| track.title == "Exact song")
-            .count(),
-        1
-    );
+    let folded = list_tracks(&pool, 100, 0).await.expect("folded songs");
+    let songs = folded
+        .iter()
+        .filter(|track| track.title == "Exact song")
+        .collect::<Vec<_>>();
+    assert_eq!(songs.len(), 1);
+    assert!(songs[0].is_favorite);
+    assert_eq!(songs[0].user_rating, Some(100));
     assert!(preview_exact_track_merges(&pool, Some(100))
         .await
         .expect("rescan exact copies")
         .groups
         .is_empty());
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicate_scan_includes_historical_removed_copies() {
+    let (pool, path) = test_pool().await;
+    let retained = ingest_test_track(&pool, "retained.flac", "Album", "Song").await;
+    let removed = ingest_test_track(&pool, "removed.flac", "Album", "Song").await;
+    let removed_file_id: i64 = sqlx::query_scalar("SELECT file_id FROM tracks WHERE id = ?1")
+        .bind(removed)
+        .fetch_one(&pool)
+        .await
+        .expect("removed file");
+    sqlx::query("UPDATE files SET deleted_at = ?1 WHERE id = ?2")
+        .bind(Utc::now().to_rfc3339())
+        .bind(removed_file_id)
+        .execute(&pool)
+        .await
+        .expect("retain removed inventory record");
+
+    let preview = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("preview duplicates with removed copies");
+    let group = preview.groups.first().expect("duplicate group");
+    let members = std::iter::once(group.target_track_id)
+        .chain(group.source_track_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(members, BTreeSet::from([retained, removed]));
 
     close_test_pool(pool, path).await;
 }

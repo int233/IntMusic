@@ -397,14 +397,25 @@ class _ArtistHero extends StatelessWidget {
                 ),
               ),
               if (heroUrl != null)
-                CachedNetworkImage(
-                  cacheManager: _artworkCacheManager,
-                  imageUrl: heroUrl,
-                  fit: BoxFit.cover,
-                  memCacheWidth: heroCacheWidth,
-                  filterQuality: FilterQuality.medium,
-                  fadeInDuration: const Duration(milliseconds: 220),
-                  errorWidget: (context, url, error) => const SizedBox.shrink(),
+                ValueListenableBuilder<int>(
+                  valueListenable: artworkCacheCoordinator.retryRevision,
+                  builder: (context, retryRevision, child) {
+                    return CachedNetworkImage(
+                      key: ValueKey(
+                        '${artworkCacheCoordinator.cacheKey(heroUrl)}:'
+                        '$retryRevision',
+                      ),
+                      cacheManager: _artworkCacheManager,
+                      cacheKey: artworkCacheCoordinator.cacheKey(heroUrl),
+                      imageUrl: heroUrl,
+                      fit: BoxFit.cover,
+                      memCacheWidth: heroCacheWidth,
+                      filterQuality: FilterQuality.medium,
+                      fadeInDuration: const Duration(milliseconds: 220),
+                      errorWidget: (context, url, error) =>
+                          const SizedBox.shrink(),
+                    );
+                  },
                 ),
               DecoratedBox(
                 decoration: BoxDecoration(

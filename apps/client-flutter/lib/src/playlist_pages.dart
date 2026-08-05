@@ -274,10 +274,13 @@ class _PlaylistCard extends StatelessWidget {
   }
 }
 
-class _PlaylistDetailPage extends StatelessWidget {
+class _PlaylistDetailPage extends StatefulWidget {
   const _PlaylistDetailPage({
+    super.key,
     required this.coreBaseUrl,
     required this.detail,
+    required this.initialScrollOffset,
+    required this.onScrollOffsetChanged,
     required this.onPlayTrack,
     required this.onOpenTrack,
     required this.onToggleFavorite,
@@ -287,6 +290,8 @@ class _PlaylistDetailPage extends StatelessWidget {
 
   final String coreBaseUrl;
   final Map<String, dynamic> detail;
+  final double initialScrollOffset;
+  final ValueChanged<double> onScrollOffsetChanged;
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(int) onOpenTrack;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
@@ -294,11 +299,39 @@ class _PlaylistDetailPage extends StatelessWidget {
   final Future<void> Function(int) onRemoveTrack;
 
   @override
+  State<_PlaylistDetailPage> createState() => _PlaylistDetailPageState();
+}
+
+class _PlaylistDetailPageState extends State<_PlaylistDetailPage> {
+  late final ScrollController _scrollController;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController(
+      initialScrollOffset: max(0, widget.initialScrollOffset),
+    )..addListener(_saveScrollOffset);
+  }
+
+  void _saveScrollOffset() {
+    if (_scrollController.hasClients) {
+      widget.onScrollOffsetChanged(_scrollController.offset);
+    }
+  }
+
+  @override
+  void dispose() {
+    _saveScrollOffset();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final playlist = _asMap(detail['playlist']);
-    final tracks = (detail['tracks'] as List?) ?? const [];
+    final playlist = _asMap(widget.detail['playlist']);
+    final tracks = (widget.detail['tracks'] as List?) ?? const [];
     final kind = playlist['kind']?.toString() ?? 'manual';
-    final rules = detail['rules'];
+    final rules = widget.detail['rules'];
 
     return _PageFrame(
       title: 'Playlist detail',
@@ -337,7 +370,7 @@ class _PlaylistDetailPage extends StatelessWidget {
                   ),
                   const SizedBox(width: 12),
                   OutlinedButton.icon(
-                    onPressed: () => unawaited(onEditSmart()),
+                    onPressed: () => unawaited(widget.onEditSmart()),
                     icon: const Icon(Icons.tune_outlined),
                     label: Text(_tr(context, 'Edit rules')),
                   ),
@@ -349,6 +382,7 @@ class _PlaylistDetailPage extends StatelessWidget {
             child: tracks.isEmpty
                 ? const Center(child: Text('No matching tracks'))
                 : ListView.separated(
+                    controller: _scrollController,
                     padding: const EdgeInsets.symmetric(vertical: 8),
                     itemCount: tracks.length,
                     separatorBuilder: (context, index) =>
@@ -358,7 +392,7 @@ class _PlaylistDetailPage extends StatelessWidget {
                           .cast<String, dynamic>();
                       final id = _intValue(track['id']);
                       return _SheetTrackRow(
-                        coreBaseUrl: coreBaseUrl,
+                        coreBaseUrl: widget.coreBaseUrl,
                         track: track,
                         indexLabel: '${index + 1}',
                         subtitle: _joinParts([
@@ -368,13 +402,13 @@ class _PlaylistDetailPage extends StatelessWidget {
                         ]),
                         onOpen: id == null
                             ? null
-                            : () => unawaited(onOpenTrack(id)),
+                            : () => unawaited(widget.onOpenTrack(id)),
                         onPlay: id == null
                             ? null
-                            : () => unawaited(onPlayTrack(id)),
-                        onToggleFavorite: onToggleFavorite,
+                            : () => unawaited(widget.onPlayTrack(id)),
+                        onToggleFavorite: widget.onToggleFavorite,
                         onRemove: kind == 'manual' && id != null
-                            ? () => unawaited(onRemoveTrack(id))
+                            ? () => unawaited(widget.onRemoveTrack(id))
                             : null,
                       );
                     },

@@ -503,6 +503,8 @@ class _SheetTrackRow extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          _TrackAvailabilityBadge(track: track, compact: true),
+          const SizedBox(width: 4),
           _TrackActions(
             track: track,
             compact: true,

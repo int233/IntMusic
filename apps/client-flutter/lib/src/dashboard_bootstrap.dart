@@ -47,6 +47,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
     if (cached.isEmpty || !mounted) return;
     _mutate(() {
       _cacheServerId = cached.serverId;
+      artworkCacheCoordinator.registerServer(cached.serverId);
       _cacheCursor = cached.cursor;
       _applyCachedValues(cached.values);
       _trackDetailCache.addAll(cached.trackDetails);
@@ -57,6 +58,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
       _detailWarmTargetCursors.addAll(cached.pendingDetailTargetCursors);
       _detailRefreshScopes.addAll(cached.pendingDetailRefresh.keys);
       _reconcileTrackSummariesInDetails();
+      _refreshTrackAvailabilityProjection();
       _rendererStatus = 'Cached library ready';
     });
   }
@@ -118,6 +120,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
       _activeTrackDetailId = null;
     }
     _cacheServerId = nextServerId;
+    artworkCacheCoordinator.registerServer(nextServerId);
     _cacheCursor = _intValue(snapshot['cursor']) ?? _cacheCursor;
     _albums = (snapshot['albums'] as List?) ?? const <dynamic>[];
     _artists = (snapshot['artists'] as List?) ?? const <dynamic>[];
@@ -142,6 +145,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _artistDetailCache.removeWhere((id, _) => !artistIds.contains(id));
     _playlistDetailCache.removeWhere((id, _) => !playlistIds.contains(id));
     _reconcileTrackSummariesInDetails();
+    _refreshTrackAvailabilityProjection();
     if (status != null) _status = status;
     if (diagnostics != null) _diagnostics = diagnostics;
   }

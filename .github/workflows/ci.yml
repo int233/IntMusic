@@ -15,6 +15,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Restore Rust CI cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
       - name: Linux audio dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
@@ -29,6 +35,8 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
+          cache: true
+          pub-cache: true
       - working-directory: apps/client-flutter
         run: flutter pub get
       - working-directory: apps/client-flutter

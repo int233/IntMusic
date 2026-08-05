@@ -79,17 +79,28 @@ class _ArtworkTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(radius),
           child: imageUrl == null || deferImage
               ? fallback
-              : CachedNetworkImage(
-                  cacheManager: _artworkCacheManager,
-                  imageUrl: imageUrl!,
-                  fit: BoxFit.cover,
-                  memCacheWidth: imageCacheExtent,
-                  filterQuality: FilterQuality.low,
-                  fadeInDuration: const Duration(milliseconds: 80),
-                  fadeOutDuration: Duration.zero,
-                  useOldImageOnUrlChange: true,
-                  placeholder: (context, url) => fallback,
-                  errorWidget: (context, url, error) => fallback,
+              : ValueListenableBuilder<int>(
+                  valueListenable: artworkCacheCoordinator.retryRevision,
+                  builder: (context, retryRevision, child) {
+                    final url = imageUrl!;
+                    return CachedNetworkImage(
+                      key: ValueKey(
+                        '${artworkCacheCoordinator.cacheKey(url)}:'
+                        '$retryRevision',
+                      ),
+                      cacheManager: _artworkCacheManager,
+                      cacheKey: artworkCacheCoordinator.cacheKey(url),
+                      imageUrl: url,
+                      fit: BoxFit.cover,
+                      memCacheWidth: imageCacheExtent,
+                      filterQuality: FilterQuality.low,
+                      fadeInDuration: const Duration(milliseconds: 80),
+                      fadeOutDuration: Duration.zero,
+                      useOldImageOnUrlChange: true,
+                      placeholder: (context, url) => fallback,
+                      errorWidget: (context, url, error) => fallback,
+                    );
+                  },
                 ),
         ),
       ),

@@ -432,6 +432,7 @@ extension _DashboardLibrary on _CoreDashboardState {
       _searchSortByQuery.putIfAbsent(query, () => _SearchSort.relevance);
       _navigateToInState(_AppRoute.search(query));
       _searchSuggestions = const [];
+      _decorateSearchTrackAvailability(query);
     });
   }
 

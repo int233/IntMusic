@@ -468,6 +468,8 @@ class _TrackCard extends StatelessWidget {
                   color: IntMusicTheme.of(context).textSecondary,
                 ),
               ),
+              const SizedBox(height: 5),
+              _TrackAvailabilityBadge(track: track, compact: true),
               Row(
                 children: [
                   Text(
@@ -521,6 +523,14 @@ class _TrackTableHeader extends StatelessWidget {
           SizedBox(width: 46, child: Text('#', style: style)),
           Expanded(flex: 5, child: Text('Title', style: style)),
           if (showAlbum) Expanded(flex: 3, child: Text('Album', style: style)),
+          SizedBox(
+            width: 132,
+            child: Text(
+              _tr(context, 'Availability'),
+              textAlign: TextAlign.center,
+              style: style,
+            ),
+          ),
           SizedBox(
             width: 72,
             child: Text('Time', textAlign: TextAlign.right, style: style),
@@ -630,6 +640,12 @@ class _TrackTableRow extends StatelessWidget {
                     ),
                   ),
                 ],
+                SizedBox(
+                  width: 132,
+                  child: Center(
+                    child: _TrackAvailabilityBadge(track: track, compact: true),
+                  ),
+                ),
                 SizedBox(
                   width: 72,
                   child: Text(

@@ -77,21 +77,21 @@ extension _DashboardShell on _CoreDashboardState {
         trackDetail: _activeTrackDetail,
         targetLabel: _selectedZoneLabel,
         playbackMode: _playbackMode,
-        volume: _activeZoneVolume(),
-        muted: _activeZoneMuted(),
-        volumeMode: _activeZoneVolumeMode(),
-        systemVolumeSupported: _activeZoneSystemVolumeSupported(),
+        volumeState: _activeZoneDualVolumeState(),
         onResume: _resumePlayback,
         onPause: _pausePlayback,
         onPrevious: _playPreviousTrack,
         onNext: _playNextTrack,
         onSeek: _seekPlayback,
-        onVolumeChanged: (value) => unawaited(_setActiveZoneVolume(value)),
-        onToggleMute: () => unawaited(
-          _setActiveZoneVolume(_activeZoneVolume(), muted: !_activeZoneMuted()),
+        onVolumeChanged: (mode, value) =>
+            unawaited(_setActiveZoneVolume(value, mode: mode)),
+        onToggleMute: (mode) => unawaited(
+          _setActiveZoneVolume(
+            _activeZoneVolumeForMode(mode),
+            muted: !_activeZoneMutedForMode(mode),
+            mode: mode,
+          ),
         ),
-        onVolumeModeChanged: (mode) =>
-            unawaited(_setActiveZoneVolumeMode(mode)),
         onCycleMode: _cyclePlaybackMode,
         onShowModeMenu: _showPlaybackModeMenu,
         onShowQueue: _showQueueSheet,
@@ -260,10 +260,7 @@ extension _DashboardShell on _CoreDashboardState {
       trackDetail: _activeTrackDetail,
       activeZoneId: _activeZoneId(),
       playbackMode: _playbackMode,
-      volume: _activeZoneVolume(),
-      muted: _activeZoneMuted(),
-      volumeMode: _activeZoneVolumeMode(),
-      systemVolumeSupported: _activeZoneSystemVolumeSupported(),
+      volumeState: _activeZoneDualVolumeState(),
       onResume: (_) => _resumePlayback(),
       onPause: (_) => _pausePlayback(),
       onPrevious: _playPreviousTrack,
@@ -273,11 +270,15 @@ extension _DashboardShell on _CoreDashboardState {
       onShowModeMenu: _showPlaybackModeMenu,
       onShowQueue: _showQueueSheet,
       onShowDevices: _showDeviceSheet,
-      onVolumeChanged: (value) => unawaited(_setActiveZoneVolume(value)),
-      onToggleMute: () => unawaited(
-        _setActiveZoneVolume(_activeZoneVolume(), muted: !_activeZoneMuted()),
+      onVolumeChanged: (mode, value) =>
+          unawaited(_setActiveZoneVolume(value, mode: mode)),
+      onToggleMute: (mode) => unawaited(
+        _setActiveZoneVolume(
+          _activeZoneVolumeForMode(mode),
+          muted: !_activeZoneMutedForMode(mode),
+          mode: mode,
+        ),
       ),
-      onVolumeModeChanged: (mode) => unawaited(_setActiveZoneVolumeMode(mode)),
       onToggleFavorite: _toggleFavorite,
       onOpenTrack: _openTrackDetail,
     );
@@ -494,8 +495,15 @@ extension _DashboardShell on _CoreDashboardState {
         final detail =
             _playlistDetailCache[playlistId] ?? const <String, dynamic>{};
         return _PlaylistDetailPage(
+          key: ValueKey('playlist-detail-$playlistId'),
           coreBaseUrl: _coreUrlController.text,
           detail: detail,
+          initialScrollOffset: playlistId == null
+              ? 0
+              : _playlistScrollOffsets[playlistId] ?? 0,
+          onScrollOffsetChanged: (offset) {
+            if (playlistId != null) _playlistScrollOffsets[playlistId] = offset;
+          },
           onPlayTrack: (trackId) => _playTrackFromCollection(
             trackId,
             (detail['tracks'] as List?) ?? const [],

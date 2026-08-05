@@ -14,6 +14,7 @@ extension _DashboardConnection on _CoreDashboardState {
         _zones = zones;
         _keepSelectedZoneValid();
         _syncPlaybackFromSelectedZone();
+        _refreshTrackAvailabilityIfPresenceChanged();
       });
     } catch (_) {
       _zoneRefreshFailures += 1;

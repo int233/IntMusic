@@ -585,6 +585,7 @@ pub async fn link_track_to_recording(
     .bind(track_id)
     .execute(&mut *transaction)
     .await?;
+    preserve_recording_user_state(&mut transaction, source_recording_id, &now).await?;
     transaction.commit().await?;
     track_media_profile(pool, track_id)
         .await?

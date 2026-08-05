@@ -134,6 +134,16 @@ async fn release_tracks_remain_in_each_album_when_recordings_are_related() {
         ingest_test_track(&pool, "original.flac", "Original Album", "Shared Song").await;
     let compilation_track_id =
         ingest_test_track(&pool, "compilation.flac", "Compilation", "Shared Song").await;
+    set_track_favorite(
+        &pool,
+        compilation_track_id,
+        TrackFavoriteUpdate {
+            is_favorite: true,
+            user_rating: Some(100),
+        },
+    )
+    .await
+    .expect("favorite compilation recording");
 
     let original = track_media_profile(&pool, original_track_id)
         .await
@@ -173,6 +183,14 @@ async fn release_tracks_remain_in_each_album_when_recordings_are_related() {
         .expect("reload related media")
         .expect("related media exists");
     assert_eq!(related.related_release_tracks.len(), 2);
+    let visible = list_tracks(&pool, 100, 0)
+        .await
+        .expect("list linked recordings")
+        .into_iter()
+        .find(|track| track.title == "Shared Song")
+        .expect("visible recording representative");
+    assert!(visible.is_favorite);
+    assert_eq!(visible.user_rating, Some(100));
 
     let original_album = album_detail(&pool, original.release.expect("release").album_id.unwrap())
         .await
