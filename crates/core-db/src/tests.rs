@@ -1,5 +1,6 @@
 use super::*;
 
+mod album_identity;
 mod client_library_resolution;
 mod library_management;
 mod smart_playlists;

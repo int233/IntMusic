@@ -780,17 +780,18 @@ pub fn normalize_text(value: &str) -> String {
     value.trim().to_lowercase()
 }
 
-pub(crate) fn album_key(
-    album_artist: &str,
-    album_title: &str,
-    year: Option<i64>,
-    library_root_id: i64,
-) -> String {
+pub(crate) fn album_key(album_artists: &[String], album_title: &str, year: Option<i64>) -> String {
+    let mut artists = album_artists
+        .iter()
+        .map(|artist| normalize_text(artist))
+        .filter(|artist| !artist.is_empty())
+        .collect::<Vec<_>>();
+    artists.sort();
+    artists.dedup();
     format!(
-        "{}\0{}\0{}\0{}",
-        normalize_text(album_artist),
+        "catalog:{}\u{1f}{}\u{1f}{}",
         normalize_text(album_title),
+        artists.join("\u{1e}"),
         year.map(|year| year.to_string()).unwrap_or_default(),
-        library_root_id
     )
 }

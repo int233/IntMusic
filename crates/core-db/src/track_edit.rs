@@ -290,6 +290,10 @@ pub async fn search_tracks(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
                     SELECT 1 FROM track_merge_members member
                     WHERE member.track_id = t.id
               )
+              AND EXISTS (
+                    SELECT 1 FROM active_catalog_tracks active
+                    WHERE active.track_id = t.id
+              )
               AND (
                     NOT EXISTS (
                       SELECT 1 FROM legacy_track_catalog_links missing_link
@@ -331,20 +335,26 @@ pub async fn search_albums(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
     let pattern = format!("%{}%", query);
     let rows = sqlx::query(
         r#"
-        SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
-               al.cover_asset_id,
+        SELECT canonical.id, canonical.title, canonical.album_artist_display,
+               COALESCE(canonical.date, MAX(member_album.date)) AS date,
+               COALESCE(canonical.year, MAX(member_album.year)) AS year,
+               MAX(member_album.total_discs) AS total_discs,
+               COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
                    'legacy:' || t.id
                ) END) AS track_count
-        FROM albums al
-        LEFT JOIN tracks t ON t.album_id = al.id
+        FROM album_identity_members identity
+        JOIN albums canonical ON canonical.id = identity.canonical_album_id
+        JOIN albums member_album ON member_album.id = identity.album_id
+        JOIN tracks t ON t.album_id = member_album.id
+        JOIN active_catalog_tracks active ON active.track_id = t.id
         LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
         LEFT JOIN track_merge_members member ON member.track_id = t.id
-        WHERE al.title LIKE ?1 OR al.album_artist_display LIKE ?1
-        GROUP BY al.id
+        WHERE member_album.title LIKE ?1 OR member_album.album_artist_display LIKE ?1
+        GROUP BY canonical.id
         HAVING track_count > 0
-        ORDER BY al.title COLLATE NOCASE
+        ORDER BY canonical.title COLLATE NOCASE
         LIMIT ?2
         "#,
     )
@@ -364,7 +374,7 @@ pub async fn search_artists(pool: &DbPool, query: &str, limit: u32) -> Result<Ve
                COALESCE(NULLIF(ap.display_name, ''), ar.name) AS name,
                COALESCE(NULLIF(ap.sort_name, ''), ar.sort_name) AS sort_name,
                COUNT(DISTINCT ta.track_id) AS track_count,
-               COUNT(DISTINCT aa.album_id) AS album_count,
+               COUNT(DISTINCT album_identity.canonical_album_id) AS album_count,
                COALESCE((SELECT MAX(av.revision)
                          FROM artist_visuals av
                          WHERE av.artist_id = ar.id), 0) AS artwork_revision,
@@ -375,6 +385,7 @@ pub async fn search_artists(pool: &DbPool, query: &str, limit: u32) -> Result<Ve
         LEFT JOIN artist_profiles ap ON ap.artist_id = ar.id
         LEFT JOIN track_artists ta ON ta.artist_id = ar.id
         LEFT JOIN album_artists aa ON aa.artist_id = ar.id
+        LEFT JOIN album_identity_members album_identity ON album_identity.album_id = aa.album_id
         WHERE ar.name LIKE ?1 OR ap.display_name LIKE ?1 OR ap.aliases_json LIKE ?1
         GROUP BY ar.id
         ORDER BY COALESCE(NULLIF(ap.sort_name, ''), ar.sort_name,

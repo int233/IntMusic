@@ -152,4 +152,36 @@ void main() {
       expect(find.byIcon(Icons.drag_handle_rounded), findsWidgets);
     }
   });
+
+  testWidgets('track library uses readable mobile rows without table headers', (
+    tester,
+  ) async {
+    final tracks = List<Map<String, dynamic>>.generate(
+      12,
+      (index) => track(
+        index + 1,
+        'A complete library song title that remains visible ${index + 1}',
+      ),
+    );
+
+    for (final resolution in resolutions) {
+      await configureResolution(tester, resolution.$1, resolution.$2);
+      await tester.pumpWidget(
+        surface(responsiveTracksLibraryForTesting(tracks)),
+      );
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('track-table-header')), findsNothing);
+      expect(find.byKey(const Key('mobile-track-row-1')), findsOneWidget);
+      expect(
+        find.text('A complete library song title that remains visible 1'),
+        findsOneWidget,
+      );
+      final countSize = tester.getSize(
+        find.byKey(const Key('library-count-label')),
+      );
+      expect(countSize.height, lessThan(30));
+      expect(countSize.width, greaterThan(60));
+    }
+  });
 }

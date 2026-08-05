@@ -92,7 +92,9 @@ async fn confirmed_file_merge_is_folded_and_reversible() {
         .expect("undo merge");
     assert_eq!(undone.state, "undone");
     let restored = list_tracks(&pool, 100, 0).await.expect("songs restored");
-    assert_eq!(restored.len(), before.len());
+    assert_eq!(restored.len() + 1, before.len());
+    assert!(restored.iter().any(|track| track.id == source_track_id));
+    assert!(restored.iter().all(|track| track.id != target_track_id));
     let album = album_detail(&pool, album_id.expect("album id"))
         .await
         .expect("album after undo");
@@ -102,8 +104,9 @@ async fn confirmed_file_merge_is_folded_and_reversible() {
             .iter()
             .filter(|track| track.title == "Shared song")
             .count(),
-        2
+        1
     );
+    assert!(album.tracks.iter().any(|track| track.id == source_track_id));
 
     close_test_pool(pool, path).await;
 }
@@ -212,6 +215,56 @@ async fn exact_duplicate_scan_previews_and_merges_device_or_encoding_copies() {
         .expect("rescan exact copies")
         .groups
         .is_empty());
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicate_scan_treats_artist_order_as_an_identity_set() {
+    let (pool, path) = test_pool().await;
+    let first = ingest_test_track(&pool, "ordered.flac", "Album", "Song").await;
+    let second = ingest_test_track(&pool, "reversed.m4a", "Album", "Song").await;
+    let hoyo = upsert_artist(&pool, "HOYO-MiX")
+        .await
+        .expect("HOYO-MiX artist");
+    let composer = upsert_artist(&pool, "陈致逸")
+        .await
+        .expect("composer artist");
+
+    for (track_id, artists) in [(first, [hoyo, composer]), (second, [composer, hoyo])] {
+        sqlx::query("DELETE FROM track_artists WHERE track_id = ?1 AND role = 'primary'")
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .expect("replace track artists");
+        for (position, artist_id) in artists.into_iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO track_artists (track_id, artist_id, role, position)
+                VALUES (?1, ?2, 'primary', ?3)
+                "#,
+            )
+            .bind(track_id)
+            .bind(artist_id)
+            .bind(position as i64)
+            .execute(&pool)
+            .await
+            .expect("insert reordered artist");
+        }
+    }
+
+    let preview = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("preview reordered artists");
+    assert_eq!(preview.duplicate_groups, 1);
+    let group = preview
+        .groups
+        .first()
+        .expect("artist-order duplicate group");
+    let members = std::iter::once(group.target_track_id)
+        .chain(group.source_track_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(members, BTreeSet::from([first, second]));
 
     close_test_pool(pool, path).await;
 }

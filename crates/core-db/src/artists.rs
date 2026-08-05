@@ -3,19 +3,25 @@ use super::*;
 pub async fn list_albums(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<AlbumSummary>> {
     let rows = sqlx::query(
         r#"
-        SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
-               al.cover_asset_id,
+        SELECT canonical.id, canonical.title, canonical.album_artist_display,
+               COALESCE(canonical.date, MAX(member_album.date)) AS date,
+               COALESCE(canonical.year, MAX(member_album.year)) AS year,
+               MAX(member_album.total_discs) AS total_discs,
+               COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
                    'legacy:' || t.id
                ) END) AS track_count
-        FROM albums al
-        LEFT JOIN tracks t ON t.album_id = al.id
+        FROM album_identity_members identity
+        JOIN albums canonical ON canonical.id = identity.canonical_album_id
+        JOIN albums member_album ON member_album.id = identity.album_id
+        JOIN tracks t ON t.album_id = member_album.id
+        JOIN active_catalog_tracks active ON active.track_id = t.id
         LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
         LEFT JOIN track_merge_members member ON member.track_id = t.id
-        GROUP BY al.id
+        GROUP BY canonical.id
         HAVING track_count > 0
-        ORDER BY COALESCE(al.sort_title, al.title) COLLATE NOCASE
+        ORDER BY COALESCE(canonical.sort_title, canonical.title) COLLATE NOCASE
         LIMIT ?1 OFFSET ?2
         "#,
     )
@@ -37,7 +43,7 @@ pub async fn list_artists(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<
                    'recording:' || recording.id,
                    'legacy:' || ta.track_id
                )) AS track_count,
-               COUNT(DISTINCT aa.album_id) AS album_count,
+               COUNT(DISTINCT album_identity.canonical_album_id) AS album_count,
                COALESCE((SELECT MAX(av.revision)
                          FROM artist_visuals av
                          WHERE av.artist_id = ar.id), 0) AS artwork_revision,
@@ -51,6 +57,7 @@ pub async fn list_artists(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<
         LEFT JOIN release_tracks release_track ON release_track.id = links.release_track_id
         LEFT JOIN catalog_recordings recording ON recording.id = release_track.recording_id
         LEFT JOIN album_artists aa ON aa.artist_id = ar.id
+        LEFT JOIN album_identity_members album_identity ON album_identity.album_id = aa.album_id
         GROUP BY ar.id
         ORDER BY COALESCE(NULLIF(ap.sort_name, ''), ar.sort_name,
                           NULLIF(ap.display_name, ''), ar.name) COLLATE NOCASE
@@ -75,7 +82,7 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
                    'recording:' || recording.id,
                    'legacy:' || ta.track_id
                )) AS track_count,
-               COUNT(DISTINCT aa.album_id) AS album_count,
+               COUNT(DISTINCT album_identity.canonical_album_id) AS album_count,
                COALESCE((SELECT MAX(av.revision)
                          FROM artist_visuals av
                          WHERE av.artist_id = ar.id), 0) AS artwork_revision,
@@ -89,6 +96,7 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
         LEFT JOIN release_tracks release_track ON release_track.id = links.release_track_id
         LEFT JOIN catalog_recordings recording ON recording.id = release_track.recording_id
         LEFT JOIN album_artists aa ON aa.artist_id = ar.id
+        LEFT JOIN album_identity_members album_identity ON album_identity.album_id = aa.album_id
         WHERE ar.id = ?1
         GROUP BY ar.id
         "#,
@@ -99,22 +107,28 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
 
     let album_rows = sqlx::query(
         r#"
-        SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
-               al.cover_asset_id,
+        SELECT canonical.id, canonical.title, canonical.album_artist_display,
+               COALESCE(canonical.date, MAX(member_album.date)) AS date,
+               COALESCE(canonical.year, MAX(member_album.year)) AS year,
+               MAX(member_album.total_discs) AS total_discs,
+               COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
                    'legacy:' || t.id
                ) END) AS track_count
-        FROM albums al
-        LEFT JOIN tracks t ON t.album_id = al.id
+        FROM album_identity_members identity
+        JOIN albums canonical ON canonical.id = identity.canonical_album_id
+        JOIN albums member_album ON member_album.id = identity.album_id
+        JOIN tracks t ON t.album_id = member_album.id
+        JOIN active_catalog_tracks active ON active.track_id = t.id
         LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
         LEFT JOIN track_merge_members member ON member.track_id = t.id
-        LEFT JOIN album_artists aa ON aa.album_id = al.id
+        LEFT JOIN album_artists aa ON aa.album_id = member_album.id
         LEFT JOIN track_artists ta ON ta.track_id = t.id
         WHERE aa.artist_id = ?1 OR ta.artist_id = ?1
-        GROUP BY al.id
+        GROUP BY canonical.id
         HAVING track_count > 0
-        ORDER BY COALESCE(al.year, 0) DESC, al.title COLLATE NOCASE
+        ORDER BY COALESCE(canonical.year, 0) DESC, canonical.title COLLATE NOCASE
         "#,
     )
     .bind(artist_id)
@@ -132,6 +146,10 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
               AND NOT EXISTS (
                 SELECT 1 FROM track_merge_members member
                 WHERE member.track_id = t.id
+              )
+              AND EXISTS (
+                SELECT 1 FROM active_catalog_tracks active
+                WHERE active.track_id = t.id
               )
               AND (
                 NOT EXISTS (
@@ -772,6 +790,10 @@ pub async fn list_tracks(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<T
                 SELECT 1 FROM track_merge_members member
                 WHERE member.track_id = t.id
             )
+              AND EXISTS (
+                SELECT 1 FROM active_catalog_tracks active
+                WHERE active.track_id = t.id
+              )
               AND (
                 NOT EXISTS (
                   SELECT 1 FROM legacy_track_catalog_links missing_link

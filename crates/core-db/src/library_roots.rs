@@ -111,16 +111,10 @@ pub async fn library_counts(pool: &DbPool) -> Result<LibraryCounts> {
         .await?,
         albums: sqlx::query_scalar(
             r#"
-            SELECT COUNT(*)
-            FROM albums album
-            WHERE EXISTS (
-                SELECT 1
-                FROM tracks track
-                LEFT JOIN track_merge_members member
-                  ON member.track_id = track.id
-                WHERE track.album_id = album.id
-                  AND member.track_id IS NULL
-            )
+            SELECT COUNT(DISTINCT identity.canonical_album_id)
+            FROM album_identity_members identity
+            JOIN tracks track ON track.album_id = identity.album_id
+            JOIN active_catalog_tracks active ON active.track_id = track.id
             "#,
         )
         .fetch_one(pool)

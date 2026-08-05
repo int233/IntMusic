@@ -3,18 +3,26 @@ use super::*;
 pub async fn album_detail(pool: &DbPool, album_id: i64) -> Result<AlbumDetail> {
     let album_row = sqlx::query(
         r#"
-        SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
-               al.cover_asset_id,
+        SELECT canonical.id, canonical.title, canonical.album_artist_display,
+               COALESCE(canonical.date, MAX(member_album.date)) AS date,
+               COALESCE(canonical.year, MAX(member_album.year)) AS year,
+               MAX(member_album.total_discs) AS total_discs,
+               COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
                    'legacy:' || t.id
                ) END) AS track_count
-        FROM albums al
-        LEFT JOIN tracks t ON t.album_id = al.id
+        FROM album_identity_members requested
+        JOIN album_identity_members identity
+          ON identity.canonical_album_id = requested.canonical_album_id
+        JOIN albums canonical ON canonical.id = requested.canonical_album_id
+        JOIN albums member_album ON member_album.id = identity.album_id
+        JOIN tracks t ON t.album_id = member_album.id
+        JOIN active_catalog_tracks active ON active.track_id = t.id
         LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
         LEFT JOIN track_merge_members member ON member.track_id = t.id
-        WHERE al.id = ?1
-        GROUP BY al.id
+        WHERE requested.album_id = ?1
+        GROUP BY canonical.id
         "#,
     )
     .bind(album_id)
@@ -25,7 +33,12 @@ pub async fn album_detail(pool: &DbPool, album_id: i64) -> Result<AlbumDetail> {
         track_select_sql(
             r#"
             LEFT JOIN legacy_track_catalog_links current_link ON current_link.track_id = t.id
-            WHERE t.album_id = ?1
+            JOIN album_identity_members track_album ON track_album.album_id = t.album_id
+            JOIN album_identity_members requested_album
+              ON requested_album.album_id = ?1
+             AND requested_album.canonical_album_id = track_album.canonical_album_id
+            JOIN active_catalog_tracks active ON active.track_id = t.id
+            WHERE 1 = 1
               AND NOT EXISTS (
                 SELECT 1 FROM track_merge_members member
                 WHERE member.track_id = t.id

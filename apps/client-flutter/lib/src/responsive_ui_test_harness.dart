@@ -47,3 +47,18 @@ Widget responsiveQueueForTesting(
     onClearAll: () async => null,
   );
 }
+
+@visibleForTesting
+Widget responsiveTracksLibraryForTesting(List<Map<String, dynamic>> tracks) {
+  return _TracksPage(
+    coreBaseUrl: '',
+    tracks: tracks,
+    onOpenTrack: (_) async {},
+    onPlayTrack: (_) async {},
+    onToggleFavorite: (_) async {},
+    onAddToPlaylist: (_) async {},
+    onDistributeTracks: (_) async {},
+    viewMode: _LibraryViewMode.list,
+    onViewModeChanged: (_) {},
+  );
+}
