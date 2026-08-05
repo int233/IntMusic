@@ -2,11 +2,12 @@ use super::*;
 
 pub async fn playback_queue(pool: &DbPool, zone_id: &str) -> Result<PlaybackQueue> {
     ensure_playback_queue(pool, zone_id).await?;
-    let metadata =
-        sqlx::query("SELECT revision, mode, current_index FROM playback_queues WHERE zone_id = ?1")
-            .bind(zone_id)
-            .fetch_one(pool)
-            .await?;
+    let metadata = sqlx::query(
+        "SELECT revision, mode, current_index, shuffle_seed FROM playback_queues WHERE zone_id = ?1",
+    )
+    .bind(zone_id)
+    .fetch_one(pool)
+    .await?;
     let rows = sqlx::query(
         track_select_sql_extra(
             "pqi.id AS queue_item_id, pqi.position AS queue_position,",
@@ -39,6 +40,7 @@ pub async fn playback_queue(pool: &DbPool, zone_id: &str) -> Result<PlaybackQueu
         zone_id: zone_id.to_string(),
         revision: metadata.try_get::<i64, _>("revision")?.max(0) as u64,
         mode: parse_playback_mode(&metadata.try_get::<String, _>("mode")?),
+        shuffle_seed: metadata.try_get::<i64, _>("shuffle_seed")?.max(1) as u64,
         current_index,
         items,
     })

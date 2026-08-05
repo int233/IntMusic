@@ -25,6 +25,7 @@ import 'core/navigation_history.dart';
 import 'core/json_values.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
+import 'core/playback_queue_policy.dart';
 import 'core/renderer_audio_output_policy.dart';
 import 'core/renderer_command_sequences.dart';
 import 'core/storage/client_cache_database.dart';

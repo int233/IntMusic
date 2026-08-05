@@ -156,7 +156,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "audio-engine"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -442,7 +442,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "core-api"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "audio-engine",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "core-cli"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "core-config"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "core-daemon"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -519,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "core-db"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "discovery"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "mdns-sd",
@@ -1472,7 +1472,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "library-scanner"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1566,7 +1566,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lyrics-engine"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "protocol",
 ]
@@ -1920,7 +1920,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "output-cpal"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "audio-engine",
@@ -1932,7 +1932,7 @@ dependencies = [
 
 [[package]]
 name = "output-linux"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "audio-engine",
@@ -1942,7 +1942,7 @@ dependencies = [
 
 [[package]]
 name = "output-windows"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "audio-engine",
@@ -2041,7 +2041,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "playback"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -2478,7 +2478,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "search-index"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3453,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "transcoder"
-version = "0.1.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "hex",

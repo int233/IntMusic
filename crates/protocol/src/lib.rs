@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+mod playback_session_v3;
+
+pub use playback_session_v3::*;
+
 pub const API_PREFIX: &str = "/api/v1";
 pub const EVENTS_WS_PATH: &str = "/ws/v1/events";
 
@@ -1306,6 +1310,8 @@ pub struct PlaybackQueue {
     pub zone_id: String,
     pub revision: u64,
     pub mode: PlaybackMode,
+    #[serde(default = "default_shuffle_seed")]
+    pub shuffle_seed: u64,
     pub current_index: Option<i64>,
     pub items: Vec<PlaybackQueueItem>,
 }
@@ -1546,6 +1552,10 @@ fn default_true() -> bool {
 
 fn default_volume() -> f32 {
     1.0
+}
+
+fn default_shuffle_seed() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
