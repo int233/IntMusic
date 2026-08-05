@@ -19,11 +19,10 @@ pub fn next_item(snapshot: &PlaybackSessionSnapshotV3, automatic: bool) -> Queue
         return QueueAdvanceV3::Stop;
     }
 
-    if automatic
-        && snapshot.mode.repeat == PlaybackRepeatModeV3::One
-        && snapshot.current_item_id.is_some()
-    {
-        return QueueAdvanceV3::Select(snapshot.current_item_id.expect("checked above"));
+    if automatic && snapshot.mode.repeat == PlaybackRepeatModeV3::One {
+        if let Some(current_item_id) = snapshot.current_item_id {
+            return QueueAdvanceV3::Select(current_item_id);
+        }
     }
 
     let order = playback_order(&snapshot.queue, snapshot.mode, snapshot.shuffle_seed);
