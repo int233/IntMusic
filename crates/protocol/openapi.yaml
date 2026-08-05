@@ -22,6 +22,84 @@ paths:
       responses:
         "200":
           description: Added root.
+  /library-management/summary:
+    get:
+      summary: Return whole-library file, availability, issue, device, source, and storage totals.
+      responses:
+        "200":
+          description: Library inventory summary.
+  /library-management/files:
+    get:
+      summary: List every physical library file across Core and Client sources with catalog, metadata, issue, and availability state.
+      responses:
+        "200":
+          description: Filtered and paged physical-file inventory.
+  /library-management/files/{file_id}:
+    get:
+      summary: Return one physical file with embedded metadata evidence and its complete issue history.
+      responses:
+        "200":
+          description: Physical file detail.
+  /library-management/files/{file_id}/action:
+    post:
+      summary: Request a metadata rescan, ignore, reset, restore, or remove one physical file from the catalog inventory.
+      responses:
+        "200":
+          description: Updated file lifecycle state.
+  /library-management/files/actions:
+    post:
+      summary: Apply one inventory action to as many as 500 explicitly selected physical files.
+      responses:
+        "200":
+          description: Batch file action counts.
+  /library-management/tracks/merge/preview:
+    post:
+      summary: Compare selected physical files, choose a canonical track, and report identity conflicts before consolidation.
+      responses:
+        "200":
+          description: Non-mutating merge preview.
+  /library-management/tracks/merge:
+    post:
+      summary: Reversibly consolidate confirmed encodings and device copies into one release-track identity.
+      responses:
+        "200":
+          description: Merge audit ID and consolidation counts.
+  /library-management/tracks/auto-merge/preview:
+    post:
+      summary: Find conservatively matched duplicate release tracks using authoritative title, artist, album, position, version, year, kind, and duration metadata.
+      responses:
+        "200":
+          description: Non-mutating exact-duplicate groups and aggregate counts.
+  /library-management/tracks/auto-merge:
+    post:
+      summary: Revalidate and reversibly consolidate explicitly selected exact-duplicate groups.
+      responses:
+        "200":
+          description: Batch merge counts, audit IDs, and any groups skipped after revalidation.
+  /library-management/track-merges/{merge_id}/undo:
+    post:
+      summary: Restore the catalog links and media relationships recorded before a track merge.
+      responses:
+        "200":
+          description: Reverted merge result.
+  /library-management/devices:
+    get:
+      summary: List Core and every known Client, including offline or retired devices and all of their library sources.
+      responses:
+        "200":
+          description: Global device and source inventory.
+  /library-management/devices/{device_id}/action:
+    post:
+      summary: Retire, restore, or remove a logical Client device and its related inventory records without deleting physical music.
+      responses:
+        "200":
+          description: Updated device lifecycle state.
+  /library-management/sources/{root_id}/action:
+    post:
+      summary: Retire or restore a library source, or remove a Client source and its copy inventory without deleting physical files.
+      responses:
+        "200":
+          description: Updated source lifecycle state.
   /client-library/manifests:
     get:
       summary: List device-owned library roots and their latest reconciliation state.
@@ -33,6 +111,18 @@ paths:
       responses:
         "200":
           description: Accepted and missing file counts.
+  /client-library/pending:
+    get:
+      summary: List local audio files whose embedded tags still require attention.
+      responses:
+        "200":
+          description: Persistent pending-file inventory across all Clients.
+  /client-library/files/{file_id}/resolve:
+    post:
+      summary: Match, manually describe, ignore, or reset a pending local audio file.
+      responses:
+        "200":
+          description: Updated file resolution and optional track/media binding.
   /client-library/devices/{device_id}/roots/{root_external_id}:
     delete:
       summary: Disable a device-owned root and mark all of its media replicas missing.

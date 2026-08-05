@@ -261,7 +261,7 @@ extension _DashboardZoneState on _CoreDashboardState {
         '/zones/${Uri.encodeComponent(zoneId)}/alias',
         <String, dynamic>{'alias': alias},
       );
-      final zones = await _api.getJson('/zones') as List<dynamic>;
+      final zones = await _api.getCriticalJson('/zones') as List<dynamic>;
       if (!mounted) {
         return;
       }
@@ -297,7 +297,7 @@ extension _DashboardZoneState on _CoreDashboardState {
           <String, dynamic>{},
         );
       }
-      final zones = await _api.getJson('/zones') as List<dynamic>;
+      final zones = await _api.getCriticalJson('/zones') as List<dynamic>;
       if (!mounted) {
         return;
       }

@@ -221,10 +221,6 @@ fn read_track_metadata(path: &Path, config: &ScannerConfig) -> Result<TrackInges
     let tag = tagged_file
         .primary_tag()
         .or_else(|| tagged_file.first_tag());
-    let fallback_title = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Untitled");
 
     let mut track = TrackIngest {
         duration_ms: Some(properties.duration().as_millis() as i64),
@@ -236,7 +232,7 @@ fn read_track_metadata(path: &Path, config: &ScannerConfig) -> Result<TrackInges
             .title()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| fallback_title.to_string());
+            .unwrap_or_default();
         track.album = tag
             .album()
             .map(|value| value.trim().to_string())
@@ -271,8 +267,6 @@ fn read_track_metadata(path: &Path, config: &ScannerConfig) -> Result<TrackInges
         track.date = tag.year().map(|year| year.to_string());
         track.year = tag.year().map(|year| year as i64);
         track.comment = tag.get_string(&ItemKey::Comment).map(ToOwned::to_owned);
-    } else {
-        track.title = fallback_title.to_string();
     }
 
     if let Some((kind, lyrics)) = find_lyrics(&tagged_file, path) {
@@ -285,7 +279,10 @@ fn read_track_metadata(path: &Path, config: &ScannerConfig) -> Result<TrackInges
     }
 
     if track.title.trim().is_empty() {
-        anyhow::bail!("missing required title tag");
+        anyhow::bail!("missing required embedded TITLE tag");
+    }
+    if track.track_artists.is_empty() {
+        anyhow::bail!("missing required embedded ARTIST tag");
     }
 
     Ok(track)

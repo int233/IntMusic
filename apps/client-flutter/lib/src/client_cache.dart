@@ -51,11 +51,7 @@ class _ClientCacheStore {
       '${cacheDirectory.path}${Platform.pathSeparator}client-cache-v1.sqlite3',
       options: OpenDatabaseOptions(
         version: _databaseVersion,
-        onConfigure: (database) async {
-          await database.execute('PRAGMA journal_mode = WAL');
-          await database.execute('PRAGMA synchronous = NORMAL');
-          await database.execute('PRAGMA busy_timeout = 5000');
-        },
+        onConfigure: configureClientCacheDatabase,
         onCreate: (database, _) async {
           await database.execute('''
             CREATE TABLE cache_entries (
@@ -458,6 +454,19 @@ class _ClientCacheStore {
         }, conflictAlgorithm: ConflictAlgorithm.replace);
       }
       await batch.commit(noResult: true);
+    });
+    return _writeQueue;
+  }
+
+  static Future<void> invalidateDetails(String coreUrl, String kind) {
+    final normalized = _normalizedCoreUrl(coreUrl);
+    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
+      final database = await _open();
+      await database.delete(
+        'cache_entries',
+        where: 'core_url = ? AND kind = ?',
+        whereArgs: <Object?>[normalized, '${kind}_detail'],
+      );
     });
     return _writeQueue;
   }

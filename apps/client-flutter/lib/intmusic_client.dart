@@ -4,10 +4,12 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:math';
 
+import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 import 'package:audioplayers/audioplayers.dart' as ap;
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:crypto/crypto.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -20,10 +22,12 @@ import 'package:sqflite/sqflite.dart' as mobile_sqlite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/navigation_history.dart';
+import 'core/json_values.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
 import 'core/renderer_audio_output_policy.dart';
 import 'core/renderer_command_sequences.dart';
+import 'core/storage/client_cache_database.dart';
 import 'core/task_scheduler.dart';
 import 'src/app_theme.dart';
 
@@ -44,10 +48,17 @@ part 'src/playback_lyrics.dart';
 part 'src/playback_devices.dart';
 part 'src/playback_queue_sheet.dart';
 part 'src/history_page.dart';
+part 'src/library_management_page.dart';
+part 'src/library_management_files.dart';
+part 'src/library_management_merge.dart';
+part 'src/library_management_auto_merge.dart';
+part 'src/library_management_devices.dart';
+part 'src/library_management_formatting.dart';
 part 'src/playlist_pages.dart';
 part 'src/settings_page.dart';
 part 'src/settings_distribution.dart';
 part 'src/settings_library.dart';
+part 'src/settings_pending_files.dart';
 part 'src/settings_preferences.dart';
 part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
@@ -125,6 +136,11 @@ void runIntMusicClient() {
       ? 350
       : 700;
   runApp(const IntMusicClientApp());
+}
+
+@visibleForTesting
+Widget libraryFileDetailDialogForTesting(Map<String, dynamic> detail) {
+  return _LibraryFileDetailDialog(detail: detail, onOpenTrack: (_) {});
 }
 
 class IntMusicClientApp extends StatelessWidget {
@@ -265,6 +281,10 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, DateTime> _optimisticLocalStartedAtByOutput =
       <String, DateTime>{};
   final Map<String, bool> _rendererLocalFileByOutput = <String, bool>{};
+  final Map<String, bool> _rendererPlayingByOutput = <String, bool>{};
+  final Map<String, int> _rendererAudioOperationDepthByOutput = <String, int>{};
+  final Map<String, Timer> _rendererFailoverTimers = <String, Timer>{};
+  final Set<String> _rendererFailoverBusy = <String>{};
   DateTime? _offlinePlaybackStartedAt;
   int _offlinePlaybackStartPositionMs = 0;
   List<dynamic> _playbackHistory = const [];
@@ -333,6 +353,9 @@ class _CoreDashboardState extends State<CoreDashboard>
     _eventHealthTimer?.cancel();
     _offlineReconnectTimer?.cancel();
     _searchDebounce?.cancel();
+    for (final timer in _rendererFailoverTimers.values) {
+      timer.cancel();
+    }
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
     for (final subscription in _audioCompleteSubscriptions.values) {

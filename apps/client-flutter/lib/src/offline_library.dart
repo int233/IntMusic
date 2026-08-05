@@ -50,6 +50,7 @@ class _OfflineTrackCopy {
   String get copyKey => '$rootExternalId\u0000$fileExternalId';
 
   _OfflineTrackCopy copyWith({
+    Map<String, dynamic>? metadata,
     bool? isFavorite,
     int? playCount,
     int? durationMs,
@@ -64,8 +65,12 @@ class _OfflineTrackCopy {
       sizeBytes: sizeBytes,
       modifiedAt: modifiedAt,
       metadata: durationMs == null
-          ? metadata
-          : <String, dynamic>{...metadata, 'duration_ms': durationMs},
+          ? metadata ?? this.metadata
+          : <String, dynamic>{
+              ...this.metadata,
+              ...?metadata,
+              'duration_ms': durationMs,
+            },
       isFavorite: isFavorite ?? this.isFavorite,
       playCount: playCount ?? this.playCount,
     );

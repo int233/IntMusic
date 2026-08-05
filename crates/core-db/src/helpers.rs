@@ -1,5 +1,28 @@
 use super::*;
 
+pub(crate) async fn track_artist_role_names(
+    pool: &DbPool,
+    track_id: i64,
+    role: &str,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query(
+        r#"
+        SELECT ar.name
+        FROM track_artists ta
+        JOIN artists ar ON ar.id = ta.artist_id
+        WHERE ta.track_id = ?1 AND ta.role = ?2
+        ORDER BY ta.position, ar.name
+        "#,
+    )
+    .bind(track_id)
+    .bind(role)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| row.try_get("name"))
+    .collect::<Result<Vec<String>, sqlx::Error>>()?)
+}
+
 pub(crate) fn row_to_library_root(row: sqlx::sqlite::SqliteRow) -> Result<LibraryRoot> {
     Ok(LibraryRoot {
         id: row.try_get("id")?,
@@ -81,7 +104,14 @@ pub(crate) async fn manual_playlist_tracks(
     let rows = sqlx::query(
         track_select_sql(
             r#"
-            JOIN playlist_items pi ON pi.track_id = t.id
+            JOIN playlist_items pi ON t.id = COALESCE(
+                (
+                    SELECT member.canonical_track_id
+                    FROM track_merge_members member
+                    WHERE member.track_id = pi.track_id
+                ),
+                pi.track_id
+            )
             WHERE pi.playlist_id = ?1
             GROUP BY t.id, pi.id
             ORDER BY pi.position, pi.id
@@ -148,7 +178,9 @@ pub(crate) async fn smart_playlist_tracks(
 ) -> Result<Vec<TrackSummary>> {
     let mut query = QueryBuilder::<Sqlite>::new("");
     push_track_select_builder(&mut query);
+    let has_rules = !smart_rule_values(rules).is_empty();
     push_smart_where(&mut query, rules, include_max_tag_rating_as_favorite);
+    push_visible_recording_filter(&mut query, has_rules);
     query.push(" GROUP BY t.id ORDER BY t.title COLLATE NOCASE LIMIT ");
     query.push_bind(limit.clamp(1, 5000) as i64);
     query.push(" OFFSET ");
@@ -165,12 +197,48 @@ pub(crate) async fn smart_playlist_track_count(
 ) -> Result<i64> {
     let mut query = QueryBuilder::<Sqlite>::new("SELECT COUNT(DISTINCT t.id) AS count");
     push_track_from_joins(&mut query);
+    let has_rules = !smart_rule_values(rules).is_empty();
     push_smart_where(&mut query, rules, include_max_tag_rating_as_favorite);
+    push_visible_recording_filter(&mut query, has_rules);
     Ok(query
         .build()
         .fetch_one(pool)
         .await?
         .try_get::<i64, _>("count")?)
+}
+
+fn push_visible_recording_filter(query: &mut QueryBuilder<'_, Sqlite>, has_where: bool) {
+    query.push(if has_where { " AND " } else { " WHERE " });
+    query.push(
+        r#"
+        NOT EXISTS (
+            SELECT 1 FROM track_merge_members member
+            WHERE member.track_id = t.id
+        )
+        AND (
+            NOT EXISTS (
+                SELECT 1 FROM legacy_track_catalog_links missing_link
+                WHERE missing_link.track_id = t.id
+            )
+            OR t.id = (
+                SELECT MIN(candidate.track_id)
+                FROM legacy_track_catalog_links candidate
+                JOIN release_tracks candidate_release
+                  ON candidate_release.id = candidate.release_track_id
+                LEFT JOIN track_merge_members member
+                  ON member.track_id = candidate.track_id
+                WHERE member.track_id IS NULL
+                  AND candidate_release.recording_id = (
+                    SELECT current_release.recording_id
+                    FROM legacy_track_catalog_links current_link
+                    JOIN release_tracks current_release
+                      ON current_release.id = current_link.release_track_id
+                    WHERE current_link.track_id = t.id
+                  )
+            )
+        )
+        "#,
+    );
 }
 
 pub(crate) fn push_track_select_builder(query: &mut QueryBuilder<'_, Sqlite>) {
@@ -201,6 +269,11 @@ pub(crate) fn push_track_select_builder(query: &mut QueryBuilder<'_, Sqlite>) {
                 SELECT COUNT(*)
                 FROM playback_sessions ps
                 WHERE ps.track_id = t.id
+                   OR ps.track_id IN (
+                        SELECT member.track_id
+                        FROM track_merge_members member
+                        WHERE member.canonical_track_id = t.id
+                   )
             ) AS play_count
         "#,
     );
@@ -347,6 +420,7 @@ pub(crate) fn push_smart_rule(
             };
             push_bool_rule(query, expression, value)
         }
+        "library_source" | "source" => push_library_source_rule(query, &operator, value),
         _ => false,
     }
 }
@@ -674,6 +748,11 @@ pub(crate) fn track_select_sql_extra(extra_select: &str, tail: &str) -> String {
                 SELECT COUNT(*)
                 FROM playback_sessions ps
                 WHERE ps.track_id = t.id
+                   OR ps.track_id IN (
+                        SELECT member.track_id
+                        FROM track_merge_members member
+                        WHERE member.canonical_track_id = t.id
+                   )
             ) AS play_count
         FROM tracks t
         JOIN files f ON f.id = t.file_id

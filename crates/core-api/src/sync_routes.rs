@@ -85,6 +85,43 @@ pub(crate) async fn upsert_client_library_manifest(
     Ok(Json(result))
 }
 
+pub(crate) async fn list_client_library_pending_files(
+    State(state): State<AppState>,
+) -> ApiResult<Vec<protocol::ClientLibraryPendingFile>> {
+    Ok(Json(
+        core_db::list_client_library_pending_files(state.pool()).await?,
+    ))
+}
+
+pub(crate) async fn resolve_client_library_file(
+    State(state): State<AppState>,
+    Path(file_id): Path<i64>,
+    Json(payload): Json<ResolveClientLibraryFileRequest>,
+) -> ApiResult<protocol::ResolveClientLibraryFileResult> {
+    let result = core_db::resolve_client_library_file(
+        state.pool(),
+        file_id,
+        &payload.action,
+        payload.target_track_id,
+        payload.metadata.as_ref(),
+    )
+    .await?;
+    state
+        .bump_library_revision("client library file resolved")
+        .await;
+    state.emit(
+        "library.client_file_resolved",
+        json!({
+            "file_id": file_id,
+            "action": result.action,
+            "track_id": result.track_id,
+            "media_variant_id": result.media_variant_id,
+            "scan_status": result.scan_status,
+        }),
+    );
+    Ok(Json(result))
+}
+
 pub(crate) async fn remove_client_library_root(
     State(state): State<AppState>,
     Path((device_id, root_external_id)): Path<(String, String)>,

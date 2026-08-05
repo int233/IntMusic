@@ -2,19 +2,10 @@ use super::*;
 
 pub(crate) fn client_track_manifest_to_ingest(
     metadata: &ClientTrackManifest,
-    relative_path: &str,
+    _relative_path: &str,
 ) -> TrackIngest {
-    let fallback_title = Path::new(relative_path)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("Unknown track")
-        .to_string();
     TrackIngest {
-        title: if metadata.title.trim().is_empty() {
-            fallback_title
-        } else {
-            metadata.title.trim().to_string()
-        },
+        title: metadata.title.trim().to_string(),
         sort_title: metadata.sort_title.clone(),
         subtitle: metadata.subtitle.clone(),
         album: metadata.album.clone(),

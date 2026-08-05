@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use protocol::{VolumeControlMode, ZoneVolume, ZoneVolumeUpdate};
+use protocol::{ClientLibraryManifestRequest, VolumeControlMode, ZoneVolume, ZoneVolumeUpdate};
 
 #[test]
 fn openapi_documents_every_registered_http_path() {
@@ -38,6 +38,36 @@ fn dual_layer_volume_payloads_accept_legacy_clients() {
     assert!(!state.player_muted);
     assert_eq!(state.system_volume, None);
     assert_eq!(state.system_muted, None);
+}
+
+#[test]
+fn client_library_manifest_accepts_metadata_parse_failures() {
+    let manifest: ClientLibraryManifestRequest = serde_json::from_value(serde_json::json!({
+        "device_id": "android-client",
+        "device_name": "Android client",
+        "root": {
+            "external_id": "music",
+            "display_name": "Music",
+            "path_hint": "/storage/emulated/0/Music"
+        },
+        "scan_id": "scan-1",
+        "files": [{
+            "external_id": "sample.mp3",
+            "relative_path": "sample.mp3",
+            "extension": "mp3",
+            "size_bytes": 4,
+            "modified_at": "2026-07-29T15:00:00Z",
+            "metadata_status": "tag_parse_error",
+            "metadata_message": "unsupported tag",
+            "metadata_source": "embedded_tag",
+            "metadata": {}
+        }]
+    }))
+    .expect("metadata parse failures remain valid manifest entries");
+
+    assert_eq!(manifest.files.len(), 1);
+    assert!(manifest.files[0].metadata.title.is_empty());
+    assert!(manifest.files[0].metadata.track_artists.is_empty());
 }
 
 #[test]

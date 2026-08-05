@@ -5,7 +5,7 @@ extension _DashboardConnection on _CoreDashboardState {
     if (_zoneRefreshBusy) return;
     _zoneRefreshBusy = true;
     try {
-      final zones = await _api.getJson('/zones') as List<dynamic>;
+      final zones = await _api.getCriticalJson('/zones') as List<dynamic>;
       _zoneRefreshFailures = 0;
       if (!mounted) {
         return;
@@ -71,6 +71,16 @@ extension _DashboardConnection on _CoreDashboardState {
             _mutate(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
             ClientLog.event('core.websocket.closed', level: 'warning');
+            unawaited(
+              Future<void>.delayed(
+                const Duration(milliseconds: 1200),
+                () async {
+                  if (mounted && _eventSocket == null) {
+                    await _failoverActiveCoreStreams('core_websocket_closed');
+                  }
+                },
+              ),
+            );
             _scheduleEventReconnect(requestPlaybackSync: true);
           }
         },
@@ -80,6 +90,16 @@ extension _DashboardConnection on _CoreDashboardState {
             _mutate(() => _rendererStatus = 'Renderer disconnected');
             _eventSocket = null;
             ClientLog.error('core.websocket.error', error);
+            unawaited(
+              Future<void>.delayed(
+                const Duration(milliseconds: 1200),
+                () async {
+                  if (mounted && _eventSocket == null) {
+                    await _failoverActiveCoreStreams('core_websocket_error');
+                  }
+                },
+              ),
+            );
             _scheduleEventReconnect(requestPlaybackSync: true);
           }
         },

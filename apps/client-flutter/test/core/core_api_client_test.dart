@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -81,4 +82,42 @@ void main() {
     expect(requests, 1);
     expect(CoreApiClient.debugPooledClientCount, before);
   });
+
+  test(
+    'a timed-out bulk request cannot starve critical Core traffic',
+    () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final releaseSlowRequests = Completer<void>();
+      final subscription = server.listen((request) async {
+        if (request.uri.path.endsWith('/slow')) {
+          await releaseSlowRequests.future;
+        }
+        request.response.write(jsonEncode(<String, Object?>{'ready': true}));
+        await request.response.close();
+      });
+      addTearDown(() async {
+        if (!releaseSlowRequests.isCompleted) {
+          releaseSlowRequests.complete();
+        }
+        await subscription.cancel();
+        await server.close(force: true);
+      });
+      final client = CoreApiClient('http://127.0.0.1:${server.port}');
+
+      await expectLater(
+        client.getBulkJson(
+          '/slow',
+          requestTimeout: const Duration(milliseconds: 60),
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+
+      expect(await client.getCriticalJson('/fast'), <String, Object?>{
+        'ready': true,
+      });
+      expect(await client.getBulkJson('/fast'), <String, Object?>{
+        'ready': true,
+      });
+    },
+  );
 }

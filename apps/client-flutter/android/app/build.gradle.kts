@@ -1,7 +1,43 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use(keystoreProperties::load)
+}
+
+fun signingValue(environmentName: String, propertyName: String): String? =
+    System.getenv(environmentName)
+        ?.trim()
+        ?.takeIf(String::isNotEmpty)
+        ?: keystoreProperties
+            .getProperty(propertyName)
+            ?.trim()
+            ?.takeIf(String::isNotEmpty)
+
+val releaseKeystorePath = signingValue("ANDROID_KEYSTORE_PATH", "storeFile")
+val releaseKeystorePassword = signingValue("ANDROID_KEYSTORE_PASSWORD", "storePassword")
+val releaseKeyAlias = signingValue("ANDROID_KEY_ALIAS", "keyAlias")
+val releaseKeyPassword = signingValue("ANDROID_KEY_PASSWORD", "keyPassword")
+val releaseSigningAvailable = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+val releaseSigningRequired =
+    System.getenv("INTMUSIC_REQUIRE_RELEASE_SIGNING")?.equals("true", ignoreCase = true) == true
+
+if (releaseSigningRequired && !releaseSigningAvailable) {
+    throw GradleException(
+        "IntMusic release signing is required, but the Android keystore configuration is incomplete.",
+    )
 }
 
 android {
@@ -25,11 +61,27 @@ android {
         versionName = flutter.versionName
     }
 
+    signingConfigs {
+        if (releaseSigningAvailable) {
+            create("release") {
+                storeFile = rootProject.file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            // Local development can still build without secret material. Official
+            // CI builds set INTMUSIC_REQUIRE_RELEASE_SIGNING=true and may never
+            // fall back to an ephemeral debug certificate.
+            signingConfig = if (releaseSigningAvailable) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 }

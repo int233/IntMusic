@@ -48,6 +48,7 @@ enum _AppRouteKind {
   playlists,
   playback,
   history,
+  libraryManagement,
   settings,
   search,
   track,
@@ -82,7 +83,8 @@ class _AppRoute {
       4 => _AppRouteKind.playlists,
       5 => _AppRouteKind.playback,
       6 => _AppRouteKind.history,
-      7 => _AppRouteKind.settings,
+      7 => _AppRouteKind.libraryManagement,
+      8 => _AppRouteKind.settings,
       _ => _AppRouteKind.home,
     });
   }
@@ -95,7 +97,8 @@ class _AppRoute {
     _AppRouteKind.playlists => 4,
     _AppRouteKind.playback => 5,
     _AppRouteKind.history => 6,
-    _AppRouteKind.settings => 7,
+    _AppRouteKind.libraryManagement => 7,
+    _AppRouteKind.settings => 8,
     _ => null,
   };
 
@@ -107,12 +110,13 @@ class _AppRoute {
     _AppRouteKind.playlists => 4,
     _AppRouteKind.playback => 5,
     _AppRouteKind.history => 6,
-    _AppRouteKind.settings => 7,
-    _AppRouteKind.search => 8,
-    _AppRouteKind.track => 9,
-    _AppRouteKind.album => 10,
-    _AppRouteKind.artist => 11,
-    _AppRouteKind.playlist => 12,
+    _AppRouteKind.libraryManagement => 7,
+    _AppRouteKind.settings => 8,
+    _AppRouteKind.search => 9,
+    _AppRouteKind.track => 10,
+    _AppRouteKind.album => 11,
+    _AppRouteKind.artist => 12,
+    _AppRouteKind.playlist => 13,
   };
 
   String get animationKey => switch (kind) {
@@ -132,6 +136,7 @@ class _AppRoute {
     _AppRouteKind.playlists => 'Playlists',
     _AppRouteKind.playback => 'Playback',
     _AppRouteKind.history => 'History',
+    _AppRouteKind.libraryManagement => 'Library management',
     _AppRouteKind.settings => 'Settings',
     _AppRouteKind.search => 'Search results',
     _AppRouteKind.track => 'Track detail',

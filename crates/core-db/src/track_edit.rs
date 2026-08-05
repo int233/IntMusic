@@ -263,18 +263,7 @@ pub async fn update_track_metadata(
 }
 
 pub async fn track_file_path(pool: &DbPool, track_id: i64) -> Result<String> {
-    Ok(sqlx::query(
-        r#"
-        SELECT f.path
-        FROM tracks t
-        JOIN files f ON f.id = t.file_id
-        WHERE t.id = ?1
-        "#,
-    )
-    .bind(track_id)
-    .fetch_one(pool)
-    .await?
-    .try_get("path")?)
+    Ok(track_stream_source(pool, track_id).await?.0)
 }
 
 pub async fn search_tracks(pool: &DbPool, query: &str, limit: u32) -> Result<Vec<TrackSummary>> {
@@ -282,7 +271,8 @@ pub async fn search_tracks(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
     let rows = sqlx::query(
         track_select_sql(
             r#"
-            WHERE t.title LIKE ?1
+            WHERE (
+                  t.title LIKE ?1
                OR al.title LIKE ?1
                OR EXISTS (
                     SELECT 1
@@ -295,6 +285,33 @@ pub async fn search_tracks(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
                     FROM lyrics l
                     WHERE l.track_id = t.id AND l.text LIKE ?1
                )
+              )
+              AND NOT EXISTS (
+                    SELECT 1 FROM track_merge_members member
+                    WHERE member.track_id = t.id
+              )
+              AND (
+                    NOT EXISTS (
+                      SELECT 1 FROM legacy_track_catalog_links missing_link
+                      WHERE missing_link.track_id = t.id
+                    )
+                    OR t.id = (
+                    SELECT MIN(candidate.track_id)
+                    FROM legacy_track_catalog_links candidate
+                    JOIN release_tracks candidate_release
+                      ON candidate_release.id = candidate.release_track_id
+                    LEFT JOIN track_merge_members member
+                      ON member.track_id = candidate.track_id
+                    WHERE member.track_id IS NULL
+                      AND candidate_release.recording_id = (
+                        SELECT current_release.recording_id
+                        FROM legacy_track_catalog_links current_link
+                        JOIN release_tracks current_release
+                          ON current_release.id = current_link.release_track_id
+                        WHERE current_link.track_id = t.id
+                      )
+                    )
+              )
             GROUP BY t.id
             ORDER BY t.id
             LIMIT ?2
@@ -315,11 +332,18 @@ pub async fn search_albums(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
     let rows = sqlx::query(
         r#"
         SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
-               al.cover_asset_id, COUNT(t.id) AS track_count
+               al.cover_asset_id,
+               COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
+                   'release:' || links.release_track_id,
+                   'legacy:' || t.id
+               ) END) AS track_count
         FROM albums al
         LEFT JOIN tracks t ON t.album_id = al.id
+        LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        LEFT JOIN track_merge_members member ON member.track_id = t.id
         WHERE al.title LIKE ?1 OR al.album_artist_display LIKE ?1
         GROUP BY al.id
+        HAVING track_count > 0
         ORDER BY al.title COLLATE NOCASE
         LIMIT ?2
         "#,

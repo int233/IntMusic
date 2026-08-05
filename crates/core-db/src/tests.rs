@@ -1,5 +1,10 @@
 use super::*;
 
+mod client_library_resolution;
+mod library_management;
+mod smart_playlists;
+mod track_merge;
+
 async fn test_pool() -> (DbPool, PathBuf) {
     let path =
         std::env::temp_dir().join(format!("intmusic-core-db-{}.sqlite", uuid::Uuid::new_v4()));
@@ -644,6 +649,9 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
                         duration_ms: Some(180_000),
                         bitrate: Some(2_400_000),
                         bit_depth: Some(24),
+                        metadata_status: "ready".to_string(),
+                        metadata_message: None,
+                        metadata_source: Some("embedded_tag".to_string()),
                         metadata: ClientTrackManifest {
                             title: "Song".to_string(),
                             album: Some("Album".to_string()),
@@ -1001,7 +1009,8 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
     let statuses = list_client_library_roots(&pool)
         .await
         .expect("list client roots");
-    assert_eq!(statuses.len(), 2);
+    assert_eq!(statuses.len(), 1);
+    assert!(statuses.iter().all(|status| status.device_id != "dev-b"));
     assert_eq!(
         list_library_roots(&pool)
             .await

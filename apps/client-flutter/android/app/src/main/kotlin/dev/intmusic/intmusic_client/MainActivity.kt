@@ -9,6 +9,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -32,10 +33,13 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val PICK_LIBRARY_FOLDER_REQUEST = 41021
         private const val READ_LIBRARY_PERMISSION_REQUEST = 41022
+        private const val SAVE_FILE_REQUEST = 41023
     }
 
     private var mediaServiceStarted = false
     private var pendingLibraryFolderResult: MethodChannel.Result? = null
+    private var pendingFileSaveResult: MethodChannel.Result? = null
+    private var pendingFileSaveSource: File? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -84,6 +88,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "selectClientLibraryFolder" -> selectClientLibraryFolder(result)
                 "restoreClientLibraryFolder" -> restoreClientLibraryFolder(call.arguments, result)
+                "saveFile" -> saveFile(call.arguments, result)
                 "downloadDistributionTask" ->
                     downloadDistributionTask(call.arguments, result)
                 "uploadDistributionSource" ->
@@ -249,9 +254,13 @@ class MainActivity : FlutterActivity() {
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != PICK_LIBRARY_FOLDER_REQUEST) {
-            return
+        when (requestCode) {
+            PICK_LIBRARY_FOLDER_REQUEST -> handleLibraryFolderResult(resultCode, data)
+            SAVE_FILE_REQUEST -> handleFileSaveResult(resultCode, data)
         }
+    }
+
+    private fun handleLibraryFolderResult(resultCode: Int, data: Intent?) {
         val pending = pendingLibraryFolderResult ?: return
         pendingLibraryFolderResult = null
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
@@ -273,6 +282,93 @@ class MainActivity : FlutterActivity() {
             pending.error(
                 "folder_access_failed",
                 "Unable to preserve access to the selected music folder",
+                error.message,
+            )
+        }
+    }
+
+    private fun saveFile(arguments: Any?, result: MethodChannel.Result) {
+        if (pendingFileSaveResult != null) {
+            result.error(
+                "file_save_busy",
+                "Another file export is already in progress",
+                null,
+            )
+            return
+        }
+        val values = arguments as? Map<*, *>
+        val sourcePath = values?.get("sourcePath")?.toString()
+        val suggestedName = values?.get("suggestedName")?.toString()
+        val mimeType = values?.get("mimeType")?.toString()
+        if (sourcePath.isNullOrBlank() || suggestedName.isNullOrBlank()) {
+            result.error(
+                "invalid_file_export",
+                "The file export request is incomplete",
+                null,
+            )
+            return
+        }
+        val source = File(sourcePath)
+        if (!source.isFile || !source.canRead()) {
+            result.error(
+                "file_export_source_unavailable",
+                "The file to export is unavailable",
+                sourcePath,
+            )
+            return
+        }
+        pendingFileSaveResult = result
+        pendingFileSaveSource = source
+        val intent =
+            Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream")
+                .putExtra(Intent.EXTRA_TITLE, suggestedName)
+        try {
+            startActivityForResult(intent, SAVE_FILE_REQUEST)
+        } catch (error: Exception) {
+            pendingFileSaveResult = null
+            pendingFileSaveSource = null
+            result.error(
+                "file_export_unavailable",
+                "No system file provider can save the exported file",
+                error.message,
+            )
+        }
+    }
+
+    private fun handleFileSaveResult(resultCode: Int, data: Intent?) {
+        val pending = pendingFileSaveResult ?: return
+        val source = pendingFileSaveSource
+        pendingFileSaveResult = null
+        pendingFileSaveSource = null
+        val destination = data?.data
+        if (resultCode != Activity.RESULT_OK || destination == null) {
+            pending.success(false)
+            return
+        }
+        if (source == null || !source.isFile) {
+            pending.error(
+                "file_export_source_unavailable",
+                "The file to export is no longer available",
+                null,
+            )
+            return
+        }
+        try {
+            source.inputStream().use { input ->
+                val output =
+                    contentResolver.openOutputStream(destination, "wt")
+                        ?: throw IllegalStateException(
+                            "The selected destination cannot be opened for writing",
+                        )
+                output.use { input.copyTo(it) }
+            }
+            pending.success(true)
+        } catch (error: Exception) {
+            pending.error(
+                "file_export_failed",
+                "Unable to save the exported file",
                 error.message,
             )
         }
@@ -585,29 +681,82 @@ class MainActivity : FlutterActivity() {
                 "application/octet-stream",
                 temporaryName,
             ) ?: throw IllegalStateException("Unable to create the temporary destination file")
-        contentResolver.openOutputStream(temporary, "w")?.use { output ->
-            source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
-        } ?: throw IllegalStateException("Unable to open the destination file for writing")
+        try {
+            writeDocumentFile(temporary, source)
+        } catch (error: Exception) {
+            runCatching { DocumentsContract.deleteDocument(contentResolver, temporary) }
+            throw error
+        }
 
         findDocumentChild(treeUri, parent, finalName)?.let {
             DocumentsContract.deleteDocument(contentResolver, it.first)
         }
-        val renamed =
-            DocumentsContract.renameDocument(contentResolver, temporary, finalName)
-        if (renamed == null) {
-            val destination =
+        val renameFailure =
+            try {
+                if (DocumentsContract.renameDocument(contentResolver, temporary, finalName) != null) {
+                    return
+                }
+                "the storage provider returned no destination"
+            } catch (error: Exception) {
+                error.message ?: error.javaClass.simpleName
+            }
+        findDocumentChild(treeUri, parent, finalName)?.let { existing ->
+            val size = documentSize(existing.first)
+            if (size < 0 || size == source.length()) {
+                return
+            }
+            DocumentsContract.deleteDocument(contentResolver, existing.first)
+        }
+        var destination: Uri? = null
+        try {
+            val created =
                 DocumentsContract.createDocument(
                     contentResolver,
                     parent,
-                    "application/octet-stream",
+                    mimeTypeForFileName(finalName),
                     finalName,
                 ) ?: throw IllegalStateException("Unable to create the destination file")
-            contentResolver.openOutputStream(destination, "w")?.use { output ->
-                source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
-            } ?: throw IllegalStateException("Unable to open the destination file for writing")
-            DocumentsContract.deleteDocument(contentResolver, temporary)
+            destination = created
+            writeDocumentFile(created, source)
+            val size = documentSize(created)
+            if (size >= 0 && size != source.length()) {
+                throw IllegalStateException(
+                    "Saved size $size does not match downloaded size ${source.length()}",
+                )
+            }
+            findDocumentChild(treeUri, parent, temporaryName)?.let {
+                DocumentsContract.deleteDocument(contentResolver, it.first)
+            }
+        } catch (error: Exception) {
+            destination?.let {
+                runCatching { DocumentsContract.deleteDocument(contentResolver, it) }
+            }
+            runCatching {
+                findDocumentChild(treeUri, parent, temporaryName)?.let {
+                    DocumentsContract.deleteDocument(contentResolver, it.first)
+                }
+            }
+            throw IllegalStateException(
+                "Unable to finalize $finalName: rename failed ($renameFailure); " +
+                    "fallback copy failed (${error.message})",
+                error,
+            )
         }
     }
+
+    private fun writeDocumentFile(destination: Uri, source: File) {
+        contentResolver.openOutputStream(destination, "w")?.use { output ->
+            source.inputStream().use { input -> input.copyTo(output, 128 * 1024) }
+        } ?: throw IllegalStateException("Unable to open the destination file for writing")
+    }
+
+    private fun documentSize(uri: Uri): Long =
+        contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+
+    private fun mimeTypeForFileName(fileName: String): String =
+        MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(fileName.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
 
     private fun findDocumentChild(
         treeUri: Uri,

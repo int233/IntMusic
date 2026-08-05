@@ -207,14 +207,28 @@ core/
 
 ## Android 签名注意
 
-当前 Android `release` build type 仍使用 debug signing config，适合内部测试安装，不适合作为正式商店分发包。
+Android `release` build type 优先使用固定的正式签名。GitHub Actions 的非 PR
+构建要求配置以下仓库 Secrets，缺失时直接终止，避免意外发布由临时 debug
+证书签名的 APK：
 
-正式分发前需要：
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
 
-- 生成并保管 upload keystore。
-- 在 Android Gradle 配置中增加 release signing config。
-- 使用 CI secret 或本地未提交的 `key.properties` 注入 keystore 路径和密码。
-- 确认 `IntMusic-Android-*.aab` 由正式 upload key 签名。
+本地构建可以通过环境变量提供同样的值，并用
+`ANDROID_KEYSTORE_PATH` 指向 keystore；也可以在未提交的
+`apps/client-flutter/android/key.properties` 中配置：
+
+```properties
+storeFile=/absolute/path/to/intmusic-release.jks
+storePassword=...
+keyAlias=intmusic
+keyPassword=...
+```
+
+设置 `INTMUSIC_REQUIRE_RELEASE_SIGNING=true` 后，配置不完整会直接失败。未设置时
+仍允许本地测试构建回退到 debug 签名，但该产物不得作为正式更新发布。
 
 ## 推荐发布流程
 

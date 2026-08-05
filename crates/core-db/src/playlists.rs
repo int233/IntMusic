@@ -294,7 +294,8 @@ pub async fn scan_problems(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec
         r#"
         SELECT id AS file_id, path, scan_status, scan_message, updated_at
         FROM files
-        WHERE scan_status != 'ok' AND deleted_at IS NULL
+        WHERE scan_status IN ('needs_attention', 'tag_parse_error')
+          AND deleted_at IS NULL
         ORDER BY updated_at DESC
         LIMIT ?1 OFFSET ?2
         "#,

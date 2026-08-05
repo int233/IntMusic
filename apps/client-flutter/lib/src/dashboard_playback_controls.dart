@@ -103,7 +103,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
       return _currentDeviceSheetSnapshot();
     }
     try {
-      final zones = await _api.getJson('/zones') as List<dynamic>;
+      final zones = await _api.getCriticalJson('/zones') as List<dynamic>;
       if (mounted) {
         _mutatePlayback(() {
           _zones = zones;

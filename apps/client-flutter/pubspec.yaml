@@ -37,6 +37,7 @@ dependencies:
   # newer audioplayers_windows releases require newer C++ coroutine support.
   audioplayers: 6.6.0
   audioplayers_windows: 4.3.0
+  audio_metadata_reader: ^1.7.0
   cached_network_image: ^3.4.1
   crypto: ^3.0.6
   cupertino_icons: ^1.0.8
@@ -52,6 +53,7 @@ dependencies:
   # Android/iOS use the platform SQLite implementation; desktop keeps the
   # bundled FFI implementation below.
   sqflite: ^2.4.2
+  sqflite_common: ^2.5.11
   sqflite_common_ffi: ^2.4.2
 dev_dependencies:
   flutter_test:

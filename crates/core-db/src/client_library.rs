@@ -58,7 +58,36 @@ pub async fn upsert_scanned_file(
         .await?
         .try_get("id")?;
 
-    if let Some(track) = track {
+    let resolution = sqlx::query(
+        r#"
+        SELECT resolution_kind, target_track_id, metadata_json
+        FROM client_file_resolutions
+        WHERE file_id = ?1
+        "#,
+    )
+    .bind(file_id)
+    .fetch_optional(pool)
+    .await?;
+    let resolution_kind = resolution
+        .as_ref()
+        .and_then(|row| row.try_get::<String, _>("resolution_kind").ok());
+    let manual_manifest = resolution
+        .as_ref()
+        .and_then(|row| row.try_get::<Option<String>, _>("metadata_json").ok())
+        .flatten()
+        .map(|value| serde_json::from_str::<ClientTrackManifest>(&value))
+        .transpose()
+        .context("invalid saved file metadata")?;
+    let manual_track = manual_manifest
+        .as_ref()
+        .map(|metadata| client_track_manifest_to_ingest(metadata, &file.relative_path));
+    let effective_track = match resolution_kind.as_deref() {
+        Some("manual_metadata") => manual_track.as_ref(),
+        Some("matched_track") | Some("ignored") => None,
+        _ => track,
+    };
+
+    if let Some(track) = effective_track {
         save_track_metadata_source(pool, file_id, track).await?;
         let mut effective = track.clone();
         if let Some(track_id) = track_id_for_file(pool, file_id).await? {
@@ -76,6 +105,45 @@ pub async fn upsert_scanned_file(
             .await?;
     }
 
+    match resolution_kind.as_deref() {
+        Some("manual_metadata") => {
+            sqlx::query(
+                "UPDATE files SET scan_status = 'ok', scan_message = NULL, updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            mark_client_replica_ready(pool, file_id, &now).await?;
+        }
+        Some("matched_track") => {
+            let target_track_id = resolution
+                .as_ref()
+                .and_then(|row| row.try_get::<Option<i64>, _>("target_track_id").ok())
+                .flatten()
+                .context("matched file resolution is missing its target track")?;
+            attach_client_file_to_track(pool, file_id, target_track_id).await?;
+        }
+        Some("ignored") => {
+            sqlx::query(
+                "UPDATE files SET scan_status = 'ignored', scan_message = NULL, updated_at = ?1 WHERE id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'ignored', updated_at = ?1 WHERE file_id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+        }
+        _ => {}
+    }
+
+    refresh_file_management_issues(pool, file_id).await?;
     Ok(file_id)
 }
 
@@ -117,7 +185,9 @@ pub async fn upsert_client_library_manifest(
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             platform = COALESCE(excluded.platform, devices.platform),
-            last_seen_at = excluded.last_seen_at
+            last_seen_at = excluded.last_seen_at,
+            retired_at = NULL,
+            removed_at = NULL
         "#,
     )
     .bind(device_id)
@@ -145,6 +215,8 @@ pub async fn upsert_client_library_manifest(
             display_name = excluded.display_name,
             path_hint = excluded.path_hint,
             last_seen_at = excluded.last_seen_at,
+            retired_at = NULL,
+            removed_at = NULL,
             updated_at = excluded.updated_at
         "#,
     )
@@ -238,12 +310,78 @@ pub async fn upsert_client_library_manifest(
                 .bind(&shadow_path)
                 .fetch_optional(pool)
                 .await?;
-        let existing_track_id: Option<i64> = if let Some(file_id) = existing_file_id {
-            track_id_for_file(pool, file_id).await?
+        let existing_replica_state = if let Some(file_id) = existing_file_id {
+            sqlx::query(
+                r#"
+                SELECT
+                    replica.media_variant_id,
+                    EXISTS (
+                        SELECT 1
+                        FROM release_track_media_variants relation
+                        JOIN legacy_track_catalog_links links
+                          ON links.release_track_id = relation.release_track_id
+                        WHERE relation.media_variant_id = replica.media_variant_id
+                    ) AS has_catalog_binding,
+                    EXISTS (
+                        SELECT 1
+                        FROM tracks direct_track
+                        JOIN legacy_track_catalog_links direct_link
+                          ON direct_link.track_id = direct_track.id
+                        JOIN release_track_media_variants direct_relation
+                          ON direct_relation.release_track_id = direct_link.release_track_id
+                        WHERE direct_track.file_id = replica.file_id
+                          AND direct_relation.media_variant_id = replica.media_variant_id
+                    ) AS belongs_to_direct_track
+                FROM media_replicas replica
+                WHERE replica.file_id = ?1
+                LIMIT 1
+                "#,
+            )
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await?
         } else {
             None
         };
-        let matching_variant_id: Option<i64> = if existing_track_id.is_none() {
+        let preserve_existing_replica_binding =
+            if let Some(existing_replica_state) = existing_replica_state.as_ref() {
+                existing_replica_state.try_get::<i64, _>("has_catalog_binding")? != 0
+                    && existing_replica_state.try_get::<i64, _>("belongs_to_direct_track")? == 0
+            } else {
+                false
+            };
+        let existing_resolution = if let Some(file_id) = existing_file_id {
+            sqlx::query(
+                r#"
+                SELECT resolution_kind, target_track_id, metadata_json
+                FROM client_file_resolutions
+                WHERE file_id = ?1
+                "#,
+            )
+            .bind(file_id)
+            .fetch_optional(pool)
+            .await?
+        } else {
+            None
+        };
+        let resolution_kind = existing_resolution
+            .as_ref()
+            .and_then(|row| row.try_get::<String, _>("resolution_kind").ok());
+        let resolved_track_id = existing_resolution
+            .as_ref()
+            .and_then(|row| row.try_get::<Option<i64>, _>("target_track_id").ok())
+            .flatten();
+        let manual_metadata = existing_resolution
+            .as_ref()
+            .and_then(|row| row.try_get::<Option<String>, _>("metadata_json").ok())
+            .flatten()
+            .map(|value| serde_json::from_str::<ClientTrackManifest>(&value))
+            .transpose()
+            .context("invalid manual client-file metadata")?;
+        let embedded_metadata_ready = item.metadata_status.trim() == "ready"
+            && !item.metadata.title.trim().is_empty()
+            && !item.metadata.track_artists.is_empty();
+        let matching_variant_id: Option<i64> = if resolution_kind.is_none() {
             if let Some(content_hash) = item
                 .content_hash
                 .as_deref()
@@ -256,8 +394,13 @@ pub async fn upsert_client_library_manifest(
                     FROM media_variants variant
                     JOIN media_replicas replica ON replica.media_variant_id = variant.id
                     JOIN files existing_file ON existing_file.id = replica.file_id
+                    JOIN release_track_media_variants relation
+                      ON relation.media_variant_id = variant.id
+                    JOIN legacy_track_catalog_links links
+                      ON links.release_track_id = relation.release_track_id
                     WHERE variant.content_hash = ?1
                       AND existing_file.size_bytes = ?2
+                      AND existing_file.id <> COALESCE(?3, -1)
                       AND existing_file.deleted_at IS NULL
                     ORDER BY replica.is_primary DESC, variant.id
                     LIMIT 1
@@ -265,6 +408,7 @@ pub async fn upsert_client_library_manifest(
                 )
                 .bind(content_hash)
                 .bind(item.size_bytes)
+                .bind(existing_file_id)
                 .fetch_optional(pool)
                 .await?
             } else if let Some(quick_hash) = item
@@ -279,8 +423,13 @@ pub async fn upsert_client_library_manifest(
                     FROM media_variants variant
                     JOIN media_replicas replica ON replica.media_variant_id = variant.id
                     JOIN files existing_file ON existing_file.id = replica.file_id
+                    JOIN release_track_media_variants relation
+                      ON relation.media_variant_id = variant.id
+                    JOIN legacy_track_catalog_links links
+                      ON links.release_track_id = relation.release_track_id
                     WHERE variant.quick_hash = ?1
                       AND existing_file.size_bytes = ?2
+                      AND existing_file.id <> COALESCE(?3, -1)
                       AND existing_file.deleted_at IS NULL
                     ORDER BY replica.is_primary DESC, variant.id
                     LIMIT 1
@@ -288,6 +437,7 @@ pub async fn upsert_client_library_manifest(
                 )
                 .bind(quick_hash)
                 .bind(item.size_bytes)
+                .bind(existing_file_id)
                 .fetch_optional(pool)
                 .await?
             } else {
@@ -296,7 +446,26 @@ pub async fn upsert_client_library_manifest(
         } else {
             None
         };
-        let metadata = client_track_manifest_to_ingest(&item.metadata, &relative_path);
+        let effective_manifest = manual_metadata.as_ref().unwrap_or(&item.metadata);
+        let metadata = client_track_manifest_to_ingest(effective_manifest, &relative_path);
+        let manually_ignored = resolution_kind.as_deref() == Some("ignored");
+        let manually_matched = resolution_kind.as_deref() == Some("matched_track");
+        let manually_edited = resolution_kind.as_deref() == Some("manual_metadata");
+        let creates_catalog_track = manually_edited
+            || (!manually_ignored
+                && !manually_matched
+                && embedded_metadata_ready
+                && matching_variant_id.is_none()
+                && !preserve_existing_replica_binding);
+        let scan_status = if manually_ignored {
+            "ignored".to_string()
+        } else if manually_matched || matching_variant_id.is_some() {
+            "identified".to_string()
+        } else if creates_catalog_track {
+            "ok".to_string()
+        } else {
+            normalize_client_metadata_status(&item.metadata_status)
+        };
         let file = FileIngest {
             library_root_id: root_id,
             path: shadow_path,
@@ -305,8 +474,8 @@ pub async fn upsert_client_library_manifest(
             size_bytes: item.size_bytes,
             modified_at: item.modified_at.to_rfc3339(),
             quick_hash: item.quick_hash.clone(),
-            scan_status: "ok".to_string(),
-            scan_message: None,
+            scan_status,
+            scan_message: item.metadata_message.clone(),
             codec: item.codec.clone(),
             sample_rate: item.sample_rate,
             channels: item.channels,
@@ -314,9 +483,15 @@ pub async fn upsert_client_library_manifest(
             bitrate: item.bitrate,
             bit_depth: item.bit_depth,
         };
-        let creates_catalog_track = existing_track_id.is_some() || matching_variant_id.is_none();
         let file_id =
             upsert_scanned_file(pool, &file, creates_catalog_track.then_some(&metadata)).await?;
+        if resolution_kind.is_none()
+            && (!metadata.title.trim().is_empty()
+                || !metadata.track_artists.is_empty()
+                || metadata.album.is_some())
+        {
+            save_track_metadata_source(pool, file_id, &metadata).await?;
+        }
         sqlx::query(
             r#"
             UPDATE files
@@ -336,6 +511,17 @@ pub async fn upsert_client_library_manifest(
         .bind(file_id)
         .execute(pool)
         .await?;
+        if manually_ignored {
+            sqlx::query(
+                "UPDATE media_replicas SET availability_state = 'ignored', updated_at = ?1 WHERE file_id = ?2",
+            )
+            .bind(&now)
+            .bind(file_id)
+            .execute(pool)
+            .await?;
+            accepted_files += 1;
+            continue;
+        }
         sqlx::query(
             r#"
             UPDATE media_variants
@@ -352,7 +538,11 @@ pub async fn upsert_client_library_manifest(
         .bind(file_id)
         .execute(pool)
         .await?;
-        if let Some(media_variant_id) = matching_variant_id {
+        if manually_matched {
+            let target_track_id = resolved_track_id
+                .context("matched client-file resolution is missing its target track")?;
+            attach_client_file_to_track(pool, file_id, target_track_id).await?;
+        } else if let Some(media_variant_id) = matching_variant_id {
             sqlx::query(
                 r#"
                 INSERT INTO media_replicas (
@@ -411,13 +601,15 @@ pub async fn upsert_client_library_manifest(
             "#,
         )
         .bind(file_id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?;
-        bindings.push(ClientLibraryFileBinding {
-            external_id: client_file_id.to_string(),
-            track_id: binding_row.try_get("track_id")?,
-            media_variant_id: binding_row.try_get("media_variant_id")?,
-        });
+        if let Some(binding_row) = binding_row {
+            bindings.push(ClientLibraryFileBinding {
+                external_id: client_file_id.to_string(),
+                track_id: binding_row.try_get("track_id")?,
+                media_variant_id: binding_row.try_get("media_variant_id")?,
+            });
+        }
         accepted_files += 1;
     }
 
@@ -502,7 +694,6 @@ pub async fn remove_client_library_root(
     device_id: &str,
     root_external_id: &str,
 ) -> Result<()> {
-    let now = Utc::now().to_rfc3339();
     let root_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT id
@@ -517,35 +708,7 @@ pub async fn remove_client_library_root(
     let Some(root_id) = root_id else {
         return Ok(());
     };
-    sqlx::query("UPDATE library_roots SET enabled = 0, updated_at = ?1 WHERE id = ?2")
-        .bind(&now)
-        .bind(root_id)
-        .execute(pool)
-        .await?;
-    sqlx::query(
-        r#"
-        UPDATE files
-        SET availability_state = 'missing',
-            deleted_at = COALESCE(deleted_at, ?1),
-            updated_at = ?1
-        WHERE library_root_id = ?2
-        "#,
-    )
-    .bind(&now)
-    .bind(root_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE media_replicas
-        SET availability_state = 'missing', updated_at = ?1
-        WHERE library_root_id = ?2
-        "#,
-    )
-    .bind(&now)
-    .bind(root_id)
-    .execute(pool)
-    .await?;
+    manage_library_source(pool, root_id, "remove").await?;
     Ok(())
 }
 
@@ -565,6 +728,7 @@ pub async fn list_client_library_roots(pool: &DbPool) -> Result<Vec<ClientLibrar
             COALESCE(SUM(CASE
                 WHEN file.deleted_at IS NULL
                  AND file.availability_state = 'ready'
+                 AND file.scan_status IN ('ok', 'identified')
                 THEN 1 ELSE 0 END), 0) AS ready_file_count,
             sync.scan_id AS last_scan_id,
             root.last_seen_at,
@@ -575,7 +739,7 @@ pub async fn list_client_library_roots(pool: &DbPool) -> Result<Vec<ClientLibrar
         LEFT JOIN client_library_sync_state sync
           ON sync.device_id = root.owner_device_id
          AND sync.root_external_id = root.external_id
-        WHERE root.root_kind = 'client'
+        WHERE root.root_kind = 'client' AND root.removed_at IS NULL
         GROUP BY root.id
         ORDER BY device.name COLLATE NOCASE, display_name COLLATE NOCASE
         "#,
@@ -603,222 +767,4 @@ pub async fn list_client_library_roots(pool: &DbPool) -> Result<Vec<ClientLibrar
             })
         })
         .collect()
-}
-
-pub async fn apply_client_mutations(
-    pool: &DbPool,
-    request: &ClientMutationBatchRequest,
-) -> Result<ClientMutationBatchResult> {
-    let device_id = request.device_id.trim();
-    let device_name = request.device_name.trim();
-    if device_id.is_empty() || device_id.len() > 200 {
-        bail!("device_id must contain between 1 and 200 characters");
-    }
-    if device_name.is_empty() || device_name.len() > 300 {
-        bail!("device_name must contain between 1 and 300 characters");
-    }
-    if request.mutations.len() > 500 {
-        bail!("a client mutation batch cannot exceed 500 operations");
-    }
-
-    let now = Utc::now().to_rfc3339();
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        r#"
-        INSERT INTO devices (
-            id, name, platform, token_hash, created_at, last_seen_at
-        )
-        VALUES (?1, ?2, ?3, 'client-mutation-sync', ?4, ?4)
-        ON CONFLICT(id) DO UPDATE SET
-            name = excluded.name,
-            platform = COALESCE(excluded.platform, devices.platform),
-            last_seen_at = excluded.last_seen_at
-        "#,
-    )
-    .bind(device_id)
-    .bind(device_name)
-    .bind(&request.platform)
-    .bind(&now)
-    .execute(&mut *tx)
-    .await?;
-
-    let mut applied_ids = Vec::new();
-    let mut duplicate_ids = Vec::new();
-    for mutation in &request.mutations {
-        let mutation_id = mutation.id.trim();
-        if mutation_id.is_empty() || mutation_id.len() > 200 {
-            bail!("mutation id must contain between 1 and 200 characters");
-        }
-        let duplicate: Option<i64> = sqlx::query_scalar(
-            r#"
-            SELECT 1
-            FROM client_mutation_receipts
-            WHERE device_id = ?1 AND mutation_id = ?2
-            "#,
-        )
-        .bind(device_id)
-        .bind(mutation_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if duplicate.is_some() {
-            duplicate_ids.push(mutation_id.to_string());
-            continue;
-        }
-
-        let track_title: String = sqlx::query_scalar("SELECT title FROM tracks WHERE id = ?1")
-            .bind(mutation.track_id)
-            .fetch_one(&mut *tx)
-            .await
-            .with_context(|| {
-                format!(
-                    "offline mutation {} references unknown track {}",
-                    mutation_id, mutation.track_id
-                )
-            })?;
-        let occurred_at = mutation.occurred_at.to_rfc3339();
-        match mutation.kind.as_str() {
-            "favorite" => {
-                let favorite = mutation
-                    .payload
-                    .get("is_favorite")
-                    .and_then(Value::as_bool)
-                    .context("favorite mutation requires payload.is_favorite")?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO user_track_state (
-                        track_id, is_favorite, favorite_updated_at,
-                        created_at, updated_at
-                    )
-                    VALUES (?1, ?2, ?3, ?3, ?3)
-                    ON CONFLICT(track_id) DO UPDATE SET
-                        is_favorite = excluded.is_favorite,
-                        favorite_updated_at = excluded.favorite_updated_at,
-                        updated_at = excluded.updated_at
-                    WHERE user_track_state.favorite_updated_at IS NULL
-                       OR user_track_state.favorite_updated_at <= excluded.favorite_updated_at
-                    "#,
-                )
-                .bind(mutation.track_id)
-                .bind(if favorite { 1_i64 } else { 0_i64 })
-                .bind(&occurred_at)
-                .execute(&mut *tx)
-                .await?;
-            }
-            "playback" => {
-                let started_at = mutation
-                    .payload
-                    .get("started_at")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&occurred_at);
-                let ended_at = mutation
-                    .payload
-                    .get("ended_at")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&occurred_at);
-                DateTime::parse_from_rfc3339(started_at)
-                    .context("playback mutation started_at must be RFC 3339")?;
-                DateTime::parse_from_rfc3339(ended_at)
-                    .context("playback mutation ended_at must be RFC 3339")?;
-                let start_position_ms = mutation
-                    .payload
-                    .get("start_position_ms")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0)
-                    .max(0);
-                let end_position_ms = mutation
-                    .payload
-                    .get("end_position_ms")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(start_position_ms)
-                    .max(0);
-                let reason = mutation
-                    .payload
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("offline");
-                if reason.len() > 100 {
-                    bail!("playback mutation reason cannot exceed 100 characters");
-                }
-                let zone_id = format!("offline:{device_id}");
-                sqlx::query(
-                    r#"
-                    INSERT INTO playback_sessions (
-                        zone_id, track_id, track_title, started_at,
-                        start_position_ms, ended_at, end_position_ms,
-                        end_reason, played_ms, created_at, updated_at
-                    )
-                    VALUES (
-                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                        MAX(?7 - ?5, 0), ?4, ?6
-                    )
-                    "#,
-                )
-                .bind(&zone_id)
-                .bind(mutation.track_id)
-                .bind(&track_title)
-                .bind(started_at)
-                .bind(start_position_ms)
-                .bind(ended_at)
-                .bind(end_position_ms)
-                .bind(reason)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO playback_events (
-                        zone_id, event_type, track_id, track_title,
-                        position_ms, reason, created_at
-                    )
-                    VALUES (?1, 'play_start', ?2, ?3, ?4, 'offline', ?5)
-                    "#,
-                )
-                .bind(&zone_id)
-                .bind(mutation.track_id)
-                .bind(&track_title)
-                .bind(start_position_ms)
-                .bind(started_at)
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    r#"
-                    INSERT INTO playback_events (
-                        zone_id, event_type, track_id, track_title,
-                        position_ms, reason, created_at
-                    )
-                    VALUES (?1, 'stop', ?2, ?3, ?4, ?5, ?6)
-                    "#,
-                )
-                .bind(&zone_id)
-                .bind(mutation.track_id)
-                .bind(&track_title)
-                .bind(end_position_ms)
-                .bind(reason)
-                .bind(ended_at)
-                .execute(&mut *tx)
-                .await?;
-            }
-            kind => bail!("unsupported client mutation kind: {kind}"),
-        }
-        sqlx::query(
-            r#"
-            INSERT INTO client_mutation_receipts (
-                device_id, mutation_id, mutation_kind, occurred_at, applied_at
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            "#,
-        )
-        .bind(device_id)
-        .bind(mutation_id)
-        .bind(&mutation.kind)
-        .bind(&occurred_at)
-        .bind(&now)
-        .execute(&mut *tx)
-        .await?;
-        applied_ids.push(mutation_id.to_string());
-    }
-    tx.commit().await?;
-    Ok(ClientMutationBatchResult {
-        applied_ids,
-        duplicate_ids,
-    })
 }

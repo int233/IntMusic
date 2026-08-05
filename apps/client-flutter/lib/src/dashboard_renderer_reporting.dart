@@ -8,6 +8,11 @@ extension _DashboardRendererReporting on _CoreDashboardState {
     Duration timeout = const Duration(seconds: 4),
   }) async {
     final watch = Stopwatch()..start();
+    _rendererAudioOperationDepthByOutput.update(
+      outputId,
+      (depth) => depth + 1,
+      ifAbsent: () => 1,
+    );
     try {
       final result = await run().timeout(timeout);
       if (watch.elapsed >= const Duration(milliseconds: 500)) {
@@ -33,6 +38,14 @@ extension _DashboardRendererReporting on _CoreDashboardState {
         },
       );
       rethrow;
+    } finally {
+      final remaining =
+          (_rendererAudioOperationDepthByOutput[outputId] ?? 1) - 1;
+      if (remaining <= 0) {
+        _rendererAudioOperationDepthByOutput.remove(outputId);
+      } else {
+        _rendererAudioOperationDepthByOutput[outputId] = remaining;
+      }
     }
   }
 

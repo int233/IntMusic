@@ -38,6 +38,16 @@ extension _DashboardSync on _CoreDashboardState {
   Future<void> _activateOfflineMode() async {
     if (_offlineMode) return;
     await _rendererAudioInitialization;
+    final cachedSnapshot = await _ClientCacheStore.load(
+      _coreUrlController.text,
+    );
+    final cacheMatchesLibrary =
+        cachedSnapshot.serverId == null ||
+        _offlineLibrary.serverId == null ||
+        cachedSnapshot.serverId == _offlineLibrary.serverId;
+    final cachedValues = cacheMatchesLibrary
+        ? cachedSnapshot.values
+        : const <String, dynamic>{};
     final previousActiveOutput = _clientOutputForZone(_activeZoneId());
     for (final task in const <String>[
       'renderer-heartbeat',
@@ -52,6 +62,7 @@ extension _DashboardSync on _CoreDashboardState {
     _eventReconnectTimer?.cancel();
     await _eventSocket?.close();
     _eventSocket = null;
+    await _failoverActiveCoreStreams('offline_transition');
     final offlineZones = await _buildOfflineRendererZones();
     final offlineSelectedOutput =
         previousActiveOutput != null &&
@@ -75,33 +86,55 @@ extension _DashboardSync on _CoreDashboardState {
         if (_intValue(value['id']) != null)
           _intValue(value['id'])!: value.cast<String, dynamic>(),
     };
-    final tracks = _tracks.isEmpty
-        ? localTracks.values.toList(growable: false)
-        : _tracks
-              .map((value) {
-                final cached = _asMap(value);
-                final local = localTracks[_intValue(cached['id'])];
-                if (local == null) {
-                  return <String, dynamic>{
-                    ...cached,
-                    '_local_available': false,
-                  };
-                }
-                return <String, dynamic>{
-                  ...cached,
-                  'is_favorite': local['is_favorite'] ?? cached['is_favorite'],
-                  'play_count': local['play_count'] ?? cached['play_count'],
-                  '_offline': true,
-                  '_local_available': true,
-                };
-              })
-              .toList(growable: false);
+    final canonicalTracks = _tracks.isNotEmpty
+        ? _tracks
+        : (cachedValues['tracks'] as List?) ?? const <dynamic>[];
+    final tracks = canonicalTracks
+        .map((value) {
+          final cached = _asMap(value);
+          final local = localTracks[_intValue(cached['id'])];
+          if (local == null) {
+            return <String, dynamic>{...cached, '_local_available': false};
+          }
+          return <String, dynamic>{
+            ...cached,
+            'is_favorite': local['is_favorite'] ?? cached['is_favorite'],
+            'play_count': local['play_count'] ?? cached['play_count'],
+            '_offline': true,
+            '_local_available': true,
+          };
+        })
+        .toList(growable: true);
+    final canonicalTrackIds = <int>{
+      for (final value in tracks)
+        if (_intValue(_asMap(value)['id']) != null)
+          _intValue(_asMap(value)['id'])!,
+    };
+    tracks.addAll(
+      localTracks.entries
+          .where((entry) => !canonicalTrackIds.contains(entry.key))
+          .map(
+            (entry) => <String, dynamic>{
+              ...entry.value,
+              '_local_available': true,
+              '_metadata_pending': true,
+            },
+          ),
+    );
     final albums = _albums.isEmpty
-        ? _offlineAlbumSummaries(_offlineLibrary)
+        ? ((cachedValues['albums'] as List?) ??
+              _offlineAlbumSummaries(_offlineLibrary))
         : _albums;
     final artists = _artists.isEmpty
-        ? _offlineArtistSummaries(_offlineLibrary)
+        ? ((cachedValues['artists'] as List?) ??
+              _offlineArtistSummaries(_offlineLibrary))
         : _artists;
+    final playlists = _playlists.isEmpty
+        ? (cachedValues['playlists'] as List?) ?? const <dynamic>[]
+        : _playlists;
+    final playbackHistory = _playbackHistory.isEmpty
+        ? (cachedValues['playback_history'] as List?) ?? const <dynamic>[]
+        : _playbackHistory;
     final offlinePlayback = <String, dynamic>{
       'zone_id': offlineSelectedOutput,
       'state': selectedOfflineZone['state'] ?? 'stopped',
@@ -118,6 +151,8 @@ extension _DashboardSync on _CoreDashboardState {
       _tracks = tracks;
       _albums = albums;
       _artists = artists;
+      _playlists = playlists;
+      _playbackHistory = playbackHistory;
       _outputs = offlineZones;
       _zones = offlineZones;
       _selectedZoneId = offlineSelectedOutput;
@@ -153,6 +188,16 @@ extension _DashboardSync on _CoreDashboardState {
         'write_rating_on_favorite': false,
       };
     });
+    final activeOutput = _offlineOutputForZone(offlineSelectedOutput);
+    if (_rendererLocalFileByOutput[activeOutput] == true &&
+        selectedOfflineZone['state']?.toString() == 'playing' &&
+        _offlinePlaybackStartedAt == null) {
+      final positionMs = _intValue(selectedOfflineZone['position_ms']) ?? 0;
+      _offlinePlaybackStartedAt = DateTime.now().toUtc().subtract(
+        Duration(milliseconds: positionMs),
+      );
+      _offlinePlaybackStartPositionMs = positionMs;
+    }
     ClientLog.event(
       'client.offline.activated',
       data: <String, Object?>{
@@ -232,7 +277,7 @@ extension _DashboardSync on _CoreDashboardState {
   }
 
   Future<void> _refreshFromCurrentCore() async {
-    final status = _asMap(await _api.getJson('/status'));
+    final status = _asMap(await _api.getCriticalJson('/status'));
     if (!_isIntMusicCoreStatus(status)) {
       throw StateError('Not an IntMusic core: ${_coreUrlController.text}');
     }
@@ -243,6 +288,9 @@ extension _DashboardSync on _CoreDashboardState {
     );
     _rendererRegisteredCoreUrl = coreUrl;
     await _connectEventStream();
+    // Once the Core has accepted registration, keep liveness independent from
+    // the larger metadata/cache refresh that follows.
+    _startRendererHeartbeat();
     final serverId = status['server_id']?.toString() ?? '';
     final syncSnapshot = await _fetchSyncSnapshot(
       status,
@@ -250,7 +298,7 @@ extension _DashboardSync on _CoreDashboardState {
     );
     final results = await Future.wait<dynamic>([
       _api.getJson('/outputs'),
-      _api.getJson('/zones'),
+      _api.getCriticalJson('/zones'),
       _api.getJson('/diagnostics'),
       _api.getJson('/settings/server'),
       _api.getJson('/playback/stats?top_limit=20'),
@@ -315,13 +363,16 @@ extension _DashboardSync on _CoreDashboardState {
         },
       });
     }
-    if (_offlineMode) {
+    final wasOffline = _offlineMode;
+    final continuingOutputId = wasOffline
+        ? _offlineOutputForZone(_playback?['zone_id']?.toString())
+        : null;
+    final continuingLocally =
+        continuingOutputId != null &&
+        _rendererLocalFileByOutput[continuingOutputId] == true &&
+        _rendererLoadedTrackByOutput[continuingOutputId] != null;
+    if (wasOffline) {
       await _finishOfflinePlayback('reconnected');
-      final outputId = _offlineOutputForZone(_playback?['zone_id']?.toString());
-      await (await _playerForOutput(outputId)).stop();
-      _rendererLoadedTrackByOutput.remove(outputId);
-      _rendererLocalFileByOutput.remove(outputId);
-      _rendererPlaybackByOutput.remove(outputId);
     }
     _offlineMode = false;
     _offlineReconnectTimer?.cancel();
@@ -348,7 +399,25 @@ extension _DashboardSync on _CoreDashboardState {
     )) {
       final online = onlineTracks[entry.value.trackId];
       if (online == null) continue;
+      final artistDisplay = online['artist_display']?.toString().trim();
       _offlineLibrary.copies[entry.key] = entry.value.copyWith(
+        metadata: <String, dynamic>{
+          ...entry.value.metadata,
+          if ((online['title']?.toString().trim() ?? '').isNotEmpty)
+            'title': online['title'].toString(),
+          if ((online['album_title']?.toString().trim() ?? '').isNotEmpty)
+            'album': online['album_title'].toString(),
+          if (artistDisplay?.isNotEmpty == true)
+            'track_artists': <String>[artistDisplay!],
+          if (_intValue(online['duration_ms']) != null)
+            'duration_ms': _intValue(online['duration_ms']),
+          if (_intValue(online['disc_number']) != null)
+            'disc_number': _intValue(online['disc_number']),
+          if (_intValue(online['track_number']) != null)
+            'track_number': _intValue(online['track_number']),
+          if (_intValue(online['year']) != null)
+            'year': _intValue(online['year']),
+        },
         isFavorite: online['is_favorite'] == true,
         playCount: _intValue(online['play_count']) ?? entry.value.playCount,
       );
@@ -358,6 +427,15 @@ extension _DashboardSync on _CoreDashboardState {
     _syncPlaybackFromSelectedZone();
     await _refreshPlaybackQueue();
     _scheduleActiveTrackDetailLoad(_playback);
+    if (continuingLocally) {
+      await _reportRendererStateSafely('playing', outputId: continuingOutputId);
+      if (mounted) {
+        _rendererStatus = _tr(
+          context,
+          'Reconnected · local playback continues',
+        );
+      }
+    }
     await _persistOverviewValues(<String, dynamic>{
       'outputs': _outputs,
       'zones': _zones,

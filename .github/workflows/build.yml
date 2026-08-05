@@ -9,6 +9,11 @@ jobs:
   android:
     name: Android release build
     runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +27,19 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Restore Android release signing key
+        if: github.event_name != 'pull_request'
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          test -n "$ANDROID_KEYSTORE_PASSWORD"
+          test -n "$ANDROID_KEY_ALIAS"
+          test -n "$ANDROID_KEY_PASSWORD"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" \
+            | base64 --decode > "$RUNNER_TEMP/intmusic-release.jks"
+          test -s "$RUNNER_TEMP/intmusic-release.jks"
+          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/intmusic-release.jks" >> "$GITHUB_ENV"
+          echo "INTMUSIC_REQUIRE_RELEASE_SIGNING=true" >> "$GITHUB_ENV"
+
       - name: Build Android artifacts
         run: |
           ./scripts/build-release-artifacts.sh \
@@ -32,6 +50,7 @@ jobs:
             --output packaging/dist/actions/android
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: intmusic-android
           path: packaging/dist/actions/android/**

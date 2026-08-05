@@ -308,6 +308,13 @@ extension _DashboardDetails on _CoreDashboardState {
     }
   }
 
+  Future<void> _refreshAfterLibraryManagementChange() async {
+    _trackDetailCache.clear();
+    _activeTrackDetail = null;
+    await _ClientCacheStore.invalidateDetails(_coreUrlController.text, 'track');
+    await _refreshAll();
+  }
+
   Future<void> _editTrack(int trackId) async {
     final snapshot = await _run<Map<String, dynamic>>(
       () async => _asMap(await _api.getJson('/tracks/$trackId/edit')),
@@ -462,9 +469,11 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _createSmartPlaylist() async {
+    final sourceOptions = await _smartPlaylistSourceOptions();
+    if (!mounted) return;
     final payload = await _showPanelDialog<Map<String, dynamic>>(
       maxWidth: 760,
-      child: const _SmartPlaylistSheet(),
+      child: _SmartPlaylistSheet(sourceOptions: sourceOptions),
     );
     if (payload == null) {
       return;
@@ -481,9 +490,11 @@ extension _DashboardDetails on _CoreDashboardState {
     int playlistId,
     Map<String, dynamic> detail,
   ) async {
+    final sourceOptions = await _smartPlaylistSourceOptions();
+    if (!mounted) return;
     final payload = await _showPanelDialog<Map<String, dynamic>>(
       maxWidth: 760,
-      child: _SmartPlaylistSheet(detail: detail),
+      child: _SmartPlaylistSheet(detail: detail, sourceOptions: sourceOptions),
     );
     if (payload == null) {
       return;
@@ -499,6 +510,41 @@ extension _DashboardDetails on _CoreDashboardState {
     if (mounted) {
       _mutate(() => _playlistDetailCache[playlistId] = updated);
       unawaited(_persistDetail('playlist', playlistId, updated));
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _smartPlaylistSourceOptions() async {
+    if (_offlineMode) return const <Map<String, dynamic>>[];
+    final unknownDeviceLabel = _tr(context, 'Unknown device');
+    final musicSourceLabel = _tr(context, 'Music source');
+    try {
+      final devices =
+          await _api.getBulkJson('/library-management/devices')
+              as List<dynamic>;
+      return <Map<String, dynamic>>[
+        for (final value in devices)
+          if (value is Map)
+            for (final source
+                in ((_asMap(value)['sources'] as List?) ?? const <dynamic>[]))
+              if (source is Map &&
+                  _asMap(source)['state']?.toString() != 'retired' &&
+                  _intValue(_asMap(source)['root_id']) != null)
+                <String, dynamic>{
+                  'id': _intValue(_asMap(source)['root_id']).toString(),
+                  'device_id': _asMap(value)['device_id']?.toString(),
+                  'device_name':
+                      _asMap(value)['display_name']?.toString() ??
+                      unknownDeviceLabel,
+                  'source_name':
+                      _asMap(source)['display_name']?.toString() ??
+                      musicSourceLabel,
+                  'state': _asMap(source)['state']?.toString() ?? 'offline',
+                  'file_count': _intValue(_asMap(source)['file_count']) ?? 0,
+                },
+      ];
+    } catch (error) {
+      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      return const <Map<String, dynamic>>[];
     }
   }
 

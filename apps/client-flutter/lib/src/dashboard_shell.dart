@@ -362,6 +362,13 @@ extension _DashboardShell on _CoreDashboardState {
           onOpenTrack: _openTrackDetail,
           onPlayTrack: _playTrack,
         );
+      case _AppRouteKind.libraryManagement:
+        return _LibraryManagementPage(
+          coreBaseUrl: _coreUrlController.text,
+          tracks: _tracks,
+          onOpenTrack: _openTrackDetail,
+          onLibraryChanged: _refreshAfterLibraryManagementChange,
+        );
       case _AppRouteKind.settings:
         return _SettingsPage(
           coreUrlController: _coreUrlController,
