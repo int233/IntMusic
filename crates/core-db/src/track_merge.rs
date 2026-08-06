@@ -225,7 +225,7 @@ pub async fn merge_tracks(pool: &DbPool, request: &TrackMergeRequest) -> Result<
     let target_recording_id = target.recording_id;
     let merge_id = Uuid::now_v7().to_string();
     let now = Utc::now().to_rfc3339();
-    let mut transaction = pool.begin().await?;
+    let mut transaction = pool.begin_with("BEGIN IMMEDIATE").await?;
     let mut previous_links = Vec::new();
     let mut inserted_relations = Vec::new();
     let mut previous_master_recordings = BTreeMap::<i64, i64>::new();

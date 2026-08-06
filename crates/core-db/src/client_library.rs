@@ -98,11 +98,6 @@ pub async fn upsert_scanned_file(
         }
         let track_id = upsert_track(pool, file_id, file.library_root_id, &effective).await?;
         ensure_track_media_graph(pool, track_id, file_id, file, &effective).await?;
-    } else {
-        sqlx::query("DELETE FROM tracks WHERE file_id = ?1")
-            .bind(file_id)
-            .execute(pool)
-            .await?;
     }
 
     match resolution_kind.as_deref() {
@@ -568,6 +563,22 @@ pub async fn upsert_client_library_manifest(
             .await?;
             accepted_files += 1;
             continue;
+        }
+        let target_track_id = if manually_matched {
+            resolved_track_id
+        } else if let Some(media_variant_id) = matching_variant_id.or_else(|| {
+            existing_replica_state.as_ref().and_then(|row| {
+                row.try_get::<i64, _>("media_variant_id")
+                    .ok()
+                    .filter(|_| preserve_existing_replica_binding)
+            })
+        }) {
+            canonical_track_id_for_media_variant(pool, media_variant_id).await?
+        } else {
+            None
+        };
+        if let Some(target_track_id) = target_track_id {
+            reconcile_redundant_client_track(pool, file_id, target_track_id).await?;
         }
         sqlx::query(
             r#"

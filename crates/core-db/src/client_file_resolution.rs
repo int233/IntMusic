@@ -146,12 +146,8 @@ pub async fn resolve_client_library_file(
             .bind(&now)
             .execute(pool)
             .await?;
+            reconcile_redundant_client_track(pool, file_id, target_track_id).await?;
             attach_client_file_to_track(pool, file_id, target_track_id).await?;
-            sqlx::query("DELETE FROM tracks WHERE file_id = ?1 AND id <> ?2")
-                .bind(file_id)
-                .bind(target_track_id)
-                .execute(pool)
-                .await?;
             refresh_file_management_issues(pool, file_id).await?;
             resolution_result(pool, file_id, action, Some(target_track_id)).await
         }
@@ -221,10 +217,6 @@ pub async fn resolve_client_library_file(
             .bind(&now)
             .execute(pool)
             .await?;
-            sqlx::query("DELETE FROM tracks WHERE file_id = ?1")
-                .bind(file_id)
-                .execute(pool)
-                .await?;
             sqlx::query(
                 "UPDATE files SET scan_status = 'ignored', scan_message = NULL, updated_at = ?1 WHERE id = ?2",
             )
@@ -271,6 +263,69 @@ pub async fn resolve_client_library_file(
         }
         _ => bail!("unsupported client-file resolution action"),
     }
+}
+
+pub(crate) async fn reconcile_redundant_client_track(
+    pool: &DbPool,
+    file_id: i64,
+    target_track_id: i64,
+) -> Result<()> {
+    let Some(source_track_id) = track_id_for_file(pool, file_id).await? else {
+        return Ok(());
+    };
+    if source_track_id == target_track_id {
+        return Ok(());
+    }
+    let existing_canonical: Option<i64> = sqlx::query_scalar(
+        "SELECT canonical_track_id FROM track_merge_members WHERE track_id = ?1",
+    )
+    .bind(source_track_id)
+    .fetch_optional(pool)
+    .await?;
+    if existing_canonical == Some(target_track_id) {
+        return Ok(());
+    }
+    if let Err(error) = merge_tracks(
+        pool,
+        &TrackMergeRequest {
+            target_track_id,
+            source_track_ids: vec![source_track_id],
+            confirm_conflicts: true,
+        },
+    )
+    .await
+    {
+        // An exact replica can still be attached safely when legacy metadata
+        // conflicts. Keep the old row for queues/history instead of deleting it;
+        // after the replica moves, it is no longer an active catalog result.
+        warn!(
+            file_id,
+            source_track_id,
+            target_track_id,
+            error = %error,
+            "kept a legacy client track while reconciling its physical replica"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) async fn canonical_track_id_for_media_variant(
+    pool: &DbPool,
+    media_variant_id: i64,
+) -> Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        r#"
+        SELECT MIN(COALESCE(member.canonical_track_id, links.track_id))
+        FROM release_track_media_variants relation
+        JOIN legacy_track_catalog_links links
+          ON links.release_track_id = relation.release_track_id
+        LEFT JOIN track_merge_members member ON member.track_id = links.track_id
+        WHERE relation.media_variant_id = ?1
+        "#,
+    )
+    .bind(media_variant_id)
+    .fetch_one(pool)
+    .await?)
 }
 
 async fn resolution_result(

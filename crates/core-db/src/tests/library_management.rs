@@ -392,7 +392,7 @@ async fn batch_actions_and_device_removal_keep_physical_files_safe() {
 }
 
 #[tokio::test]
-async fn matching_a_legacy_catalogued_file_removes_its_placeholder_track() {
+async fn matching_a_legacy_catalogued_file_folds_its_placeholder_track() {
     let (pool, path) = test_pool().await;
     let target_track_id = ingest_test_track(
         &pool,
@@ -449,7 +449,7 @@ async fn matching_a_legacy_catalogued_file_removes_its_placeholder_track() {
             .expect("tracks after match")
             .len(),
         4,
-        "the old placeholder catalog row must not survive a manual match"
+        "the old placeholder must disappear from active catalog results"
     );
     let detail = library_file_detail(&pool, file_id)
         .await

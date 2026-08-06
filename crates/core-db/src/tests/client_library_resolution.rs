@@ -192,13 +192,26 @@ async fn rescanning_a_linked_client_copy_reuses_its_existing_replica() {
     .expect("make the original physical copy unavailable");
 
     let stale_track_id =
-        ingest_test_track(&pool, "stale-retry.flac", "Stale album", "Stale retry").await;
+        ingest_test_track(&pool, "stale-retry.flac", "Shared album", "Shared track").await;
     sqlx::query("UPDATE tracks SET file_id = ?1 WHERE id = ?2")
         .bind(client_file_id)
         .bind(stale_track_id)
         .execute(&pool)
         .await
         .expect("simulate a partially committed retry");
+    sqlx::query(
+        r#"
+        INSERT INTO playback_events (
+            zone_id, event_type, track_id, track_title, created_at
+        )
+        VALUES ('stale-zone', 'play', ?1, 'Shared track', ?2)
+        "#,
+    )
+    .bind(stale_track_id)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&pool)
+    .await
+    .expect("retain a historical reference to the stale track");
 
     let rescanned = upsert_client_library_manifest(&pool, &manifest("scan-2"))
         .await
@@ -209,12 +222,12 @@ async fn rescanning_a_linked_client_copy_reuses_its_existing_replica() {
         rescanned.bindings[0].media_variant_id,
         first.bindings[0].media_variant_id
     );
-    assert!(
+    assert_eq!(
         track_id_for_file(&pool, client_file_id)
             .await
-            .expect("check rescanned direct track")
-            .is_none(),
-        "rescan must not recreate a direct track for a linked physical copy"
+            .expect("check rescanned direct track"),
+        Some(stale_track_id),
+        "the legacy row must remain available to historical foreign keys"
     );
     let stale_track_exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tracks WHERE id = ?1")
         .bind(stale_track_id)
@@ -222,9 +235,17 @@ async fn rescanning_a_linked_client_copy_reuses_its_existing_replica() {
         .await
         .expect("check stale retry track");
     assert_eq!(
-        stale_track_exists, 0,
-        "rescan should remove a partially committed direct-track identity"
+        stale_track_exists, 1,
+        "referenced legacy track rows must not be deleted during reconciliation"
     );
+    let canonical_track_id: Option<i64> = sqlx::query_scalar(
+        "SELECT canonical_track_id FROM track_merge_members WHERE track_id = ?1",
+    )
+    .bind(stale_track_id)
+    .fetch_optional(&pool)
+    .await
+    .expect("check canonicalized retry track");
+    assert_eq!(canonical_track_id, Some(target_track_id));
     let replica_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM media_replicas WHERE file_id = ?1")
             .bind(client_file_id)

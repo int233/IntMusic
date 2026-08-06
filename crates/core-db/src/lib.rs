@@ -79,7 +79,8 @@ pub use artists::*;
 pub use auto_track_merge::*;
 pub use client_file_resolution::*;
 pub(crate) use client_file_resolution::{
-    attach_client_file_to_track, mark_client_replica_ready, normalize_client_metadata_status,
+    attach_client_file_to_track, canonical_track_id_for_media_variant, mark_client_replica_ready,
+    normalize_client_metadata_status, reconcile_redundant_client_track,
 };
 pub use client_library::*;
 pub use client_mutations::*;
