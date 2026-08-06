@@ -112,6 +112,51 @@ async fn confirmed_file_merge_is_folded_and_reversible() {
 }
 
 #[tokio::test]
+async fn album_detail_folds_release_tracks_linked_to_the_same_recording_and_position() {
+    let (pool, path) = test_pool().await;
+    let first = ingest_test_track(&pool, "first-copy.flac", "Shared album", "Shared song").await;
+    let second = ingest_test_track(&pool, "second-copy.m4a", "Shared album", "Shared song").await;
+    let album_id: i64 = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?1")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .expect("album id");
+
+    let before = album_detail(&pool, album_id)
+        .await
+        .expect("album before recording link");
+    assert_eq!(before.tracks.len(), 2);
+
+    link_track_to_recording(&pool, second, first)
+        .await
+        .expect("link the second release track to the same recording");
+
+    let songs = list_tracks(&pool, 100, 0).await.expect("song catalog");
+    assert_eq!(
+        songs
+            .iter()
+            .filter(|track| track.title == "Shared song")
+            .count(),
+        1
+    );
+    let album = album_detail(&pool, album_id)
+        .await
+        .expect("album after recording link");
+    assert_eq!(album.album.track_count, 1);
+    assert_eq!(
+        album
+            .tracks
+            .iter()
+            .filter(|track| track.title == "Shared song")
+            .count(),
+        1,
+        "the album projection must use the same canonical recording identity as the song catalog"
+    );
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
 async fn different_releases_are_not_offered_as_physical_file_merge() {
     let (pool, path) = test_pool().await;
     let first = ingest_test_track(&pool, "album.flac", "Studio album", "Same title").await;

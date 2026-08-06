@@ -48,6 +48,7 @@ pub type DbPool = SqlitePool;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./src/migrations");
 
+mod album_detail;
 mod album_edit;
 mod artists;
 mod auto_track_merge;
@@ -73,6 +74,7 @@ mod track_merge;
 mod track_snapshot;
 mod tracks;
 
+pub use album_detail::*;
 pub use album_edit::*;
 pub(crate) use artists::trimmed_option;
 pub use artists::*;

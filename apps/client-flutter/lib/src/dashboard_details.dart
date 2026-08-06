@@ -355,10 +355,27 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _refreshAfterLibraryManagementChange() async {
-    _trackDetailCache.clear();
-    _activeTrackDetail = null;
-    await _ClientCacheStore.invalidateDetails(_coreUrlController.text, 'track');
+    await _invalidateCatalogDetailCaches();
     await _refreshAll();
+  }
+
+  Future<void> _invalidateCatalogDetailCaches() async {
+    _trackDetailCache.clear();
+    _albumDetailCache.clear();
+    _artistDetailCache.clear();
+    _playlistDetailCache.clear();
+    _activeTrackDetail = null;
+    await Future.wait(
+      const <String>['track', 'album', 'artist', 'playlist'].map(
+        (kind) =>
+            _ClientCacheStore.invalidateDetails(_coreUrlController.text, kind),
+      ),
+    );
+  }
+
+  Future<void> _refreshAfterCatalogIdentityEvent() async {
+    await _invalidateCatalogDetailCaches();
+    await _backgroundLibrarySync(force: true);
   }
 
   Future<void> _editTrack(int trackId) async {

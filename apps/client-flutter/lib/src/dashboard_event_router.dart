@@ -121,7 +121,10 @@ extension _DashboardEventRouter on _CoreDashboardState {
         unawaited(_refreshDistributionJobs());
         unawaited(_pollDistributionTasks());
       }
-      if (eventType == 'library.changed' ||
+      if (eventType == 'library.tracks_merged' ||
+          eventType == 'track.recording_changed') {
+        unawaited(_refreshAfterCatalogIdentityEvent());
+      } else if (eventType == 'library.changed' ||
           eventType == 'client.mutations_applied') {
         unawaited(_backgroundLibrarySync());
       }
