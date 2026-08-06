@@ -70,6 +70,53 @@ pub(crate) async fn album_detail(
     Ok(Json(detail))
 }
 
+pub(crate) async fn album_edit_snapshot(
+    State(state): State<AppState>,
+    Path(album_id): Path<i64>,
+) -> ApiResult<protocol::AlbumEditSnapshot> {
+    let mut snapshot = core_db::album_edit_snapshot(state.pool(), album_id).await?;
+    apply_favorite_settings_to_tracks(&state.config().favorites, &mut snapshot.detail.tracks);
+    Ok(Json(snapshot))
+}
+
+pub(crate) async fn update_album_metadata(
+    State(state): State<AppState>,
+    Path(album_id): Path<i64>,
+    Json(update): Json<UpdateAlbumMetadata>,
+) -> ApiResult<protocol::AlbumEditSnapshot> {
+    let mut snapshot = core_db::update_album_metadata(state.pool(), album_id, &update).await?;
+    apply_favorite_settings_to_tracks(&state.config().favorites, &mut snapshot.detail.tracks);
+    state.bump_library_revision("album metadata updated").await;
+    state.emit(
+        "album.metadata_changed",
+        json!({
+            "album_id": snapshot.detail.album.id,
+            "revision": snapshot.revision,
+        }),
+    );
+    Ok(Json(snapshot))
+}
+
+pub(crate) async fn migrate_album(
+    State(state): State<AppState>,
+    Path(album_id): Path<i64>,
+    Json(request): Json<AlbumMigrationRequest>,
+) -> ApiResult<protocol::AlbumMigrationResult> {
+    let mut result =
+        core_db::migrate_album(state.pool(), album_id, request.target_album_id).await?;
+    apply_favorite_settings_to_tracks(&state.config().favorites, &mut result.detail.tracks);
+    state.bump_library_revision("album migrated").await;
+    state.emit(
+        "album.migrated",
+        json!({
+            "source_album_id": result.source_album_id,
+            "target_album_id": result.target_album_id,
+            "moved_track_count": result.moved_track_count,
+        }),
+    );
+    Ok(Json(result))
+}
+
 pub(crate) async fn list_artists(
     State(state): State<AppState>,
     Query(paging): Query<Paging>,

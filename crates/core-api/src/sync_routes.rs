@@ -8,6 +8,7 @@ pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<CoreStatu
         version: env!("CARGO_PKG_VERSION").to_string(),
         api_version: "v1".to_string(),
         server_id: state.inner.server_id.to_string(),
+        catalog_epoch: state.inner.catalog_epoch.clone(),
         bind_address: state.inner.bind_address.to_string(),
         discovery_service: state.inner.discovery_service.clone(),
         started_at: state.inner.started_at,
@@ -168,8 +169,14 @@ pub(crate) async fn apply_client_mutations(
     Ok(Json(result))
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ClientSyncSnapshotQuery {
+    device_id: Option<String>,
+}
+
 pub(crate) async fn client_sync_snapshot(
     State(state): State<AppState>,
+    Query(query): Query<ClientSyncSnapshotQuery>,
 ) -> ApiResult<ClientSyncSnapshot> {
     // Read the cursor first. Any write racing with this snapshot will therefore
     // remain visible to the next /changes request instead of being skipped.
@@ -215,6 +222,7 @@ pub(crate) async fn client_sync_snapshot(
             .await?;
     Ok(Json(ClientSyncSnapshot {
         server_id: state.inner.server_id.to_string(),
+        catalog_epoch: state.inner.catalog_epoch.clone(),
         cursor,
         generated_at: Utc::now(),
         albums,
@@ -225,6 +233,12 @@ pub(crate) async fn client_sync_snapshot(
         playback_stats: core_db::playback_stats(state.pool(), None, None, 50).await?,
         library_roots: core_db::list_library_roots(state.pool()).await?,
         client_library_roots: core_db::list_client_library_roots(state.pool()).await?,
+        client_file_bindings: match query.device_id.as_deref() {
+            Some(device_id) if !device_id.trim().is_empty() => {
+                core_db::client_library_copy_bindings(state.pool(), device_id).await?
+            }
+            _ => Vec::new(),
+        },
         settings: serde_json::to_value(config).map_err(anyhow::Error::from)?,
     }))
 }

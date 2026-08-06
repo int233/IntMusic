@@ -47,7 +47,11 @@ extension _DashboardBootstrap on _CoreDashboardState {
     if (cached.isEmpty || !mounted) return;
     _mutate(() {
       _cacheServerId = cached.serverId;
-      artworkCacheCoordinator.registerServer(cached.serverId);
+      _cacheCatalogEpoch = cached.catalogEpoch;
+      artworkCacheCoordinator.registerServer(
+        cached.serverId,
+        catalogEpoch: cached.catalogEpoch,
+      );
       _cacheCursor = cached.cursor;
       _applyCachedValues(cached.values);
       _trackDetailCache.addAll(cached.trackDetails);
@@ -104,6 +108,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
     Map<String, dynamic>? diagnostics,
   }) {
     final nextServerId = snapshot['server_id']?.toString();
+    final nextCatalogEpoch = snapshot['catalog_epoch']?.toString();
     final serverChanged =
         _cacheServerId != null &&
         nextServerId != null &&
@@ -120,7 +125,11 @@ extension _DashboardBootstrap on _CoreDashboardState {
       _activeTrackDetailId = null;
     }
     _cacheServerId = nextServerId;
-    artworkCacheCoordinator.registerServer(nextServerId);
+    _cacheCatalogEpoch = nextCatalogEpoch;
+    artworkCacheCoordinator.registerServer(
+      nextServerId,
+      catalogEpoch: nextCatalogEpoch,
+    );
     _cacheCursor = _intValue(snapshot['cursor']) ?? _cacheCursor;
     _albums = (snapshot['albums'] as List?) ?? const <dynamic>[];
     _artists = (snapshot['artists'] as List?) ?? const <dynamic>[];
@@ -132,6 +141,9 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _libraryRoots = (snapshot['library_roots'] as List?) ?? const <dynamic>[];
     _clientLibraryStatuses =
         (snapshot['client_library_roots'] as List?) ?? const <dynamic>[];
+    _reconcileOfflineCopyBindings(
+      (snapshot['client_file_bindings'] as List?) ?? const <dynamic>[],
+    );
     final settings = _asMap(snapshot['settings']);
     _serverSettings = _asMap(settings['server']);
     _favoriteSettings = _asMap(settings['favorites']);

@@ -33,4 +33,17 @@ void main() {
     coordinator.retryFailedImages();
     expect(coordinator.retryRevision.value, before + 1);
   });
+
+  test('catalog epochs never reuse artwork stored under recycled IDs', () {
+    final coordinator = ArtworkCacheCoordinator()
+      ..registerServer('core-server-id', catalogEpoch: 'epoch-a');
+    final before = coordinator.cacheKey('http://core/api/v1/artwork/tracks/42');
+
+    coordinator.registerServer('core-server-id', catalogEpoch: 'epoch-b');
+
+    expect(
+      coordinator.cacheKey('http://core/api/v1/artwork/tracks/42'),
+      isNot(before),
+    );
+  });
 }

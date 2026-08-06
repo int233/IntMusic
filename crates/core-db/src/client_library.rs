@@ -147,6 +147,53 @@ pub async fn upsert_scanned_file(
     Ok(file_id)
 }
 
+pub async fn client_library_copy_bindings(
+    pool: &DbPool,
+    device_id: &str,
+) -> Result<Vec<ClientLibraryCopyBinding>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            root.external_id AS root_external_id,
+            file.client_file_id AS external_id,
+            MIN(COALESCE(merge.canonical_track_id, links.track_id)) AS track_id,
+            replica.media_variant_id
+        FROM files file
+        JOIN library_roots root ON root.id = file.library_root_id
+        JOIN media_replicas replica ON replica.file_id = file.id
+        JOIN release_track_media_variants relation
+          ON relation.media_variant_id = replica.media_variant_id
+        JOIN legacy_track_catalog_links links
+          ON links.release_track_id = relation.release_track_id
+        LEFT JOIN track_merge_members merge ON merge.track_id = links.track_id
+        WHERE root.root_kind = 'client'
+          AND root.owner_device_id = ?1
+          AND root.enabled = 1
+          AND root.retired_at IS NULL
+          AND root.removed_at IS NULL
+          AND file.client_file_id IS NOT NULL
+          AND file.deleted_at IS NULL
+          AND file.availability_state = 'ready'
+          AND replica.availability_state = 'ready'
+        GROUP BY root.external_id, file.client_file_id, replica.media_variant_id
+        ORDER BY root.external_id, file.client_file_id
+        "#,
+    )
+    .bind(device_id.trim())
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ClientLibraryCopyBinding {
+                root_external_id: row.try_get("root_external_id")?,
+                external_id: row.try_get("external_id")?,
+                track_id: row.try_get("track_id")?,
+                media_variant_id: row.try_get("media_variant_id")?,
+            })
+        })
+        .collect()
+}
+
 pub async fn upsert_client_library_manifest(
     pool: &DbPool,
     manifest: &ClientLibraryManifestRequest,
@@ -590,12 +637,16 @@ pub async fn upsert_client_library_manifest(
         }
         let binding_row = sqlx::query(
             r#"
-            SELECT replica.media_variant_id, MIN(links.track_id) AS track_id
+            SELECT
+                replica.media_variant_id,
+                MIN(COALESCE(merge.canonical_track_id, links.track_id)) AS track_id
             FROM media_replicas replica
             JOIN release_track_media_variants relation
               ON relation.media_variant_id = replica.media_variant_id
             JOIN legacy_track_catalog_links links
               ON links.release_track_id = relation.release_track_id
+            LEFT JOIN track_merge_members merge
+              ON merge.track_id = links.track_id
             WHERE replica.file_id = ?1
             GROUP BY replica.media_variant_id
             "#,

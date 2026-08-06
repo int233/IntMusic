@@ -245,9 +245,11 @@ pub(crate) fn push_track_select_builder(query: &mut QueryBuilder<'_, Sqlite>) {
     query.push(
         r#"
         SELECT
-            t.id, t.file_id, t.album_id, t.title,
+            t.id, t.file_id,
+            COALESCE(summary_album_identity.canonical_album_id, t.album_id) AS album_id,
+            t.title,
             COALESCE(GROUP_CONCAT(DISTINCT ar.name), NULL) AS artist_display,
-            al.title AS album_title,
+            COALESCE(NULLIF(summary_album_profile.title, ''), al.title) AS album_title,
             t.disc_number, t.track_number, t.duration_ms, t.year, t.cover_asset_id,
             COALESCE(uts.is_favorite, 0) AS is_favorite,
             uts.user_rating,
@@ -284,7 +286,12 @@ pub(crate) fn push_track_from_joins(query: &mut QueryBuilder<'_, Sqlite>) {
     query.push(
         r#"
         FROM tracks t
-        LEFT JOIN albums al ON al.id = t.album_id
+        LEFT JOIN album_identity_members summary_album_identity
+          ON summary_album_identity.album_id = t.album_id
+        LEFT JOIN albums al
+          ON al.id = COALESCE(summary_album_identity.canonical_album_id, t.album_id)
+        LEFT JOIN album_metadata_profiles summary_album_profile
+          ON summary_album_profile.album_id = al.id
         LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         LEFT JOIN artists ar ON ar.id = ta.artist_id
         LEFT JOIN user_track_state uts ON uts.track_id = t.id
@@ -724,9 +731,11 @@ pub(crate) fn track_select_sql_extra(extra_select: &str, tail: &str) -> String {
         r#"
         SELECT
             {extra_select}
-            t.id, t.file_id, t.album_id, t.title,
+            t.id, t.file_id,
+            COALESCE(summary_album_identity.canonical_album_id, t.album_id) AS album_id,
+            t.title,
             COALESCE(GROUP_CONCAT(DISTINCT ar.name), NULL) AS artist_display,
-            al.title AS album_title,
+            COALESCE(NULLIF(summary_album_profile.title, ''), al.title) AS album_title,
             t.disc_number, t.track_number, t.duration_ms, t.year, t.cover_asset_id,
             COALESCE(uts.is_favorite, 0) AS is_favorite,
             uts.user_rating,
@@ -756,7 +765,12 @@ pub(crate) fn track_select_sql_extra(extra_select: &str, tail: &str) -> String {
             ) AS play_count
         FROM tracks t
         JOIN files f ON f.id = t.file_id
-        LEFT JOIN albums al ON al.id = t.album_id
+        LEFT JOIN album_identity_members summary_album_identity
+          ON summary_album_identity.album_id = t.album_id
+        LEFT JOIN albums al
+          ON al.id = COALESCE(summary_album_identity.canonical_album_id, t.album_id)
+        LEFT JOIN album_metadata_profiles summary_album_profile
+          ON summary_album_profile.album_id = al.id
         LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         LEFT JOIN artists ar ON ar.id = ta.artist_id
         LEFT JOIN user_track_state uts ON uts.track_id = t.id

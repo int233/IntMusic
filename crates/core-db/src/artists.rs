@@ -3,10 +3,14 @@ use super::*;
 pub async fn list_albums(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<AlbumSummary>> {
     let rows = sqlx::query(
         r#"
-        SELECT canonical.id, canonical.title, canonical.album_artist_display,
-               COALESCE(canonical.date, MAX(member_album.date)) AS date,
-               COALESCE(canonical.year, MAX(member_album.year)) AS year,
-               MAX(member_album.total_discs) AS total_discs,
+        SELECT canonical.id,
+               COALESCE(NULLIF(profile.title, ''), canonical.title) AS title,
+               COALESCE(NULLIF(profile.album_artist_display, ''),
+                        canonical.album_artist_display) AS album_artist_display,
+               COALESCE(NULLIF(profile.date, ''), canonical.date,
+                        MAX(member_album.date)) AS date,
+               COALESCE(profile.year, canonical.year, MAX(member_album.year)) AS year,
+               COALESCE(profile.total_discs, MAX(member_album.total_discs)) AS total_discs,
                COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
@@ -14,6 +18,7 @@ pub async fn list_albums(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<A
                ) END) AS track_count
         FROM album_identity_members identity
         JOIN albums canonical ON canonical.id = identity.canonical_album_id
+        LEFT JOIN album_metadata_profiles profile ON profile.album_id = canonical.id
         JOIN albums member_album ON member_album.id = identity.album_id
         JOIN tracks t ON t.album_id = member_album.id
         JOIN active_catalog_tracks active ON active.track_id = t.id
@@ -21,7 +26,8 @@ pub async fn list_albums(pool: &DbPool, limit: u32, offset: u32) -> Result<Vec<A
         LEFT JOIN track_merge_members member ON member.track_id = t.id
         GROUP BY canonical.id
         HAVING track_count > 0
-        ORDER BY COALESCE(canonical.sort_title, canonical.title) COLLATE NOCASE
+        ORDER BY COALESCE(profile.sort_title, profile.title,
+                          canonical.sort_title, canonical.title) COLLATE NOCASE
         LIMIT ?1 OFFSET ?2
         "#,
     )
@@ -107,10 +113,14 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
 
     let album_rows = sqlx::query(
         r#"
-        SELECT canonical.id, canonical.title, canonical.album_artist_display,
-               COALESCE(canonical.date, MAX(member_album.date)) AS date,
-               COALESCE(canonical.year, MAX(member_album.year)) AS year,
-               MAX(member_album.total_discs) AS total_discs,
+        SELECT canonical.id,
+               COALESCE(NULLIF(profile.title, ''), canonical.title) AS title,
+               COALESCE(NULLIF(profile.album_artist_display, ''),
+                        canonical.album_artist_display) AS album_artist_display,
+               COALESCE(NULLIF(profile.date, ''), canonical.date,
+                        MAX(member_album.date)) AS date,
+               COALESCE(profile.year, canonical.year, MAX(member_album.year)) AS year,
+               COALESCE(profile.total_discs, MAX(member_album.total_discs)) AS total_discs,
                COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
@@ -118,6 +128,7 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
                ) END) AS track_count
         FROM album_identity_members identity
         JOIN albums canonical ON canonical.id = identity.canonical_album_id
+        LEFT JOIN album_metadata_profiles profile ON profile.album_id = canonical.id
         JOIN albums member_album ON member_album.id = identity.album_id
         JOIN tracks t ON t.album_id = member_album.id
         JOIN active_catalog_tracks active ON active.track_id = t.id
@@ -128,7 +139,8 @@ pub async fn artist_detail(pool: &DbPool, artist_id: i64) -> Result<ArtistDetail
         WHERE aa.artist_id = ?1 OR ta.artist_id = ?1
         GROUP BY canonical.id
         HAVING track_count > 0
-        ORDER BY COALESCE(canonical.year, 0) DESC, canonical.title COLLATE NOCASE
+        ORDER BY COALESCE(profile.year, canonical.year, 0) DESC,
+                 COALESCE(profile.title, canonical.title) COLLATE NOCASE
         "#,
     )
     .bind(artist_id)

@@ -70,6 +70,12 @@ async fn client_sync_identity_and_cursor_are_durable() {
         sync_server_id(&pool).await.expect("stable server ID"),
         first_server_id
     );
+    let first_catalog_epoch = catalog_epoch(&pool).await.expect("catalog epoch");
+    assert!(!first_catalog_epoch.is_empty());
+    assert_eq!(
+        catalog_epoch(&pool).await.expect("stable catalog epoch"),
+        first_catalog_epoch
+    );
     let baseline = sync_cursor(&pool).await.expect("baseline cursor");
     assert!(baseline > 0);
     let first = append_sync_change(&pool, "tracks", "favorite updated")
@@ -703,6 +709,13 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
         .expect("client track")
         .id;
     assert_eq!(first.bindings[0].track_id, client_track_id);
+    let authoritative_bindings = client_library_copy_bindings(&pool, "dev-a")
+        .await
+        .expect("list authoritative Client copy bindings");
+    assert_eq!(authoritative_bindings.len(), 1);
+    assert_eq!(authoritative_bindings[0].root_external_id, "root-a");
+    assert_eq!(authoritative_bindings[0].external_id, "album/01-song.flac");
+    assert_eq!(authoritative_bindings[0].track_id, client_track_id);
 
     upsert_client_library_manifest(&pool, &make_manifest("dev-b", "root-b", "b0", true, false))
         .await

@@ -5,6 +5,8 @@ class _AlbumInfoPage extends StatelessWidget {
     required this.coreBaseUrl,
     required this.detail,
     required this.onClose,
+    required this.onEdit,
+    required this.onOpenArtist,
     required this.onPlayTrack,
     required this.onOpenTrack,
     required this.onToggleFavorite,
@@ -14,6 +16,8 @@ class _AlbumInfoPage extends StatelessWidget {
   final String coreBaseUrl;
   final Map<String, dynamic>? detail;
   final VoidCallback onClose;
+  final Future<void> Function() onEdit;
+  final Future<void> Function(int) onOpenArtist;
   final Future<void> Function(int) onPlayTrack;
   final Future<void> Function(int) onOpenTrack;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
@@ -26,6 +30,12 @@ class _AlbumInfoPage extends StatelessWidget {
       return const Center(child: CircularProgressIndicator());
     }
     final album = _asMap(detail['album']);
+    final profile = _asMap(detail['profile']);
+    final credits = ((detail['credits'] as List?) ?? const [])
+        .whereType<Map>()
+        .map((value) => value.cast<String, dynamic>())
+        .toList(growable: false);
+    final showMetadata = _albumMetadataHasContent(profile, credits);
     final tracks = (detail['tracks'] as List?) ?? const [];
     final discNumbers = tracks
         .map((item) => _intValue((item as Map)['disc_number']) ?? 1)
@@ -49,27 +59,51 @@ class _AlbumInfoPage extends StatelessWidget {
                 ]),
                 imageUrl: _albumArtworkUrl(coreBaseUrl, album['id']),
               ),
-              actions: _CollectionActions(tracks: tracks, onClose: onClose),
+              actions: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _CollectionActions(tracks: tracks, onClose: onClose),
+                  OutlinedButton.icon(
+                    onPressed: () => unawaited(onEdit()),
+                    icon: const Icon(Icons.edit_outlined),
+                    label: Text(_tr(context, 'Edit album')),
+                  ),
+                ],
+              ),
             ),
           ),
           const Divider(height: 1),
           Expanded(
             child: ListView.builder(
               padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: tracks.length,
+              itemCount: tracks.length + (showMetadata ? 1 : 0),
               itemBuilder: (context, index) {
-                final track = (tracks[index] as Map).cast<String, dynamic>();
+                if (showMetadata && index == 0) {
+                  return _AlbumMetadataOverview(
+                    profile: profile,
+                    credits: credits,
+                    onOpenArtist: onOpenArtist,
+                  );
+                }
+                final trackIndex = index - (showMetadata ? 1 : 0);
+                final track = (tracks[trackIndex] as Map)
+                    .cast<String, dynamic>();
                 final id = _intValue(track['id']);
                 final discNumber = _intValue(track['disc_number']) ?? 1;
-                final previousDiscNumber = index == 0
+                final previousDiscNumber = trackIndex == 0
                     ? null
-                    : _intValue((tracks[index - 1] as Map)['disc_number']) ?? 1;
+                    : _intValue(
+                            (tracks[trackIndex - 1] as Map)['disc_number'],
+                          ) ??
+                          1;
                 final startsDisc =
                     showDiscSeparators && discNumber != previousDiscNumber;
                 return Column(
                   children: [
                     if (startsDisc) _DiscSeparator(discNumber: discNumber),
-                    if (index > 0 && !startsDisc) const Divider(height: 1),
+                    if (trackIndex > 0 && !startsDisc) const Divider(height: 1),
                     _SheetTrackRow(
                       coreBaseUrl: coreBaseUrl,
                       track: track,

@@ -67,6 +67,32 @@ pub async fn sync_server_id(pool: &DbPool) -> Result<String> {
     )
 }
 
+pub async fn catalog_epoch(pool: &DbPool) -> Result<String> {
+    let epoch: Option<String> =
+        sqlx::query_scalar("SELECT catalog_epoch FROM core_sync_state WHERE id = 1")
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    if let Some(epoch) = epoch.filter(|value| !value.trim().is_empty()) {
+        return Ok(epoch);
+    }
+
+    let epoch = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        UPDATE core_sync_state
+        SET catalog_epoch = ?1,
+            updated_at = ?2
+        WHERE id = 1
+        "#,
+    )
+    .bind(&epoch)
+    .bind(Utc::now().to_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(epoch)
+}
+
 pub async fn sync_cursor(pool: &DbPool) -> Result<u64> {
     let cursor: i64 =
         sqlx::query_scalar("SELECT COALESCE(MAX(cursor), 0) FROM client_sync_changes")

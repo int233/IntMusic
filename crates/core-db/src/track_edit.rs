@@ -335,10 +335,14 @@ pub async fn search_albums(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
     let pattern = format!("%{}%", query);
     let rows = sqlx::query(
         r#"
-        SELECT canonical.id, canonical.title, canonical.album_artist_display,
-               COALESCE(canonical.date, MAX(member_album.date)) AS date,
-               COALESCE(canonical.year, MAX(member_album.year)) AS year,
-               MAX(member_album.total_discs) AS total_discs,
+        SELECT canonical.id,
+               COALESCE(NULLIF(profile.title, ''), canonical.title) AS title,
+               COALESCE(NULLIF(profile.album_artist_display, ''),
+                        canonical.album_artist_display) AS album_artist_display,
+               COALESCE(NULLIF(profile.date, ''), canonical.date,
+                        MAX(member_album.date)) AS date,
+               COALESCE(profile.year, canonical.year, MAX(member_album.year)) AS year,
+               COALESCE(profile.total_discs, MAX(member_album.total_discs)) AS total_discs,
                COALESCE(canonical.cover_asset_id, MAX(member_album.cover_asset_id)) AS cover_asset_id,
                COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
                    'release:' || links.release_track_id,
@@ -346,12 +350,15 @@ pub async fn search_albums(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
                ) END) AS track_count
         FROM album_identity_members identity
         JOIN albums canonical ON canonical.id = identity.canonical_album_id
+        LEFT JOIN album_metadata_profiles profile ON profile.album_id = canonical.id
         JOIN albums member_album ON member_album.id = identity.album_id
         JOIN tracks t ON t.album_id = member_album.id
         JOIN active_catalog_tracks active ON active.track_id = t.id
         LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
         LEFT JOIN track_merge_members member ON member.track_id = t.id
-        WHERE member_album.title LIKE ?1 OR member_album.album_artist_display LIKE ?1
+        WHERE COALESCE(NULLIF(profile.title, ''), member_album.title) LIKE ?1
+           OR COALESCE(NULLIF(profile.album_artist_display, ''),
+                       member_album.album_artist_display) LIKE ?1
         GROUP BY canonical.id
         HAVING track_count > 0
         ORDER BY canonical.title COLLATE NOCASE

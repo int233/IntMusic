@@ -465,6 +465,10 @@ extension _DashboardShell on _CoreDashboardState {
           coreBaseUrl: _coreUrlController.text,
           detail: detail,
           onClose: _closeAlbumDetail,
+          onEdit: _currentRoute.entityId == null
+              ? () async {}
+              : () => _editAlbum(_currentRoute.entityId!),
+          onOpenArtist: _openArtistDetail,
           onPlayTrack: (trackId) => _playTrackFromCollection(
             trackId,
             (detail['tracks'] as List?) ?? const [],

@@ -7,13 +7,18 @@ class ArtworkCacheCoordinator {
   final ValueNotifier<int> retryRevision = ValueNotifier<int>(0);
 
   String? _serverId;
+  String? _catalogEpoch;
 
-  void registerServer(String? serverId) {
+  void registerServer(String? serverId, {String? catalogEpoch}) {
     final normalized = serverId?.trim();
-    if (normalized == null || normalized.isEmpty || normalized == _serverId) {
+    final normalizedEpoch = catalogEpoch?.trim();
+    if (normalized == null ||
+        normalized.isEmpty ||
+        (normalized == _serverId && normalizedEpoch == _catalogEpoch)) {
       return;
     }
     _serverId = normalized;
+    _catalogEpoch = normalizedEpoch;
     retryRevision.value += 1;
   }
 
@@ -24,7 +29,9 @@ class ArtworkCacheCoordinator {
   String cacheKey(String imageUrl) {
     final uri = Uri.tryParse(imageUrl);
     if (uri == null) return imageUrl;
-    final namespace = _serverId ?? '${uri.scheme}://${uri.authority}';
+    final namespace = _serverId == null
+        ? '${uri.scheme}://${uri.authority}'
+        : '$_serverId:${_catalogEpoch ?? "legacy"}';
     final queryEntries = uri.queryParametersAll.entries.toList()
       ..sort((left, right) => left.key.compareTo(right.key));
     final query = <String>[];

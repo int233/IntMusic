@@ -70,19 +70,20 @@ use lofty::{
 };
 use playback::PlaybackController;
 use protocol::{
-    AddPlaybackQueueItems, ApiErrorBody, AutoTrackMergePreviewRequest, AutoTrackMergeRequest,
-    ClientLibraryManifestRequest, ClientMutationBatchRequest, ClientSyncChanges,
-    ClientSyncSnapshot, CoreStatus, CreateDistributionRequest, DistributionTaskProgress,
-    EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload, LinkTrackRecordingRequest,
-    MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest, MusicBrainzArtistPreview,
-    MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist, PlaybackEvent, PlaybackMode,
-    PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState, PlaybackStats,
-    PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation, RendererCommandPayload,
-    RendererRegistration, RendererStateReport, RendererVolumeStateReport, ReplacePlaybackQueue,
-    ResolveClientLibraryFileRequest, ScanProgressPayload, SearchResponse, ServerSettingsUpdate,
-    TrackFavoriteUpdate, TrackMergePreviewRequest, TrackMergeRequest, TrackMetadataUpdate,
-    UpdateArtistAsset, UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, VolumeControlMode,
-    ZoneAliasUpdate, ZoneTransferRequest, ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
+    AddPlaybackQueueItems, AlbumMigrationRequest, ApiErrorBody, AutoTrackMergePreviewRequest,
+    AutoTrackMergeRequest, ClientLibraryManifestRequest, ClientMutationBatchRequest,
+    ClientSyncChanges, ClientSyncSnapshot, CoreStatus, CreateDistributionRequest,
+    DistributionTaskProgress, EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload,
+    LinkTrackRecordingRequest, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
+    MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
+    PlaybackEvent, PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
+    PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
+    RendererCommandPayload, RendererRegistration, RendererStateReport, RendererVolumeStateReport,
+    ReplacePlaybackQueue, ResolveClientLibraryFileRequest, ScanProgressPayload, SearchResponse,
+    ServerSettingsUpdate, TrackFavoriteUpdate, TrackMergePreviewRequest, TrackMergeRequest,
+    TrackMetadataUpdate, UpdateAlbumMetadata, UpdateArtistAsset, UpdateArtistProfile,
+    UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneAliasUpdate, ZoneTransferRequest,
+    ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -116,6 +117,7 @@ struct AppStateInner {
     renderers: RendererRegistry,
     playback_control_gates: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     server_id: Uuid,
+    catalog_epoch: String,
     bind_address: SocketAddr,
     discovery_service: Option<String>,
     musicbrainz_gate: tokio::sync::Mutex<tokio::time::Instant>,
@@ -129,13 +131,14 @@ impl AppState {
         config: CoreConfig,
         paths: CorePaths,
         pool: DbPool,
-        server_id: Uuid,
+        catalog_identity: (Uuid, String),
         bind_address: SocketAddr,
         discovery_service: Option<String>,
         transcoder: Transcoder,
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
         let (renderer_commands, _) = broadcast::channel(256);
+        let (server_id, catalog_epoch) = catalog_identity;
         Self {
             inner: Arc::new(AppStateInner {
                 config: RwLock::new(config),
@@ -149,6 +152,7 @@ impl AppState {
                 renderers: RendererRegistry::default(),
                 playback_control_gates: tokio::sync::Mutex::new(HashMap::new()),
                 server_id,
+                catalog_epoch,
                 bind_address,
                 discovery_service,
                 musicbrainz_gate: tokio::sync::Mutex::new(

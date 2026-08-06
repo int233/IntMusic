@@ -84,6 +84,50 @@ extension _DashboardDetails on _CoreDashboardState {
 
   void _closeAlbumDetail() => _closeDetailPage();
 
+  Future<void> _editAlbum(int albumId) async {
+    if (_offlineMode) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_tr(context, 'Album editing requires Core'))),
+      );
+      return;
+    }
+    final snapshot = await _run<Map<String, dynamic>>(
+      () async => _asMap(await _api.getJson('/albums/$albumId/edit')),
+    );
+    if (!mounted || snapshot == null) return;
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _LocaleScope(
+        language: _language,
+        child: _AlbumEditorDialog(
+          api: _api,
+          albumId: albumId,
+          snapshot: snapshot,
+        ),
+      ),
+    );
+    if (!mounted || result == null) return;
+    final targetAlbumId = _intValue(result['target_album_id']);
+    final updatedSnapshot = result['snapshot'] is Map
+        ? _asMap(result['snapshot'])
+        : null;
+    if (updatedSnapshot != null) {
+      final detail = _asMap(updatedSnapshot['detail']);
+      final canonicalId = _intValue(_asMap(detail['album'])['id']) ?? albumId;
+      _mutate(() => _albumDetailCache[canonicalId] = detail);
+      unawaited(_persistDetail('album', canonicalId, detail));
+    }
+    await _backgroundLibrarySync(force: true);
+    if (!mounted) return;
+    if (targetAlbumId != null) {
+      await _openAlbumDetail(targetAlbumId);
+    } else {
+      await _refreshAlbumDetail(albumId);
+    }
+  }
+
   Future<void> _openArtistDetail(int artistId) async {
     if (_offlineMode) {
       final detail =

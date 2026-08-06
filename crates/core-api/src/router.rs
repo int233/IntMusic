@@ -108,6 +108,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/scan/problems", get(scan_problems))
         .route("/albums", get(list_albums))
         .route("/albums/{album_id}", get(album_detail))
+        .route(
+            "/albums/{album_id}/edit",
+            get(album_edit_snapshot).post(update_album_metadata),
+        )
+        .route("/albums/{album_id}/migrate", post(migrate_album))
         .route("/artists", get(list_artists))
         .route(
             "/artists/{artist_id}",

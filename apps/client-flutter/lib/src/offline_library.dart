@@ -50,14 +50,16 @@ class _OfflineTrackCopy {
   String get copyKey => '$rootExternalId\u0000$fileExternalId';
 
   _OfflineTrackCopy copyWith({
+    int? trackId,
+    int? mediaVariantId,
     Map<String, dynamic>? metadata,
     bool? isFavorite,
     int? playCount,
     int? durationMs,
   }) {
     return _OfflineTrackCopy(
-      trackId: trackId,
-      mediaVariantId: mediaVariantId,
+      trackId: trackId ?? this.trackId,
+      mediaVariantId: mediaVariantId ?? this.mediaVariantId,
       rootExternalId: rootExternalId,
       fileExternalId: fileExternalId,
       relativePath: relativePath,
@@ -187,12 +189,19 @@ class _OfflineMutation {
 class _OfflineLibrarySnapshot {
   _OfflineLibrarySnapshot({
     this.serverId,
+    this.catalogEpoch,
     Map<String, _OfflineTrackCopy>? copies,
     List<_OfflineMutation>? outbox,
   }) : copies = copies ?? <String, _OfflineTrackCopy>{},
        outbox = outbox ?? <_OfflineMutation>[];
 
   factory _OfflineLibrarySnapshot.fromJson(Map<String, dynamic> json) {
+    if ((_intValue(json['version']) ?? 0) < 2) {
+      // Development hard reset: pre-epoch track IDs are deliberately not
+      // redirected. The saved folder configuration remains available and will
+      // submit a fresh manifest after the next Core connection.
+      return _OfflineLibrarySnapshot();
+    }
     final copies = <String, _OfflineTrackCopy>{};
     for (final value in (json['copies'] as List?) ?? const []) {
       if (value is! Map) continue;
@@ -215,12 +224,14 @@ class _OfflineLibrarySnapshot {
     }
     return _OfflineLibrarySnapshot(
       serverId: json['server_id']?.toString(),
+      catalogEpoch: json['catalog_epoch']?.toString(),
       copies: copies,
       outbox: outbox,
     );
   }
 
   String? serverId;
+  String? catalogEpoch;
   final Map<String, _OfflineTrackCopy> copies;
   final List<_OfflineMutation> outbox;
 
@@ -270,8 +281,9 @@ class _OfflineLibrarySnapshot {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-    'version': 1,
+    'version': 2,
     'server_id': serverId,
+    'catalog_epoch': catalogEpoch,
     'copies': copies.values
         .map((copy) => copy.toJson())
         .toList(growable: false),
