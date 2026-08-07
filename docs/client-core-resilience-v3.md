@@ -1,4 +1,4 @@
-# Client/Core resilience architecture (v1.1)
+# Client/Core resilience architecture (v1.2)
 
 ## Goal
 
