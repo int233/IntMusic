@@ -1,5 +1,6 @@
 use super::*;
 
+mod album_identity;
 mod client_library_resolution;
 mod library_management;
 mod smart_playlists;
@@ -69,6 +70,12 @@ async fn client_sync_identity_and_cursor_are_durable() {
         sync_server_id(&pool).await.expect("stable server ID"),
         first_server_id
     );
+    let first_catalog_epoch = catalog_epoch(&pool).await.expect("catalog epoch");
+    assert!(!first_catalog_epoch.is_empty());
+    assert_eq!(
+        catalog_epoch(&pool).await.expect("stable catalog epoch"),
+        first_catalog_epoch
+    );
     let baseline = sync_cursor(&pool).await.expect("baseline cursor");
     assert!(baseline > 0);
     let first = append_sync_change(&pool, "tracks", "favorite updated")
@@ -134,6 +141,16 @@ async fn release_tracks_remain_in_each_album_when_recordings_are_related() {
         ingest_test_track(&pool, "original.flac", "Original Album", "Shared Song").await;
     let compilation_track_id =
         ingest_test_track(&pool, "compilation.flac", "Compilation", "Shared Song").await;
+    set_track_favorite(
+        &pool,
+        compilation_track_id,
+        TrackFavoriteUpdate {
+            is_favorite: true,
+            user_rating: Some(100),
+        },
+    )
+    .await
+    .expect("favorite compilation recording");
 
     let original = track_media_profile(&pool, original_track_id)
         .await
@@ -173,6 +190,14 @@ async fn release_tracks_remain_in_each_album_when_recordings_are_related() {
         .expect("reload related media")
         .expect("related media exists");
     assert_eq!(related.related_release_tracks.len(), 2);
+    let visible = list_tracks(&pool, 100, 0)
+        .await
+        .expect("list linked recordings")
+        .into_iter()
+        .find(|track| track.title == "Shared Song")
+        .expect("visible recording representative");
+    assert!(visible.is_favorite);
+    assert_eq!(visible.user_rating, Some(100));
 
     let original_album = album_detail(&pool, original.release.expect("release").album_id.unwrap())
         .await
@@ -684,6 +709,13 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
         .expect("client track")
         .id;
     assert_eq!(first.bindings[0].track_id, client_track_id);
+    let authoritative_bindings = client_library_copy_bindings(&pool, "dev-a")
+        .await
+        .expect("list authoritative Client copy bindings");
+    assert_eq!(authoritative_bindings.len(), 1);
+    assert_eq!(authoritative_bindings[0].root_external_id, "root-a");
+    assert_eq!(authoritative_bindings[0].external_id, "album/01-song.flac");
+    assert_eq!(authoritative_bindings[0].track_id, client_track_id);
 
     upsert_client_library_manifest(&pool, &make_manifest("dev-b", "root-b", "b0", true, false))
         .await

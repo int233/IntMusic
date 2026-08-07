@@ -1,65 +1,5 @@
 use super::*;
 
-pub async fn album_detail(pool: &DbPool, album_id: i64) -> Result<AlbumDetail> {
-    let album_row = sqlx::query(
-        r#"
-        SELECT al.id, al.title, al.album_artist_display, al.date, al.year, al.total_discs,
-               al.cover_asset_id,
-               COUNT(DISTINCT CASE WHEN member.track_id IS NULL THEN COALESCE(
-                   'release:' || links.release_track_id,
-                   'legacy:' || t.id
-               ) END) AS track_count
-        FROM albums al
-        LEFT JOIN tracks t ON t.album_id = al.id
-        LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
-        LEFT JOIN track_merge_members member ON member.track_id = t.id
-        WHERE al.id = ?1
-        GROUP BY al.id
-        "#,
-    )
-    .bind(album_id)
-    .fetch_one(pool)
-    .await?;
-
-    let track_rows = sqlx::query(
-        track_select_sql(
-            r#"
-            LEFT JOIN legacy_track_catalog_links current_link ON current_link.track_id = t.id
-            WHERE t.album_id = ?1
-              AND NOT EXISTS (
-                SELECT 1 FROM track_merge_members member
-                WHERE member.track_id = t.id
-              )
-              AND (
-                current_link.track_id IS NULL
-                OR t.id = (
-                SELECT MIN(candidate.track_id)
-                FROM legacy_track_catalog_links candidate
-                LEFT JOIN track_merge_members member
-                  ON member.track_id = candidate.track_id
-                WHERE candidate.release_track_id = current_link.release_track_id
-                  AND member.track_id IS NULL
-                )
-              )
-            GROUP BY t.id
-            ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0), t.title
-            "#,
-        )
-        .as_str(),
-    )
-    .bind(album_id)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(AlbumDetail {
-        album: row_to_album(album_row)?,
-        tracks: track_rows
-            .into_iter()
-            .map(row_to_track)
-            .collect::<Result<_>>()?,
-    })
-}
-
 pub async fn track_media_profile(
     pool: &DbPool,
     track_id: i64,
@@ -585,6 +525,7 @@ pub async fn link_track_to_recording(
     .bind(track_id)
     .execute(&mut *transaction)
     .await?;
+    preserve_recording_user_state(&mut transaction, source_recording_id, &now).await?;
     transaction.commit().await?;
     track_media_profile(pool, track_id)
         .await?

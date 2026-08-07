@@ -45,78 +45,105 @@ class _TrackInfoPage extends StatelessWidget {
     final artist = track['artist_display']?.toString().trim() ?? '';
     final album = track['album_title']?.toString().trim() ?? '';
 
+    Widget overview() => Column(
+      children: [
+        _TrackSummaryCard(track: track, genres: genres),
+        const SizedBox(height: 14),
+        _TrackCreditsCard(
+          artist: artist,
+          composers: composers,
+          lyricists: lyricists,
+          onOpenArtist: onOpenArtist,
+        ),
+      ],
+    );
+
+    Widget details() => Column(
+      children: [
+        _TrackMediaOverview(
+          detail: detail,
+          media: media,
+          onManage: onManageVersions,
+        ),
+        const SizedBox(height: 14),
+        _TrackLyricsCard(lyrics: lyrics),
+      ],
+    );
+
+    final hero = _TrackDetailHero(
+      coreBaseUrl: coreBaseUrl,
+      track: track,
+      trackId: trackId,
+      albumId: albumId,
+      artist: artist,
+      album: album,
+      onPlayTrack: onPlayTrack,
+      onOpenAlbum: onOpenAlbum,
+      onOpenArtist: onOpenArtist,
+      onToggleFavorite: onToggleFavorite,
+      onAddToPlaylist: onAddToPlaylist,
+      onEdit: onEdit,
+      onClose: onClose,
+    );
+
     return _PageFrame(
       title: 'Track detail',
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
-            child: _TrackDetailHero(
-              coreBaseUrl: coreBaseUrl,
-              track: track,
-              trackId: trackId,
-              albumId: albumId,
-              artist: artist,
-              album: album,
-              onPlayTrack: onPlayTrack,
-              onOpenAlbum: onOpenAlbum,
-              onOpenArtist: onOpenArtist,
-              onToggleFavorite: onToggleFavorite,
-              onAddToPlaylist: onAddToPlaylist,
-              onEdit: onEdit,
-              onClose: onClose,
-            ),
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final overview = Column(
-                  children: [
-                    _TrackSummaryCard(track: track, genres: genres),
-                    const SizedBox(height: 14),
-                    _TrackCreditsCard(
-                      artist: artist,
-                      composers: composers,
-                      lyricists: lyricists,
-                      onOpenArtist: onOpenArtist,
-                    ),
-                  ],
-                );
-                final details = Column(
-                  children: [
-                    _TrackMediaOverview(
-                      detail: detail,
-                      media: media,
-                      onManage: onManageVersions,
-                    ),
-                    const SizedBox(height: 14),
-                    _TrackLyricsCard(lyrics: lyrics),
-                  ],
-                );
-                return ListView(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 720) {
+            return ListView(
+              key: const PageStorageKey('track-detail-mobile-scroll'),
+              padding: const EdgeInsets.only(bottom: 24),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 6, 14, 14),
+                  child: hero,
+                ),
+                const Divider(height: 1),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
+                  child: Column(
+                    children: [
+                      overview(),
+                      const SizedBox(height: 14),
+                      details(),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          }
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 20),
+                child: hero,
+              ),
+              const Divider(height: 1),
+              Expanded(
+                child: ListView(
                   padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
                   children: [
                     if (constraints.maxWidth >= 980)
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          SizedBox(width: 340, child: overview),
+                          SizedBox(width: 340, child: overview()),
                           const SizedBox(width: 18),
-                          Expanded(child: details),
+                          Expanded(child: details()),
                         ],
                       )
                     else ...[
-                      overview,
+                      overview(),
                       const SizedBox(height: 14),
-                      details,
+                      details(),
                     ],
                   ],
-                );
-              },
-            ),
-          ),
-        ],
+                ),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -156,17 +183,19 @@ class _TrackDetailHero extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
+    final compactScreen = MediaQuery.sizeOf(context).width < 600;
     final identity = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           track['title']?.toString() ?? _tr(context, 'Untitled'),
-          maxLines: 2,
+          maxLines: compactScreen ? 3 : 2,
           overflow: TextOverflow.ellipsis,
-          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-            fontWeight: FontWeight.w800,
-            height: 1.08,
-          ),
+          style:
+              (compactScreen
+                      ? Theme.of(context).textTheme.titleLarge
+                      : Theme.of(context).textTheme.headlineMedium)
+                  ?.copyWith(fontWeight: FontWeight.w800, height: 1.08),
         ),
         const SizedBox(height: 9),
         Wrap(
@@ -227,6 +256,7 @@ class _TrackDetailHero extends StatelessWidget {
         ),
         _TrackActions(
           track: track,
+          compact: compactScreen,
           onToggleFavorite: onToggleFavorite,
           onAddToPlaylist: trackId == null
               ? null
@@ -237,13 +267,14 @@ class _TrackDetailHero extends StatelessWidget {
           icon: const Icon(Icons.edit_outlined),
           label: Text(_tr(context, 'Edit')),
         ),
-        _AppTooltip(
-          message: _tr(context, 'Close'),
-          child: IconButton.filledTonal(
-            onPressed: onClose,
-            icon: const Icon(Icons.close),
+        if (!compactScreen)
+          _AppTooltip(
+            message: _tr(context, 'Close'),
+            child: IconButton.filledTonal(
+              onPressed: onClose,
+              icon: const Icon(Icons.close),
+            ),
           ),
-        ),
       ],
     );
 
@@ -267,7 +298,11 @@ class _TrackDetailHero extends StatelessWidget {
             final artwork = _ArtworkTile(
               title: track['title']?.toString() ?? '',
               subtitle: artist,
-              size: constraints.maxWidth < 600 ? 104 : 132,
+              size: constraints.maxWidth < 440
+                  ? 92
+                  : constraints.maxWidth < 600
+                  ? 104
+                  : 132,
               icon: Icons.music_note_outlined,
               imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
             );
@@ -279,11 +314,11 @@ class _TrackDetailHero extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       artwork,
-                      const SizedBox(width: 16),
+                      SizedBox(width: constraints.maxWidth < 440 ? 12 : 16),
                       Expanded(child: identity),
                     ],
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 14),
                   actions,
                 ],
               );
@@ -613,8 +648,12 @@ class _TrackMediaOverview extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
     final media = this.media ?? const <String, dynamic>{};
-    final work = _asMap(media['work']);
-    final recording = _asMap(media['recording']);
+    final work = media['work'] is Map
+        ? _asMap(media['work'])
+        : <String, dynamic>{};
+    final recording = media['recording'] is Map
+        ? _asMap(media['recording'])
+        : <String, dynamic>{};
     final release = media['release'] == null
         ? <String, dynamic>{}
         : _asMap(media['release']);

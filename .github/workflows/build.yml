@@ -21,11 +21,16 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            apps/client-flutter/android/*.gradle*
+            apps/client-flutter/android/gradle/wrapper/gradle-wrapper.properties
 
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
+          pub-cache: true
 
       - name: Restore Android release signing key
         if: github.event_name != 'pull_request'
@@ -63,10 +68,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore Rust release cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
+          pub-cache: true
 
       - name: Install Linux build dependencies
         run: |
@@ -117,10 +130,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore Rust release cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
+          pub-cache: true
 
       - uses: actions/cache@v4
         with:
@@ -273,10 +294,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Restore Rust release cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
+          pub-cache: true
 
       - uses: actions/cache@v4
         with:

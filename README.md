@@ -1,127 +1,431 @@
-# IntMusic 本地音乐系统
+<p align="center">
+  <img src="icon.png" width="112" alt="IntMusic 图标">
+</p>
 
-IntMusic 是一个本地音乐资料库和多设备播放系统。当前架构由无界面的 Core 服务和多个图形客户端组成：Core 负责资料库、扫描、搜索、播放状态、播放设备和 API；客户端负责浏览、控制、播放界面。
+<h1 align="center">IntMusic</h1>
 
-本项目完全通过Codex开发。
+<p align="center">
+  面向个人音乐收藏的自托管资料库、跨设备播放器与多区域播放系统。
+</p>
 
-## 项目结构
+<p align="center">
+  <strong>Rust Core · Flutter Client · Windows · macOS · Android · Linux</strong>
+</p>
 
-```text
-crates/
-  core-cli/        local-music-core 命令行管理入口
-  core-daemon/     local-music-core-daemon 服务入口，用于 Windows 服务
-  core-api/        HTTP API、WebSocket 事件和 Core 运行时
-  core-db/         SQLite 数据库迁移和数据访问
-  library-scanner/ MP3/FLAC 扫描、标签读取、歌词和封面提取
-  search-index/    SQLite FTS 和 CJK n-gram 搜索索引
-  audio-engine/    解码和 PCM/DSP 抽象
-  output-cpal/     本机输出设备发现
-  playback/        播放状态和播放控制
-  protocol/        OpenAPI、事件 schema、共享 DTO
-apps/
-  client-flutter/  Windows、Linux、macOS、Android 客户端
-  client-harmony/  HarmonyOS ArkTS/ArkUI 客户端骨架
-packaging/
-  windows-installer/ Windows 安装器和服务注册脚本
+> 当前版本：1.2.0。项目仍处于积极开发阶段，资料库结构和跨设备协议可能在升级时迁移；重要音乐库请始终保留独立备份。
+
+![IntMusic macOS 专辑画廊](docs/assets/intmusic-albums-light.jpg)
+
+<p align="center"><em>macOS Client：专辑画廊、筛选、排序与响应式播放控制栏</em></p>
+
+## IntMusic 是什么
+
+IntMusic 将音乐资料、播放状态和文件位置分开管理：常驻的 **Core** 负责统一资料库、搜索、队列、播放区域和跨设备协调；**Client** 负责浏览、编辑、控制和本机播放。音乐文件既可以保存在 Core 所在设备，也可以只存在于某一台 Client。
+
+它适合希望保留本地文件所有权，同时又希望获得现代流媒体软件交互、多设备控制和离线播放体验的用户。
+
+## 核心能力
+
+- **统一资料库**：汇总 Core 与各 Client 的本地音乐，识别同一歌曲的不同发行、编码、码率和设备副本。
+- **跨设备播放**：每个 Client 和音频输出都可以成为独立播放区域，可远程控制、转移播放并维护各自队列。
+- **弱网与离线优先**：Client 使用本地资料镜像、图片缓存和本机副本；断网时仍可浏览、播放并暂存收藏和历史操作。
+- **现代音乐管理**：歌曲、专辑、艺术家、歌词和发行信息编辑，重复项处理，设备与来源生命周期管理。
+- **歌词系统**：支持 LRC、逐行与逐字时间轴、翻译、注音、演唱者标记以及可视化歌词编辑。
+- **音乐分发与转码**：将歌曲、专辑、歌单或自由选择的曲目分发到指定设备，并由 Core 使用内置 FFmpeg 转码。
+- **原生系统集成**：macOS 菜单栏与媒体中心、Windows 托盘与 SMTC、Android MediaSession 和后台播放。
+- **自适应界面**：一套 Flutter 主体覆盖桌面与 Android，支持深浅色、透明材质、列表/画廊视图和响应式布局。
+
+## 完整功能
+
+以下内容按实际使用场景介绍 IntMusic 1.2 的功能与预期行为。界面截图均来自 macOS 客户端；Windows 和 Android 使用相同的数据模型，并针对各自的窗口尺寸和系统能力调整布局与交互。
+
+- [资料库浏览](#资料库浏览)：首页、专辑、艺术家、歌曲和搜索。
+- [播放与队列](#播放与队列)：播放页、控制栏、队列和导航历史。
+- [播放设备与区域](#播放设备与区域)：多区域播放、输出设备和双层音量。
+- [歌单](#歌单)：普通歌单、智能歌单和结构化规则。
+- [歌词](#歌词)：逐行/逐字歌词、翻译、注音和编辑器。
+- [元数据编辑](#元数据编辑)：歌曲、专辑和艺术家资料维护。
+- [资料库管理](#资料库管理)：文件、设备、来源、待处理项和重复项。
+- [Client 本地音乐与离线](#client-本地音乐与离线)：本机扫描、缓存和断网播放。
+- [音乐分发](#音乐分发)：跨设备复制、转码、校验和入库。
+- [系统集成与诊断](#系统集成与诊断)：平台媒体能力、日志与故障排查。
+
+### 资料库浏览
+
+#### 首页
+
+- 展示资料库概况、最近内容、播放入口和常用导航。
+- 先使用 Client 本地缓存绘制，再在后台刷新 Core 数据。
+- 桌面端使用侧边栏；紧凑宽度使用可收起导航。
+
+#### 专辑
+
+- 画廊和列表视图，可按名称等字段排序与筛选。
+- 专辑详情展示封面、参与人员、光盘分组、曲序和可用性。
+- 多碟专辑按 Disc 显示分隔，不把曲序相同的不同光盘混在一起。
+- 同一专辑身份下，同一 Recording 位于相同光盘/曲序时只显示一个目录条目；媒体副本在版本区域折叠展示。
+
+![macOS 专辑画廊](docs/assets/intmusic-albums-light.jpg)
+
+_专辑画廊支持筛选、排序，以及画廊/列表视图切换。_
+
+![macOS 专辑详情](docs/assets/macos-album-detail.jpg)
+
+_专辑详情把发行信息、曲序、批量播放和逐曲操作放在同一页面。_
+
+#### 艺术家
+
+- 画廊和列表视图，支持搜索和排序。
+- 详情页展示资料、专辑、歌曲和人工维护的艺术照。
+- 艺术照支持多张图片、分类、最多五个裁剪区域和组合头像预览。
+- 艺术家对象可以被歌曲、专辑与 credits 关联，避免只保存不可跳转的纯文本。
+
+![macOS 艺术家画廊](docs/assets/macos-artists.jpg)
+
+_艺术家页面可以在画廊和列表之间切换，并提供本页筛选。_
+
+![macOS 艺术家详情](docs/assets/macos-artist-detail.jpg)
+
+_艺术家详情使用横幅、头像、专辑和歌曲组织信息，并在右上角提供编辑入口。_
+
+#### 歌曲
+
+- 列表和画廊视图，支持筛选、排序、批量选择和搜索。
+- 行内显示标题、艺术家、专辑、时长、收藏状态和当前可用性。
+- 可用性标签根据本机副本、Core 副本、其他设备副本和网络状态实时计算。
+- 同一 Recording 的多设备或多编码副本在目录层折叠，在详情中展开。
+
+![macOS 歌曲列表](docs/assets/macos-tracks.jpg)
+
+_歌曲列表展示标题、艺术家、专辑、时长和常用操作；筛选、排序、批量选择始终位于列表上方。_
+
+![macOS 歌曲详情](docs/assets/macos-track-detail.jpg)
+
+_歌曲详情将封面和可跳转的艺术家/专辑信息放在首屏，后续区域继续展示参与人员、版本和歌词。_
+
+#### 搜索
+
+- 搜索歌曲、专辑、艺术家和歌单。
+- Core 使用 SQLite FTS 与 CJK n-gram，兼顾中文和拉丁文本。
+- Client 可以使用本地搜索投影，不必等待每次网络往返。
+
+### 音乐身份与版本
+
+歌曲详情中的“版本与可用位置”按以下关系展示：
+
+- 作品与具体录音关系。
+- 当前发行专辑、曲序和其他收录。
+- FLAC、M4A、MP3、AAC 等媒体版本。
+- 每个版本在 Core 或 Client 上的副本。
+- 每个文件的格式、大小、码率、采样率、位深、声道、修改时间、路径与校验时间。
+
+播放时系统根据当前 renderer 的本地可访问性、媒体质量和 Core 可用性选择副本。目录中的一个歌曲条目不等于一个物理文件。
+
+![macOS 全部文件与媒体参数](docs/assets/macos-library-files.jpg)
+
+_物理文件在资料库管理中单独展示；一个目录歌曲可以对应多个这样的媒体副本。_
+
+### 播放与队列
+
+#### 底部播放控制栏
+
+- 显示封面、标题、艺术家、播放状态和进度。
+- 提供上一首、播放/暂停、下一首、随机、队列、设备和音量入口。
+- 紧凑屏幕会重排或隐藏次要控件，避免遮挡主要信息。
+
+#### 播放页面
+
+- 展示大封面、歌曲信息、进度、收藏、播放模式和完整控制。
+- 宽屏可以使用歌词/详情双栏，窄屏在单栏之间平滑切换。
+- 首尾歌词保留安全留白，当前行不会紧贴视口边缘。
+
+![macOS 播放页面](docs/assets/macos-playback.png)
+
+_宽屏播放页把封面与控制放在左侧、歌词放在右侧；底部控制栏在此页面收起，避免重复。_
+
+#### 待播放列表
+
+- 显示稳定队列顺序、当前项和后续曲目。
+- 打开时定位到当前播放项，而不是每次回到队首。
+- 支持移动、删除、清空、下一首播放和追加到队尾等操作。
+- 顺序、随机、单曲循环和列表循环由统一状态机处理。
+
+#### 导航历史
+
+- 页面提供前进与后退按钮。
+- 从歌单、专辑或搜索结果进入详情后返回，会恢复原列表与滚动位置。
+
+### 播放设备与区域
+
+- Core 本机和每个在线 Client 都可以成为播放区域。
+- Client 可枚举当前系统允许访问的实际音频输出，而不只显示默认设备。
+- 可将当前播放转移到其他区域，也可以选择多个区域播放。
+- 设备页可将当前 Client 置顶，并按名称或“正在播放优先”排序。
+- 离线时只保留当前设备实际可用的区域，不把离线 Client 错标为 Core。
+
+![macOS 设备与音乐来源管理](docs/assets/macos-library-sources.png)
+
+_设备与来源页面显示 Core、各 Client、在线状态、文件数量和实际音乐来源；播放设备弹层复用同一设备身份。_
+
+#### 音量
+
+IntMusic 将音量分为两层：
+
+- **播放器音量**：IntMusic 对当前 zone 的软件增益。
+- **系统音量**：renderer 当前输出端点的系统音量。
+
+音量弹层同时显示两个滑块，不需要切换标签。远程控制时，系统音量命令发送给拥有该输出的 Client；不支持端点控制的平台会明确降级，而不是假装成功。
+
+外接音响或显示器自身的硬件音量不属于当前功能范围。
+
+### 歌单
+
+#### 普通歌单
+
+- 创建、重命名、删除歌单。
+- 添加或移除歌曲，并按歌单顺序播放。
+- 从任意歌曲列表使用更多菜单或批量操作加入歌单。
+
+![macOS 歌单画廊](docs/assets/macos-playlists.jpg)
+
+_歌单首页区分普通歌单和智能歌单，并提供筛选、排序和视图切换。_
+
+#### 智能歌单
+
+- 使用规则自动生成内容。
+- 支持多个条件和匹配方式。
+- 规则可按收藏、评分、播放历史、艺术家、专辑、年份、格式和歌曲来源等字段筛选。
+- 来源规则使用设备/来源选项，不要求用户手工输入内部 ID。
+
+![macOS 智能歌单详情](docs/assets/macos-smart-playlist.jpg)
+
+_智能歌单详情显示规则摘要和动态结果，播放时采用当前可见的稳定顺序。_
+
+![macOS 智能歌单规则编辑器](docs/assets/macos-smart-playlist-rules.jpg)
+
+_规则编辑器支持“全部匹配/任一匹配”、多条件组合和结构化字段值。_
+
+### 收藏、评分与历史
+
+- 收藏按钮在列表、详情、播放页面和队列中保持一致。
+- 可兼容文件标签评分与 IntMusic 用户评分，并按设置决定最大评分是否视为收藏。
+- 播放历史、播放次数和最近播放由 Core 汇总。
+- 离线收藏与历史使用唯一 mutation ID 暂存，重连后幂等同步。
+- 合并歌曲时保留并汇总收藏等用户状态，不应因选择新的 canonical track 而丢失。
+
+![macOS 播放历史与统计](docs/assets/macos-history.jpg)
+
+_历史页面汇总会话、事件、累计时长、中断次数和高频歌曲。_
+
+### 歌词
+
+#### 格式与渲染
+
+- 纯文本歌词。
+- LRC 逐行时间轴。
+- 逐字时间轴与当前字高亮。
+- 原文、翻译和注音层。
+- 不同演唱者/角色标记。
+- 当前行居中、非当前行弱化、点击行 seek 和自动滚动。
+
+只有普通 LRC 时仍可完整测试逐行渲染；逐字、翻译和注音能力需要相应数据才能展示最终效果。
+
+#### 歌词编辑器
+
+- 编辑原始歌词与时间标签。
+- 播放试听并为行或字设置时间。
+- 编辑翻译、注音、演唱者和修订记录。
+- 保存前检查时间顺序和格式错误。
+
+歌词时间轴属于具体 Release Track；同一 Recording 的不同发行可以共享基础文本，但允许保留独立封面、母带和时间偏移。
+
+![macOS 歌词编辑器](docs/assets/macos-lyrics-editor.jpg)
+
+_歌词编辑器同时显示原始 LRC、逐行/逐字模式和时间预览，便于校验时间轴。_
+
+### 元数据编辑
+
+#### 歌曲编辑
+
+- 标题、排序标题、版本副标题、日期、年份、BPM、注释和评分。
+- 主要艺术家、专辑艺术家、作曲、作词、流派等多值字段。
+- 专辑、光盘号、曲序和总数。
+- 歌词及其时间轴。
+- 手动将某个 Release Track 关联到已有 Recording，或撤销关联。
+
+![macOS 歌曲编辑器](docs/assets/macos-track-editor.jpg)
+
+_歌曲编辑器按资料、参与人员、歌词和文件分栏；每个字段会标明当前值来自文件还是人工覆盖。_
+
+#### 专辑编辑
+
+- 标题、排序标题、版本、发行类型、日期、原始发行日期、年份、国家、条码、目录号、厂牌和版权等信息。
+- 专辑艺术家、演唱者、制作人、作曲、作词、工程、发行方等多对象 credits。
+- 对选中歌曲批量传播专辑字段，同时允许个别歌曲保留独立信息。
+- 将错误或重复专辑迁移到目标专辑；目标保留自己的封面与资料，来源曲目及副本完整迁入。
+
+#### 艺术家编辑
+
+- 名称、排序名、MusicBrainz ID、类型、国家、活动日期、简介和外部链接。
+- 手动上传 JPG、PNG、WebP 等 Flutter/图片引擎可解码格式。
+- 为头像、横幅、背景和组合成员等显示区域选择不同图片或裁剪区域。
+
+当前设计以手动资料维护为主，不依赖自动抓取艺术照。
+
+![macOS 艺术家编辑器](docs/assets/macos-artist-editor.jpg)
+
+_艺术家编辑器把身份资料、MusicBrainz 引用、简介、艺术照和显示效果分开维护。_
+
+### 资料库管理
+
+资料库管理覆盖所有文件，而不仅是异常队列。
+
+#### 总览
+
+- 设备、来源、文件、容量、可用数量和问题数量统计。
+- 区分在线、离线、已停用、已移除、缺失和待处理状态。
+
+![macOS 资料库管理总览](docs/assets/macos-library-management.jpg)
+
+_总览用文件、可用副本、待处理项和设备四组指标概括资料库健康状况。_
+
+#### 全部文件
+
+- 分页、搜索、设备/来源/格式/状态筛选。
+- 查看嵌入标签、媒体参数、Core 绑定、路径和问题历史。
+- 多选后批量停用、恢复、忽略、重新扫描或删除目录记录。
+
+![macOS 全部文件管理](docs/assets/macos-library-files.jpg)
+
+_全部文件页面提供状态、设备和格式筛选，并在每个文件卡片上显示绑定与标签校验状态。_
+
+#### 设备与来源
+
+- 停用暂时不应参与资料库的设备或来源。
+- 永久移除重复安装产生的旧设备身份及其目录记录。
+- 删除设备或来源后，歌曲详情不应继续显示已经移除的副本。
+- 物理文件删除后先标为缺失，用户可以重新扫描、恢复来源或明确清理记录。
+
+_每台设备下继续按音乐来源分组，卸载后的旧 Client、停用来源和缺失文件仍可被显式管理。_
+
+#### 待处理文件
+
+- 无标题/艺术家标签、解析失败和需要复核的文件进入待处理列表。
+- 可以补录嵌入资料，或将文件关联到已有歌曲。
+- 不使用文件名和父目录猜测权威元数据。
+
+#### 重复项与关联
+
+- “查找完全重复歌曲”按标准化标题、艺术家集合、专辑、版本、年份、光盘/曲序、录音类型和时长生成保守候选。
+- 用户确认后将不同编码或设备副本折叠到一个 Release Track。
+- 不同专辑中的相同 Recording 通过录音关联表达，不直接删除各自发行曲目。
+- 合并历史可用于撤销和诊断。
+
+### Client 本地音乐与离线
+
+- 每个 Client 可以添加自己的本地文件夹。
+- Client 读取文件内嵌标签，只向 Core 上传 manifest，不上传音频正文。
+- Core 返回稳定的 track/media binding，Client 保存本机副本映射。
+- 断网时继续显示缓存的歌曲、专辑、艺术家、歌单、封面和详情。
+- 本机有副本的歌曲可以直接播放；只有远程副本的歌曲显示不可用。
+- 网络从正常变慢、断开、重连到恢复同步时，不清空当前资料库或重置队列。
+
+Android 目录通过系统文件选择器与持久权限访问。HarmonyOS 兼容层或虚拟化环境可能只暴露部分 Android 存储，界面应区分“路径存在”和“应用持有可读写授权”。
+
+### 音乐分发
+
+- 支持单曲、专辑、艺术家、歌单和歌曲页多选分发。
+- 目标为已注册且具有可写音乐来源的 Client。
+- 质量可以选择原始文件或固定 FLAC/AAC profile。
+- 源文件位于 Client 时，经 Core 临时中继；位于 Core 时直接读取。
+- 目标使用断点、临时文件、校验和原子替换，失败不会留下看似完整的损坏文件。
+- 分发完成后通过本地扫描进入统一资料库。
+
+![macOS 专辑操作与分发入口](docs/assets/macos-album-actions.jpg)
+
+_单曲、专辑、歌单和批量选择都通过统一操作菜单进入“分发到设备”。_
+
+### 主题与界面
+
+- macOS 跟随系统浅色/深色外观；其他当前支持平台默认使用深色产品主题。
+- 桌面透明材质、背景模糊和平台能力降级。
+- 桌面侧边栏在阈值变化时使用收起/展开动画。
+- 紧凑布局针对 Android 720p/1080p 和桌面窄窗口重排标题、操作按钮、列表列和底部播放器。
+- 列表、画廊和详情页面共享语义色、圆角、表面层级和动效时长。
+
+### 系统集成与诊断
+
+- Windows 托盘菜单控制显示、播放和退出，安装器负责停止 Client 与 Core 服务后更新。
+- macOS 菜单栏、原生窗口按钮安全区和 Now Playing。
+- Android 前台媒体通知、锁屏控制与后台播放。
+- 可开关详细播放日志，记录控制请求、媒体选择、超时、回退和 renderer 状态。
+- 日志可以导出为 JSONL；Android 使用可用的分享/文件保存流程，不调用未实现的桌面保存路径。
+- Core 提供状态与 diagnostics 接口，Windows 安装记录保存在 ProgramData 的 IntMusic 目录。
+
+![macOS 设置与 Core 连接](docs/assets/macos-settings.jpg)
+
+_设置页集中管理 Core 连接、Core 音乐文件夹、播放区域、本机音乐、转码、分发、外观和诊断。截图中的地址和路径仅代表本机测试环境。_
+
+### 当前边界
+
+- 默认面向局域网，不建议把未配置认证和 TLS 的 Core 直接暴露到公网。
+- Client v3 弱网播放会话仍在持续收敛，旧接口在迁移期保持兼容。
+- 硬件功放/显示器自身音量、云音乐服务登录与网络音乐商店不属于当前范围。
+- 自动元数据匹配保持保守策略；不确定的 Recording 或发行关系需要人工确认。
+
+## 工作方式
+
+```mermaid
+flowchart LR
+    C1["macOS / Windows Client"]
+    C2["Android Client"]
+    CORE["IntMusic Core\n资料库 · 搜索 · 队列 · 协调"]
+    DB[("SQLite")]
+    F1["Core 音乐文件"]
+    F2["Client 本地音乐"]
+    OUT["音频输出 / 播放区域"]
+
+    C1 <-->|"HTTP + WebSocket"| CORE
+    C2 <-->|"HTTP + WebSocket"| CORE
+    CORE --- DB
+    CORE --- F1
+    C1 --- F2
+    C2 --- F2
+    CORE --> OUT
+    C1 --> OUT
+    C2 --> OUT
 ```
 
-客户端 v2 的状态归属、跨平台边界、原生能力矩阵和合并门槛见
-[docs/client-v2-architecture.md](docs/client-v2-architecture.md)。
+Core 保存统一的音乐身份和索引，但不会要求所有文件集中存放。Client 提交本地文件的标签、媒体参数、相对路径和指纹；播放时优先选择当前设备可直接访问的副本，否则使用 Core 流媒体或跨设备分发。
 
-## 开发环境
+## 支持平台
 
-打开新的 PowerShell 后先执行：
+| 平台 | Client | Core | 主要集成 |
+| --- | --- | --- | --- |
+| Windows | 支持 | 支持，安装为系统服务 | 托盘、SMTC、系统音量、安装器 |
+| macOS | 支持 | 支持命令行部署 | 菜单栏、Now Playing、窗口材质 |
+| Android | 支持 | 不作为主要部署方式 | MediaSession、后台播放、本地文件夹 |
+| Linux | 支持构建 | 支持 | 桌面客户端、systemd 部署文件 |
+| HarmonyOS | 客户端骨架 | 不支持 | ArkUI/ArkTS 实验性实现 |
+
+## 快速开始
+
+最简单的部署方式是在一台 Windows 设备安装“Core + 客户端”，其他设备只安装客户端：
+
+1. 从 [GitHub Releases](https://github.com/int233/IntMusic/releases) 获取对应平台的构建产物。
+2. 启动 Core；默认会监听 `49330–49360` 中的可用端口并通过 mDNS 广播。
+3. 在 Client 的“设置 → 核心服务”中使用“发现”或填写 Core 地址。
+4. 在 Core 所在设备添加音乐文件夹，或在任意 Client 添加“此设备上的音乐”。
+5. 完成扫描后即可浏览资料库、选择播放区域并开始播放。
+
+开发环境中可以直接运行：
 
 ```powershell
 .\scripts\dev-shell.ps1
-```
-
-这个脚本会把 Rust/Cargo、Flutter、Android SDK、JDK、DevEco Studio 加入当前终端的 `PATH`。也可以执行完整环境检查：
-
-```powershell
-.\scripts\check-env.ps1
-```
-
-## 运行 Core
-
-开发模式：
-
-```powershell
 .\scripts\run-core.ps1
 ```
 
-或手动运行：
-
-```powershell
-.\scripts\dev-shell.ps1
-cargo run -p core-cli -- serve
-```
-
-正式 Windows 部署建议使用安装器安装“仅 Core”或“Core + 客户端”，此时 Core 会注册为 `IntMusicCore` Windows 服务并开机自动启动。
-
-## 端口和局域网发现
-
-IntMusic Core 不再使用固定单一端口。当前默认配置是：
-
-```toml
-[server]
-bind = "0.0.0.0:49330"
-auto_port = true
-port_range_start = 49330
-port_range_end = 49360
-advertise_mdns = true
-```
-
-当 `auto_port = true` 时，Core 会在 `49330-49360` 范围内选择一个可用端口监听。监听地址是 `0.0.0.0`，因此同一个 Core 同时支持本机访问和局域网访问。
-
-示例：
-
-```text
-本机访问：http://127.0.0.1:49347
-局域网访问：http://192.168.50.153:49347
-```
-
-实际端口以 Core 启动日志、客户端发现结果或 `/api/v1/status` 为准。客户端会先尝试 mDNS 服务 `_intmusic-core._tcp.local.`，再扫描 `49330-49360` 端口范围，并通过 `/api/v1/status` 校验对方确实是 IntMusic Core，避免误连到其他程序。
-
-Windows 安装器会在安装 Core 组件时创建防火墙入站规则：
-
-```text
-IntMusic Core HTTP       TCP 49330-49360
-IntMusic Core Discovery  UDP 5353
-```
-
-如果局域网其他客户端能发现地址但连接超时，优先检查 Windows 防火墙、网络类型是否为“专用网络”，以及 `IntMusicCore` 服务是否正在运行。
-
-## 添加并扫描音乐库
-
-推荐在客户端 `Settings -> Music folders` 中添加音乐文件夹并点击重新扫描。注意：这里填写的是 Core 所在机器能访问到的路径。
-
-每台 Client 也可以在设置中的“此设备上的音乐”添加自己的文件夹。文件不会上传到 Core；Client 只提交元数据、版本参数、相对路径和内容指纹，Core 将它们汇总到统一目录并记录每个副本所在设备。Client 与 Core 断开时会使用本地快照和本地副本播放，收藏与历史先进入本地 outbox，重新连接后幂等同步。
-
-“分发到设备”支持单曲、专辑、歌手、歌单和歌曲页自由多选，并可选择原始质量、FLAC 或 AAC 码率。若源文件只存在于另一台 Client，Core 会协调源 Client 流式上传到局域网中继缓存，完成校验和可选转码后再交给目标 Client；任务完成或取消后清理中继源文件。
-
-也可以使用命令行：
-
-```powershell
-.\scripts\dev-shell.ps1
-cargo run -p core-cli -- library add F:/Music
-cargo run -p core-cli -- scan start
-```
-
-常用 CLI：
-
-```powershell
-cargo run -p core-cli -- status
-cargo run -p core-cli -- library list
-cargo run -p core-cli -- outputs list
-cargo run -p core-cli -- playback play <track_id>
-cargo run -p core-cli -- playback pause
-cargo run -p core-cli -- playback stop
-```
-
-## 运行 Flutter 客户端
-
-开发模式：
+另开一个终端运行 Windows Client：
 
 ```powershell
 .\scripts\dev-shell.ps1
@@ -129,73 +433,30 @@ cd apps\client-flutter
 flutter run -d windows
 ```
 
-客户端默认从 `http://127.0.0.1:49330` 开始尝试连接，并会通过 mDNS 和端口扫描发现局域网 Core。
+macOS 或 Linux 可在配置 Rust 与 Flutter 后分别运行 `cargo run -p core-cli -- serve` 和对应平台的 `flutter run`。
 
-## Windows 安装器
+## 文档
 
-生成安装器：
+- [文档中心](docs/README.md)：全部文档的入口与阅读顺序。
+- [总体架构](docs/architecture.md)：Core/Client 边界、音乐身份模型、同步、播放和平台适配。
+- [详细功能](docs/features.md)：资料库、播放、歌词、编辑、分发、离线和系统集成能力。
+- [使用手册](docs/user-guide.md)：安装、首次配置、日常操作、维护、更新和故障排查。
+- [Client架构约束](docs/client-v2-architecture.md)：Flutter、Rust 和原生平台的代码边界。
+- [弱网与离线架构](docs/client-core-resilience-v3.md)：连接状态、缓存、命令和播放会话设计。
+- [发布与签名](packaging/README.md)：构建产物、FFmpeg、Windows 安装器、macOS 公证与 Android 签名。
 
-```powershell
-.\scripts\build-windows-installer.ps1
-```
-
-输出文件：
-
-```text
-packaging\dist\installer\IntMusic-Windows-Setup.exe
-```
-
-安装器提供三种模式：
-
-```text
-仅客户端        只安装桌面客户端
-仅 Core         只安装无界面 Core，并注册 IntMusicCore 服务
-Core + 客户端   同时安装 Core 服务和桌面客户端
-```
-
-## 发布构建和产物归档
-
-发布构建统一归档到：
-
-```text
-packaging/dist/releases/<release-id>/
-```
-
-macOS 主机：
+## 开发与验证
 
 ```bash
-./scripts/build-release-artifacts.sh
-```
-
-Windows 主机：
-
-```powershell
-.\scripts\build-release-artifacts.ps1
-```
-
-更多关于 macOS 签名/公证、Android/Windows/macOS 产物结构和校验文件的信息见 [packaging/README.md](packaging/README.md)。
-
-## 多端播放模型
-
-当前播放模型已经把 Core 和客户端都视为可播放节点：
-
-- Core 本机保留 `local` zone，也会暴露本机 CPAL 输出，例如 `cpal:0`、`cpal:1`。
-- Flutter 客户端启动后会注册为远端 renderer，并暴露 `renderer:<client>:default` zone。
-- 每个输出设备都是独立 zone，可以选中不同 zone 后播放不同音乐。
-- Playback 页是统一播放中心，负责当前歌曲控制、seek、歌曲详情、歌词滚动、zone 选择、暂停、恢复、停止、移动到指定设备、同播到所有在线设备。
-- 切换播放设备调用 `/api/v1/zones/{zone_id}/transfer`。
-- 同时在多个设备播放调用 `/api/v1/zones/play-many`。
-- 远端客户端通过 WebSocket 接收 Core 下发的 play、pause、stop、seek 命令；若本机有同一媒体副本则直接播放本地文件，否则从 `/api/v1/tracks/{track_id}/stream` 拉取 Core 音频流。
-
-## 验证
-
-```powershell
-.\scripts\dev-shell.ps1
-cargo fmt --all
+cargo fmt --all -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cd apps\client-flutter
+
+cd apps/client-flutter
 flutter analyze
 flutter test
+dart run tool/check_architecture.dart
 ```
+
+IntMusic 的 UI 主体使用 Flutter，业务核心和服务端使用 Rust；平台原生代码只承载托盘、媒体会话、系统音量、窗口材质和后台生命周期等无法由 Flutter 等价完成的能力。

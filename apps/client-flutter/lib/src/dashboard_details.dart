@@ -72,8 +72,10 @@ extension _DashboardDetails on _CoreDashboardState {
       final detail = _asMap(await _api.getJson('/albums/$albumId'));
       _albumDetailCache[albumId] = detail;
       await _persistDetail('album', albumId, detail);
-      if (mounted && _currentRoute == _AppRoute.album(albumId)) {
-        _mutate(() {});
+      if (mounted) {
+        _mutate(
+          () => _decorateDetailTrackAvailability(_albumDetailCache, albumId),
+        );
       }
     } catch (error) {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
@@ -81,6 +83,50 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   void _closeAlbumDetail() => _closeDetailPage();
+
+  Future<void> _editAlbum(int albumId) async {
+    if (_offlineMode) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(_tr(context, 'Album editing requires Core'))),
+      );
+      return;
+    }
+    final snapshot = await _run<Map<String, dynamic>>(
+      () async => _asMap(await _api.getJson('/albums/$albumId/edit')),
+    );
+    if (!mounted || snapshot == null) return;
+    final result = await showDialog<Map<String, dynamic>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => _LocaleScope(
+        language: _language,
+        child: _AlbumEditorDialog(
+          api: _api,
+          albumId: albumId,
+          snapshot: snapshot,
+        ),
+      ),
+    );
+    if (!mounted || result == null) return;
+    final targetAlbumId = _intValue(result['target_album_id']);
+    final updatedSnapshot = result['snapshot'] is Map
+        ? _asMap(result['snapshot'])
+        : null;
+    if (updatedSnapshot != null) {
+      final detail = _asMap(updatedSnapshot['detail']);
+      final canonicalId = _intValue(_asMap(detail['album'])['id']) ?? albumId;
+      _mutate(() => _albumDetailCache[canonicalId] = detail);
+      unawaited(_persistDetail('album', canonicalId, detail));
+    }
+    await _backgroundLibrarySync(force: true);
+    if (!mounted) return;
+    if (targetAlbumId != null) {
+      await _openAlbumDetail(targetAlbumId);
+    } else {
+      await _refreshAlbumDetail(albumId);
+    }
+  }
 
   Future<void> _openArtistDetail(int artistId) async {
     if (_offlineMode) {
@@ -161,8 +207,10 @@ extension _DashboardDetails on _CoreDashboardState {
       final detail = _asMap(await _api.getJson('/artists/$artistId'));
       _artistDetailCache[artistId] = detail;
       await _persistDetail('artist', artistId, detail);
-      if (mounted && _currentRoute == _AppRoute.artist(artistId)) {
-        _mutate(() {});
+      if (mounted) {
+        _mutate(
+          () => _decorateDetailTrackAvailability(_artistDetailCache, artistId),
+        );
       }
     } catch (error) {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
@@ -298,10 +346,8 @@ extension _DashboardDetails on _CoreDashboardState {
       _trackDetailCache[trackId] = detail;
       await _persistDetail('track', trackId, detail);
       if (_activeTrackDetailId == trackId) _activeTrackDetail = detail;
-      if (mounted &&
-          (_currentRoute == _AppRoute.track(trackId) ||
-              _activeTrackDetailId == trackId)) {
-        _mutate(() {});
+      if (mounted) {
+        _mutate(() => _refreshTrackAvailabilityForTrack(trackId));
       }
     } catch (error) {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
@@ -309,10 +355,27 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _refreshAfterLibraryManagementChange() async {
-    _trackDetailCache.clear();
-    _activeTrackDetail = null;
-    await _ClientCacheStore.invalidateDetails(_coreUrlController.text, 'track');
+    await _invalidateCatalogDetailCaches();
     await _refreshAll();
+  }
+
+  Future<void> _invalidateCatalogDetailCaches() async {
+    _trackDetailCache.clear();
+    _albumDetailCache.clear();
+    _artistDetailCache.clear();
+    _playlistDetailCache.clear();
+    _activeTrackDetail = null;
+    await Future.wait(
+      const <String>['track', 'album', 'artist', 'playlist'].map(
+        (kind) =>
+            _ClientCacheStore.invalidateDetails(_coreUrlController.text, kind),
+      ),
+    );
+  }
+
+  Future<void> _refreshAfterCatalogIdentityEvent() async {
+    await _invalidateCatalogDetailCaches();
+    await _backgroundLibrarySync(force: true);
   }
 
   Future<void> _editTrack(int trackId) async {
@@ -346,6 +409,7 @@ extension _DashboardDetails on _CoreDashboardState {
       if (_activeTrackDetailId == trackId) {
         _activeTrackDetail = detail;
       }
+      _refreshTrackAvailabilityForTrack(trackId);
     });
     unawaited(_persistDetail('track', trackId, detail));
     unawaited(_persistOverviewValues(<String, dynamic>{'tracks': _tracks}));
@@ -383,6 +447,7 @@ extension _DashboardDetails on _CoreDashboardState {
       if (_activeTrackDetailId == trackId) {
         _activeTrackDetail = refreshed;
       }
+      _refreshTrackAvailabilityForTrack(trackId);
     });
     unawaited(_persistDetail('track', trackId, refreshed));
     unawaited(_backgroundLibrarySync());
@@ -419,8 +484,13 @@ extension _DashboardDetails on _CoreDashboardState {
       final detail = _asMap(await _api.getJson('/playlists/$playlistId'));
       _playlistDetailCache[playlistId] = detail;
       await _persistDetail('playlist', playlistId, detail);
-      if (mounted && _currentRoute == _AppRoute.playlist(playlistId)) {
-        _mutate(() {});
+      if (mounted) {
+        _mutate(
+          () => _decorateDetailTrackAvailability(
+            _playlistDetailCache,
+            playlistId,
+          ),
+        );
       }
     } catch (error) {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
@@ -596,6 +666,7 @@ extension _DashboardDetails on _CoreDashboardState {
       final playlistId = _intValue(_asMap(detail['playlist'])['id']);
       if (playlistId != null) {
         _playlistDetailCache[playlistId] = detail;
+        _decorateDetailTrackAvailability(_playlistDetailCache, playlistId);
         unawaited(_persistDetail('playlist', playlistId, detail));
       }
     }
@@ -615,7 +686,10 @@ extension _DashboardDetails on _CoreDashboardState {
       if (!mounted) {
         return;
       }
-      _mutate(() => _playlistDetailCache[playlistId] = detail);
+      _mutate(() {
+        _playlistDetailCache[playlistId] = detail;
+        _decorateDetailTrackAvailability(_playlistDetailCache, playlistId);
+      });
       unawaited(_persistDetail('playlist', playlistId, detail));
     }
   }

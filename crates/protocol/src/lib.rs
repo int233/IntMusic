@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+mod playback_session_v3;
+
+pub use playback_session_v3::*;
+
 pub const API_PREFIX: &str = "/api/v1";
 pub const EVENTS_WS_PATH: &str = "/ws/v1/events";
 
@@ -13,6 +17,9 @@ pub struct CoreStatus {
     pub version: String,
     pub api_version: String,
     pub server_id: String,
+    /// Changes whenever Core discards and rebuilds logical catalog identity.
+    /// Clients must invalidate every cached entity ID when this value changes.
+    pub catalog_epoch: String,
     pub bind_address: String,
     pub discovery_service: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -76,6 +83,7 @@ pub struct ClientTrackManifest {
     pub duration_ms: Option<i64>,
     pub date: Option<String>,
     pub year: Option<i64>,
+    pub total_discs: Option<i64>,
     pub bpm: Option<i64>,
     pub comment: Option<String>,
     pub lyrics: Option<String>,
@@ -136,6 +144,17 @@ pub struct ClientLibraryManifestResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientLibraryFileBinding {
+    pub external_id: String,
+    pub track_id: i64,
+    pub media_variant_id: i64,
+}
+
+/// Current logical binding for one stable physical Client file identity.
+/// This is authoritative and lets a Client update local track IDs after Core
+/// reconciliation without retaining redirects for obsolete IDs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientLibraryCopyBinding {
+    pub root_external_id: String,
     pub external_id: String,
     pub track_id: i64,
     pub media_variant_id: i64,
@@ -509,6 +528,7 @@ pub struct ClientSyncChanges {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientSyncSnapshot {
     pub server_id: String,
+    pub catalog_epoch: String,
     pub cursor: u64,
     pub generated_at: DateTime<Utc>,
     pub albums: Vec<AlbumSummary>,
@@ -521,6 +541,8 @@ pub struct ClientSyncSnapshot {
     pub library_roots: Vec<LibraryRoot>,
     #[serde(default)]
     pub client_library_roots: Vec<ClientLibraryRootStatus>,
+    #[serde(default)]
+    pub client_file_bindings: Vec<ClientLibraryCopyBinding>,
     #[serde(default)]
     pub settings: Value,
 }
@@ -805,6 +827,100 @@ pub struct AlbumSummary {
 pub struct AlbumDetail {
     pub album: AlbumSummary,
     pub tracks: Vec<TrackSummary>,
+    #[serde(default)]
+    pub profile: AlbumMetadataProfile,
+    #[serde(default)]
+    pub credits: Vec<AlbumCredit>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AlbumMetadataProfile {
+    pub title: Option<String>,
+    pub sort_title: Option<String>,
+    pub subtitle: Option<String>,
+    pub release_type: Option<String>,
+    pub edition_title: Option<String>,
+    pub release_status: Option<String>,
+    pub date: Option<String>,
+    pub original_date: Option<String>,
+    pub year: Option<i64>,
+    pub total_discs: Option<i64>,
+    pub country: Option<String>,
+    pub language: Option<String>,
+    pub media_format: Option<String>,
+    pub packaging: Option<String>,
+    pub barcode: Option<String>,
+    #[serde(default)]
+    pub catalog_numbers: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub publishers: Vec<String>,
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub styles: Vec<String>,
+    #[serde(default)]
+    pub moods: Vec<String>,
+    pub copyright: Option<String>,
+    pub phonographic_copyright: Option<String>,
+    pub notes: Option<String>,
+    pub album_artist_display: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AlbumCredit {
+    pub id: Option<i64>,
+    pub artist_id: Option<i64>,
+    pub artist_name: Option<String>,
+    pub display_name: String,
+    pub role: String,
+    #[serde(default)]
+    pub position: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumArtistReference {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AlbumTrackPropagation {
+    #[serde(default)]
+    pub track_ids: Vec<i64>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateAlbumMetadata {
+    pub expected_revision: Option<i64>,
+    pub profile: AlbumMetadataProfile,
+    #[serde(default)]
+    pub credits: Vec<AlbumCredit>,
+    pub propagate: Option<AlbumTrackPropagation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumEditSnapshot {
+    pub detail: AlbumDetail,
+    pub revision: i64,
+    #[serde(default)]
+    pub artist_options: Vec<AlbumArtistReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumMigrationRequest {
+    pub target_album_id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlbumMigrationResult {
+    pub source_album_id: i64,
+    pub target_album_id: i64,
+    pub moved_track_count: i64,
+    pub detail: AlbumDetail,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1306,6 +1422,8 @@ pub struct PlaybackQueue {
     pub zone_id: String,
     pub revision: u64,
     pub mode: PlaybackMode,
+    #[serde(default = "default_shuffle_seed")]
+    pub shuffle_seed: u64,
     pub current_index: Option<i64>,
     pub items: Vec<PlaybackQueueItem>,
 }
@@ -1546,6 +1664,10 @@ fn default_true() -> bool {
 
 fn default_volume() -> f32 {
     1.0
+}
+
+fn default_shuffle_seed() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

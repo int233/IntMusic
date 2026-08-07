@@ -3,7 +3,7 @@ use super::*;
 pub(crate) async fn upsert_track(
     pool: &DbPool,
     file_id: i64,
-    library_root_id: i64,
+    _library_root_id: i64,
     track: &TrackIngest,
 ) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
@@ -18,12 +18,7 @@ pub(crate) async fn upsert_track(
             track.album_artists.clone()
         };
         let album_artist_display = album_artists.join("; ");
-        let album_key = album_key(
-            &album_artist_display,
-            album_title,
-            track.year,
-            library_root_id,
-        );
+        let album_key = album_key(&album_artists, album_title, track.year);
         let normalized_title = normalize_text(album_title);
 
         sqlx::query(

@@ -92,7 +92,9 @@ async fn confirmed_file_merge_is_folded_and_reversible() {
         .expect("undo merge");
     assert_eq!(undone.state, "undone");
     let restored = list_tracks(&pool, 100, 0).await.expect("songs restored");
-    assert_eq!(restored.len(), before.len());
+    assert_eq!(restored.len() + 1, before.len());
+    assert!(restored.iter().any(|track| track.id == source_track_id));
+    assert!(restored.iter().all(|track| track.id != target_track_id));
     let album = album_detail(&pool, album_id.expect("album id"))
         .await
         .expect("album after undo");
@@ -102,7 +104,53 @@ async fn confirmed_file_merge_is_folded_and_reversible() {
             .iter()
             .filter(|track| track.title == "Shared song")
             .count(),
-        2
+        1
+    );
+    assert!(album.tracks.iter().any(|track| track.id == source_track_id));
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn album_detail_folds_release_tracks_linked_to_the_same_recording_and_position() {
+    let (pool, path) = test_pool().await;
+    let first = ingest_test_track(&pool, "first-copy.flac", "Shared album", "Shared song").await;
+    let second = ingest_test_track(&pool, "second-copy.m4a", "Shared album", "Shared song").await;
+    let album_id: i64 = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?1")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .expect("album id");
+
+    let before = album_detail(&pool, album_id)
+        .await
+        .expect("album before recording link");
+    assert_eq!(before.tracks.len(), 2);
+
+    link_track_to_recording(&pool, second, first)
+        .await
+        .expect("link the second release track to the same recording");
+
+    let songs = list_tracks(&pool, 100, 0).await.expect("song catalog");
+    assert_eq!(
+        songs
+            .iter()
+            .filter(|track| track.title == "Shared song")
+            .count(),
+        1
+    );
+    let album = album_detail(&pool, album_id)
+        .await
+        .expect("album after recording link");
+    assert_eq!(album.album.track_count, 1);
+    assert_eq!(
+        album
+            .tracks
+            .iter()
+            .filter(|track| track.title == "Shared song")
+            .count(),
+        1,
+        "the album projection must use the same canonical recording identity as the song catalog"
     );
 
     close_test_pool(pool, path).await;
@@ -165,6 +213,16 @@ async fn exact_duplicate_scan_previews_and_merges_device_or_encoding_copies() {
         .execute(&pool)
         .await
         .expect("allow a small encoding duration difference");
+    set_track_favorite(
+        &pool,
+        second,
+        TrackFavoriteUpdate {
+            is_favorite: true,
+            user_rating: Some(100),
+        },
+    )
+    .await
+    .expect("favorite a duplicate source");
 
     let preview = preview_exact_track_merges(&pool, Some(100))
         .await
@@ -189,20 +247,98 @@ async fn exact_duplicate_scan_previews_and_merges_device_or_encoding_copies() {
     assert_eq!(merged.merged_groups, 1);
     assert_eq!(merged.merged_tracks, 1);
     assert!(merged.failures.is_empty());
-    assert_eq!(
-        list_tracks(&pool, 100, 0)
-            .await
-            .expect("folded songs")
-            .iter()
-            .filter(|track| track.title == "Exact song")
-            .count(),
-        1
-    );
+    let folded = list_tracks(&pool, 100, 0).await.expect("folded songs");
+    let songs = folded
+        .iter()
+        .filter(|track| track.title == "Exact song")
+        .collect::<Vec<_>>();
+    assert_eq!(songs.len(), 1);
+    assert!(songs[0].is_favorite);
+    assert_eq!(songs[0].user_rating, Some(100));
     assert!(preview_exact_track_merges(&pool, Some(100))
         .await
         .expect("rescan exact copies")
         .groups
         .is_empty());
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicate_scan_treats_artist_order_as_an_identity_set() {
+    let (pool, path) = test_pool().await;
+    let first = ingest_test_track(&pool, "ordered.flac", "Album", "Song").await;
+    let second = ingest_test_track(&pool, "reversed.m4a", "Album", "Song").await;
+    let hoyo = upsert_artist(&pool, "HOYO-MiX")
+        .await
+        .expect("HOYO-MiX artist");
+    let composer = upsert_artist(&pool, "陈致逸")
+        .await
+        .expect("composer artist");
+
+    for (track_id, artists) in [(first, [hoyo, composer]), (second, [composer, hoyo])] {
+        sqlx::query("DELETE FROM track_artists WHERE track_id = ?1 AND role = 'primary'")
+            .bind(track_id)
+            .execute(&pool)
+            .await
+            .expect("replace track artists");
+        for (position, artist_id) in artists.into_iter().enumerate() {
+            sqlx::query(
+                r#"
+                INSERT INTO track_artists (track_id, artist_id, role, position)
+                VALUES (?1, ?2, 'primary', ?3)
+                "#,
+            )
+            .bind(track_id)
+            .bind(artist_id)
+            .bind(position as i64)
+            .execute(&pool)
+            .await
+            .expect("insert reordered artist");
+        }
+    }
+
+    let preview = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("preview reordered artists");
+    assert_eq!(preview.duplicate_groups, 1);
+    let group = preview
+        .groups
+        .first()
+        .expect("artist-order duplicate group");
+    let members = std::iter::once(group.target_track_id)
+        .chain(group.source_track_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(members, BTreeSet::from([first, second]));
+
+    close_test_pool(pool, path).await;
+}
+
+#[tokio::test]
+async fn exact_duplicate_scan_includes_historical_removed_copies() {
+    let (pool, path) = test_pool().await;
+    let retained = ingest_test_track(&pool, "retained.flac", "Album", "Song").await;
+    let removed = ingest_test_track(&pool, "removed.flac", "Album", "Song").await;
+    let removed_file_id: i64 = sqlx::query_scalar("SELECT file_id FROM tracks WHERE id = ?1")
+        .bind(removed)
+        .fetch_one(&pool)
+        .await
+        .expect("removed file");
+    sqlx::query("UPDATE files SET deleted_at = ?1 WHERE id = ?2")
+        .bind(Utc::now().to_rfc3339())
+        .bind(removed_file_id)
+        .execute(&pool)
+        .await
+        .expect("retain removed inventory record");
+
+    let preview = preview_exact_track_merges(&pool, Some(100))
+        .await
+        .expect("preview duplicates with removed copies");
+    let group = preview.groups.first().expect("duplicate group");
+    let members = std::iter::once(group.target_track_id)
+        .chain(group.source_track_ids.iter().copied())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(members, BTreeSet::from([retained, removed]));
 
     close_test_pool(pool, path).await;
 }

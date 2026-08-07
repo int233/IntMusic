@@ -23,12 +23,14 @@ WITH open_issues AS (
     GROUP BY file_id
 ),
 linked_catalog AS (
-    SELECT linked_replica.file_id, MIN(link.track_id) AS track_id
+    SELECT linked_replica.file_id,
+           MIN(COALESCE(member.canonical_track_id, link.track_id)) AS track_id
     FROM media_replicas linked_replica
     JOIN release_track_media_variants relation
       ON relation.media_variant_id = linked_replica.media_variant_id
     JOIN legacy_track_catalog_links link
       ON link.release_track_id = relation.release_track_id
+    LEFT JOIN track_merge_members member ON member.track_id = link.track_id
     WHERE linked_replica.file_id IS NOT NULL
     GROUP BY linked_replica.file_id
 ),
@@ -66,12 +68,18 @@ inventory AS (
         replica.media_variant_id,
         replica.last_verified_at,
         resolution.resolution_kind,
-        COALESCE(direct_track.id, linked_catalog.track_id) AS catalog_track_id,
+        COALESCE(
+            resolution.target_track_id,
+            direct_member.canonical_track_id,
+            direct_track.id,
+            linked_catalog.track_id
+        ) AS catalog_track_id,
         open_issues.issue_kinds
     FROM files file
     JOIN library_roots root ON root.id = file.library_root_id
     LEFT JOIN devices device ON device.id = root.owner_device_id
     LEFT JOIN tracks direct_track ON direct_track.file_id = file.id
+    LEFT JOIN track_merge_members direct_member ON direct_member.track_id = direct_track.id
     LEFT JOIN media_replicas replica ON replica.file_id = file.id
     LEFT JOIN client_file_resolutions resolution ON resolution.file_id = file.id
     LEFT JOIN linked_catalog ON linked_catalog.file_id = file.id

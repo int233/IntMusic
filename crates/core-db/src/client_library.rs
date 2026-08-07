@@ -98,11 +98,6 @@ pub async fn upsert_scanned_file(
         }
         let track_id = upsert_track(pool, file_id, file.library_root_id, &effective).await?;
         ensure_track_media_graph(pool, track_id, file_id, file, &effective).await?;
-    } else {
-        sqlx::query("DELETE FROM tracks WHERE file_id = ?1")
-            .bind(file_id)
-            .execute(pool)
-            .await?;
     }
 
     match resolution_kind.as_deref() {
@@ -145,6 +140,53 @@ pub async fn upsert_scanned_file(
 
     refresh_file_management_issues(pool, file_id).await?;
     Ok(file_id)
+}
+
+pub async fn client_library_copy_bindings(
+    pool: &DbPool,
+    device_id: &str,
+) -> Result<Vec<ClientLibraryCopyBinding>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            root.external_id AS root_external_id,
+            file.client_file_id AS external_id,
+            MIN(COALESCE(merge.canonical_track_id, links.track_id)) AS track_id,
+            replica.media_variant_id
+        FROM files file
+        JOIN library_roots root ON root.id = file.library_root_id
+        JOIN media_replicas replica ON replica.file_id = file.id
+        JOIN release_track_media_variants relation
+          ON relation.media_variant_id = replica.media_variant_id
+        JOIN legacy_track_catalog_links links
+          ON links.release_track_id = relation.release_track_id
+        LEFT JOIN track_merge_members merge ON merge.track_id = links.track_id
+        WHERE root.root_kind = 'client'
+          AND root.owner_device_id = ?1
+          AND root.enabled = 1
+          AND root.retired_at IS NULL
+          AND root.removed_at IS NULL
+          AND file.client_file_id IS NOT NULL
+          AND file.deleted_at IS NULL
+          AND file.availability_state = 'ready'
+          AND replica.availability_state = 'ready'
+        GROUP BY root.external_id, file.client_file_id, replica.media_variant_id
+        ORDER BY root.external_id, file.client_file_id
+        "#,
+    )
+    .bind(device_id.trim())
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ClientLibraryCopyBinding {
+                root_external_id: row.try_get("root_external_id")?,
+                external_id: row.try_get("external_id")?,
+                track_id: row.try_get("track_id")?,
+                media_variant_id: row.try_get("media_variant_id")?,
+            })
+        })
+        .collect()
 }
 
 pub async fn upsert_client_library_manifest(
@@ -522,6 +564,22 @@ pub async fn upsert_client_library_manifest(
             accepted_files += 1;
             continue;
         }
+        let target_track_id = if manually_matched {
+            resolved_track_id
+        } else if let Some(media_variant_id) = matching_variant_id.or_else(|| {
+            existing_replica_state.as_ref().and_then(|row| {
+                row.try_get::<i64, _>("media_variant_id")
+                    .ok()
+                    .filter(|_| preserve_existing_replica_binding)
+            })
+        }) {
+            canonical_track_id_for_media_variant(pool, media_variant_id).await?
+        } else {
+            None
+        };
+        if let Some(target_track_id) = target_track_id {
+            reconcile_redundant_client_track(pool, file_id, target_track_id).await?;
+        }
         sqlx::query(
             r#"
             UPDATE media_variants
@@ -590,12 +648,16 @@ pub async fn upsert_client_library_manifest(
         }
         let binding_row = sqlx::query(
             r#"
-            SELECT replica.media_variant_id, MIN(links.track_id) AS track_id
+            SELECT
+                replica.media_variant_id,
+                MIN(COALESCE(merge.canonical_track_id, links.track_id)) AS track_id
             FROM media_replicas replica
             JOIN release_track_media_variants relation
               ON relation.media_variant_id = replica.media_variant_id
             JOIN legacy_track_catalog_links links
               ON links.release_track_id = relation.release_track_id
+            LEFT JOIN track_merge_members merge
+              ON merge.track_id = links.track_id
             WHERE replica.file_id = ?1
             GROUP BY replica.media_variant_id
             "#,

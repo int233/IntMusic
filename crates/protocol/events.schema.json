@@ -22,6 +22,8 @@
         "artist.updated",
         "artist.asset.ready",
         "artist.visual.updated",
+        "album.metadata_changed",
+        "album.migrated",
         "track.metadata_changed",
         "track.recording_changed",
         "playback.state_changed",

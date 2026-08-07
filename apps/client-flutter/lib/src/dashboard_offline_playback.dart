@@ -192,6 +192,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
       'zone_id': targetZoneId,
       'revision': (_intValue(_playbackQueue?['revision']) ?? 0) + 1,
       'mode': _playbackMode.nameForApi,
+      'shuffle_seed': (_intValue(_playbackQueue?['shuffle_seed']) ?? 1) + 1,
       'current_index':
           startIndex == null || startIndex < 0 || startIndex >= validIds.length
           ? null
@@ -333,29 +334,17 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
 
   Future<void> _playNextOfflineTrack({bool completed = false}) async {
     final items = _queueItems();
-    if (items.isEmpty) {
+    final advance = nextPlaybackQueueItem(
+      itemIds: [for (final item in items) _intValue(item['id']) ?? 0],
+      currentIndex: _intValue(_playbackQueue?['current_index']),
+      mode: _playbackMode.nameForApi,
+      shuffleSeed: _intValue(_playbackQueue?['shuffle_seed']) ?? 1,
+      automatic: completed,
+    );
+    final currentIndex = advance.index;
+    if (advance.kind == PlaybackQueueAdvanceKind.stop || currentIndex == null) {
       await _setOfflineStopped();
       return;
-    }
-    var currentIndex = _intValue(_playbackQueue?['current_index']) ?? -1;
-    if (_playbackMode == _PlaybackMode.repeatOne && completed) {
-      // Keep the current index.
-    } else if (_playbackMode == _PlaybackMode.shuffle && items.length > 1) {
-      var next = currentIndex;
-      while (next == currentIndex) {
-        next = Random.secure().nextInt(items.length);
-      }
-      currentIndex = next;
-    } else {
-      currentIndex += 1;
-      if (currentIndex >= items.length) {
-        if (_playbackMode == _PlaybackMode.repeatAll) {
-          currentIndex = 0;
-        } else {
-          await _setOfflineStopped();
-          return;
-        }
-      }
     }
     final trackId = _intValue(_asMap(items[currentIndex]['track'])['id']);
     if (trackId == null) {
@@ -371,13 +360,15 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
 
   Future<void> _playPreviousOfflineTrack() async {
     final items = _queueItems();
-    if (items.isEmpty) return;
-    var currentIndex = _intValue(_playbackQueue?['current_index']) ?? 0;
-    currentIndex -= 1;
-    if (currentIndex < 0) {
-      currentIndex = _playbackMode == _PlaybackMode.repeatAll
-          ? items.length - 1
-          : 0;
+    final advance = previousPlaybackQueueItem(
+      itemIds: [for (final item in items) _intValue(item['id']) ?? 0],
+      currentIndex: _intValue(_playbackQueue?['current_index']),
+      mode: _playbackMode.nameForApi,
+      shuffleSeed: _intValue(_playbackQueue?['shuffle_seed']) ?? 1,
+    );
+    final currentIndex = advance.index;
+    if (advance.kind == PlaybackQueueAdvanceKind.stop || currentIndex == null) {
+      return;
     }
     final trackId = _intValue(_asMap(items[currentIndex]['track'])['id']);
     if (trackId == null) return;

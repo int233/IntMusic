@@ -43,7 +43,7 @@ class _AppTopBar extends StatelessWidget {
         : const Duration(milliseconds: 240);
     return Container(
       height: 66,
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
       decoration: BoxDecoration(
         color: IntMusicTheme.of(context).canvas.withValues(alpha: 0.42),
         border: Platform.isMacOS
@@ -52,61 +52,44 @@ class _AppTopBar extends StatelessWidget {
                 bottom: BorderSide(color: IntMusicTheme.of(context).stroke),
               ),
       ),
-      child: Row(
-        children: [
-          _AppTooltip(
-            message: _tr(context, 'Back'),
-            child: IconButton(
-              key: const Key('navigation-back'),
-              onPressed: canGoBack ? onBack : null,
-              icon: const Icon(Icons.chevron_left),
-            ),
-          ),
-          _AppTooltip(
-            message: _tr(context, 'Forward'),
-            child: IconButton(
-              key: const Key('navigation-forward'),
-              onPressed: canGoForward ? onForward : null,
-              icon: const Icon(Icons.chevron_right),
-            ),
-          ),
-          const SizedBox(width: 6),
-          AnimatedContainer(
-            duration: motionDuration,
-            curve: Curves.easeInOutCubic,
-            constraints: BoxConstraints(
-              minWidth: desktop ? 140 : 72,
-              maxWidth: desktop ? 240 : 116,
-            ),
-            child: AnimatedSwitcher(
-              duration: motionDuration,
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) =>
-                  FadeTransition(opacity: animation, child: child),
-              child: Text(
-                _tr(context, title),
-                key: ValueKey(title),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-          ),
-          AnimatedCrossFade(
-            duration: motionDuration,
-            sizeCurve: Curves.easeInOutCubic,
-            alignment: Alignment.centerLeft,
-            crossFadeState: desktop
-                ? CrossFadeState.showFirst
-                : CrossFadeState.showSecond,
-            firstChild: const SizedBox.shrink(),
-            secondChild: Row(
-              mainAxisSize: MainAxisSize.min,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          if (constraints.maxWidth < 560) {
+            return Row(
               children: [
-                const SizedBox(width: 8),
+                _AppTooltip(
+                  message: _tr(context, 'Back'),
+                  child: IconButton(
+                    key: const Key('navigation-back'),
+                    onPressed: canGoBack ? onBack : null,
+                    icon: const Icon(Icons.chevron_left),
+                  ),
+                ),
+                _AppTooltip(
+                  message: _tr(context, 'Forward'),
+                  child: IconButton(
+                    key: const Key('navigation-forward'),
+                    onPressed: canGoForward ? onForward : null,
+                    icon: const Icon(Icons.chevron_right),
+                  ),
+                ),
+                const SizedBox(width: 2),
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: motionDuration,
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: Text(
+                      _tr(context, title),
+                      key: ValueKey(title),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ),
                 Builder(
                   builder: (buttonContext) => _AppTooltip(
                     message: _tr(context, 'Menu'),
@@ -116,25 +99,208 @@ class _AppTopBar extends StatelessWidget {
                     ),
                   ),
                 ),
+                _AppTooltip(
+                  message: _tr(context, 'Search library'),
+                  child: IconButton(
+                    key: const Key('mobile-search-button'),
+                    onPressed: () => _showMobileSearch(context),
+                    icon: const Icon(Icons.search),
+                  ),
+                ),
               ],
+            );
+          }
+          return Row(
+            children: [
+              _AppTooltip(
+                message: _tr(context, 'Back'),
+                child: IconButton(
+                  key: const Key('navigation-back'),
+                  onPressed: canGoBack ? onBack : null,
+                  icon: const Icon(Icons.chevron_left),
+                ),
+              ),
+              _AppTooltip(
+                message: _tr(context, 'Forward'),
+                child: IconButton(
+                  key: const Key('navigation-forward'),
+                  onPressed: canGoForward ? onForward : null,
+                  icon: const Icon(Icons.chevron_right),
+                ),
+              ),
+              const SizedBox(width: 6),
+              AnimatedContainer(
+                duration: motionDuration,
+                curve: Curves.easeInOutCubic,
+                constraints: BoxConstraints(
+                  minWidth: desktop ? 140 : 72,
+                  maxWidth: desktop ? 240 : 116,
+                ),
+                child: AnimatedSwitcher(
+                  duration: motionDuration,
+                  switchInCurve: Curves.easeOutCubic,
+                  switchOutCurve: Curves.easeInCubic,
+                  transitionBuilder: (child, animation) =>
+                      FadeTransition(opacity: animation, child: child),
+                  child: Text(
+                    _tr(context, title),
+                    key: ValueKey(title),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+              AnimatedCrossFade(
+                duration: motionDuration,
+                sizeCurve: Curves.easeInOutCubic,
+                alignment: Alignment.centerLeft,
+                crossFadeState: desktop
+                    ? CrossFadeState.showFirst
+                    : CrossFadeState.showSecond,
+                firstChild: const SizedBox.shrink(),
+                secondChild: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const SizedBox(width: 8),
+                    Builder(
+                      builder: (buttonContext) => _AppTooltip(
+                        message: _tr(context, 'Menu'),
+                        child: IconButton(
+                          onPressed: () => onOpenMenu(buttonContext),
+                          icon: const Icon(Icons.menu),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 520),
+                  child: _SearchBox(
+                    controller: searchController,
+                    suggestions: searchSuggestions,
+                    recentSearches: recentSearches,
+                    onChanged: onSearchChanged,
+                    onSubmitted: onSubmitSearch,
+                    onSelected: onSelectSuggestion,
+                    onRecentSelected: onSelectRecentSearch,
+                    onClear: onClearSearch,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _showMobileSearch(BuildContext context) {
+    final language = _LocaleScope.languageOf(context);
+    unawaited(
+      showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        backgroundColor: IntMusicTheme.of(context).surface,
+        builder: (sheetContext) => _LocaleScope(
+          language: language,
+          child: _MobileSearchSheet(
+            controller: searchController,
+            recentSearches: recentSearches,
+            onChanged: onSearchChanged,
+            onSubmitted: (query) {
+              Navigator.of(sheetContext).pop();
+              onSubmitSearch(query);
+            },
+            onRecentSelected: (query) {
+              Navigator.of(sheetContext).pop();
+              onSelectRecentSearch(query);
+            },
+            onClear: onClearSearch,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileSearchSheet extends StatelessWidget {
+  const _MobileSearchSheet({
+    required this.controller,
+    required this.recentSearches,
+    required this.onChanged,
+    required this.onSubmitted,
+    required this.onRecentSelected,
+    required this.onClear,
+  });
+
+  final TextEditingController controller;
+  final List<String> recentSearches;
+  final ValueChanged<String> onChanged;
+  final ValueChanged<String> onSubmitted;
+  final ValueChanged<String> onRecentSelected;
+  final VoidCallback onClear;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        16,
+        14,
+        16,
+        16 + MediaQuery.viewInsetsOf(context).bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: controller,
+            autofocus: true,
+            textInputAction: TextInputAction.search,
+            onChanged: onChanged,
+            onSubmitted: onSubmitted,
+            decoration: InputDecoration(
+              hintText: _tr(context, 'Search library'),
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: controller.text.isEmpty
+                  ? null
+                  : IconButton(
+                      onPressed: onClear,
+                      icon: const Icon(Icons.close),
+                    ),
             ),
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 520),
-              child: _SearchBox(
-                controller: searchController,
-                suggestions: searchSuggestions,
-                recentSearches: recentSearches,
-                onChanged: onSearchChanged,
-                onSubmitted: onSubmitSearch,
-                onSelected: onSelectSuggestion,
-                onRecentSelected: onSelectRecentSearch,
-                onClear: onClearSearch,
+          if (recentSearches.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Text(
+              _tr(context, 'Recent searches'),
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 6),
+            Flexible(
+              child: ListView.builder(
+                shrinkWrap: true,
+                itemCount: min(6, recentSearches.length),
+                itemBuilder: (context, index) => ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.history),
+                  title: Text(
+                    recentSearches[index],
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () => onRecentSelected(recentSearches[index]),
+                ),
               ),
             ),
-          ),
+          ],
         ],
       ),
     );

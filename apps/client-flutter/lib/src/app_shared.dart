@@ -79,17 +79,28 @@ class _ArtworkTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(radius),
           child: imageUrl == null || deferImage
               ? fallback
-              : CachedNetworkImage(
-                  cacheManager: _artworkCacheManager,
-                  imageUrl: imageUrl!,
-                  fit: BoxFit.cover,
-                  memCacheWidth: imageCacheExtent,
-                  filterQuality: FilterQuality.low,
-                  fadeInDuration: const Duration(milliseconds: 80),
-                  fadeOutDuration: Duration.zero,
-                  useOldImageOnUrlChange: true,
-                  placeholder: (context, url) => fallback,
-                  errorWidget: (context, url, error) => fallback,
+              : ValueListenableBuilder<int>(
+                  valueListenable: artworkCacheCoordinator.retryRevision,
+                  builder: (context, retryRevision, child) {
+                    final url = imageUrl!;
+                    return CachedNetworkImage(
+                      key: ValueKey(
+                        '${artworkCacheCoordinator.cacheKey(url)}:'
+                        '$retryRevision',
+                      ),
+                      cacheManager: _artworkCacheManager,
+                      cacheKey: artworkCacheCoordinator.cacheKey(url),
+                      imageUrl: url,
+                      fit: BoxFit.cover,
+                      memCacheWidth: imageCacheExtent,
+                      filterQuality: FilterQuality.low,
+                      fadeInDuration: const Duration(milliseconds: 80),
+                      fadeOutDuration: Duration.zero,
+                      useOldImageOnUrlChange: true,
+                      placeholder: (context, url) => fallback,
+                      errorWidget: (context, url, error) => fallback,
+                    );
+                  },
                 ),
         ),
       ),
@@ -557,22 +568,46 @@ class _LibraryToolbarState extends State<_LibraryToolbar> {
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 720;
         if (compact) {
+          final veryCompact = constraints.maxWidth < 520;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      widget.countLabel,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: tokens.textSecondary,
+              if (veryCompact) ...[
+                Text(
+                  widget.countLabel,
+                  key: const Key('library-count-label'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
+                ),
+                const SizedBox(height: 7),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: controls,
+                  ),
+                ),
+              ] else
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        widget.countLabel,
+                        key: const Key('library-count-label'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: tokens.textSecondary,
+                        ),
                       ),
                     ),
-                  ),
-                  controls,
-                ],
-              ),
+                    controls,
+                  ],
+                ),
               const SizedBox(height: 8),
               search,
             ],
@@ -582,6 +617,9 @@ class _LibraryToolbarState extends State<_LibraryToolbar> {
           children: [
             Text(
               widget.countLabel,
+              key: const Key('library-count-label'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: Theme.of(
                 context,
               ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),

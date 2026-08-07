@@ -7,10 +7,7 @@ class _PlaybackPage extends StatelessWidget {
     required this.trackDetail,
     required this.activeZoneId,
     required this.playbackMode,
-    required this.volume,
-    required this.muted,
-    required this.volumeMode,
-    required this.systemVolumeSupported,
+    required this.volumeState,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
@@ -22,7 +19,6 @@ class _PlaybackPage extends StatelessWidget {
     required this.onShowDevices,
     required this.onVolumeChanged,
     required this.onToggleMute,
-    required this.onVolumeModeChanged,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -32,10 +28,7 @@ class _PlaybackPage extends StatelessWidget {
   final Map<String, dynamic>? trackDetail;
   final String activeZoneId;
   final _PlaybackMode playbackMode;
-  final double volume;
-  final bool muted;
-  final String volumeMode;
-  final bool systemVolumeSupported;
+  final _DualVolumeState volumeState;
   final Future<void> Function(String) onResume;
   final Future<void> Function(String) onPause;
   final Future<void> Function() onPrevious;
@@ -45,9 +38,8 @@ class _PlaybackPage extends StatelessWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
-  final ValueChanged<double> onVolumeChanged;
-  final VoidCallback onToggleMute;
-  final ValueChanged<String> onVolumeModeChanged;
+  final void Function(String mode, double volume) onVolumeChanged;
+  final ValueChanged<String> onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -95,10 +87,7 @@ class _PlaybackPage extends StatelessWidget {
                 lyricsPronunciation: lyrics?['pronunciation']?.toString() ?? '',
                 lyricsOffsetMs: _intValue(lyrics?['offset_ms']) ?? 0,
                 playbackMode: playbackMode,
-                volume: volume,
-                muted: muted,
-                volumeMode: volumeMode,
-                systemVolumeSupported: systemVolumeSupported,
+                volumeState: volumeState,
                 onResume: onResume,
                 onPause: onPause,
                 onPrevious: onPrevious,
@@ -110,7 +99,6 @@ class _PlaybackPage extends StatelessWidget {
                 onShowDevices: onShowDevices,
                 onVolumeChanged: onVolumeChanged,
                 onToggleMute: onToggleMute,
-                onVolumeModeChanged: onVolumeModeChanged,
                 onToggleFavorite: onToggleFavorite,
                 onOpenTrack: onOpenTrack,
               ),
@@ -175,15 +163,11 @@ class _PlaybackPage extends StatelessWidget {
                 const SizedBox(height: 8),
                 _PlaybackInlineActions(
                   trackId: trackId,
-                  volume: volume,
-                  muted: muted,
-                  volumeMode: volumeMode,
-                  systemVolumeSupported: systemVolumeSupported,
+                  volumeState: volumeState,
                   onShowDevices: onShowDevices,
                   onOpenTrack: onOpenTrack,
                   onVolumeChanged: onVolumeChanged,
                   onToggleMute: onToggleMute,
-                  onVolumeModeChanged: onVolumeModeChanged,
                 ),
               ],
             ),
@@ -283,10 +267,7 @@ class _CompactPlaybackPager extends StatefulWidget {
     required this.lyricsPronunciation,
     required this.lyricsOffsetMs,
     required this.playbackMode,
-    required this.volume,
-    required this.muted,
-    required this.volumeMode,
-    required this.systemVolumeSupported,
+    required this.volumeState,
     required this.onResume,
     required this.onPause,
     required this.onPrevious,
@@ -298,7 +279,6 @@ class _CompactPlaybackPager extends StatefulWidget {
     required this.onShowDevices,
     required this.onVolumeChanged,
     required this.onToggleMute,
-    required this.onVolumeModeChanged,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -320,10 +300,7 @@ class _CompactPlaybackPager extends StatefulWidget {
   final String lyricsPronunciation;
   final int lyricsOffsetMs;
   final _PlaybackMode playbackMode;
-  final double volume;
-  final bool muted;
-  final String volumeMode;
-  final bool systemVolumeSupported;
+  final _DualVolumeState volumeState;
   final Future<void> Function(String) onResume;
   final Future<void> Function(String) onPause;
   final Future<void> Function() onPrevious;
@@ -333,9 +310,8 @@ class _CompactPlaybackPager extends StatefulWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
-  final ValueChanged<double> onVolumeChanged;
-  final VoidCallback onToggleMute;
-  final ValueChanged<String> onVolumeModeChanged;
+  final void Function(String mode, double volume) onVolumeChanged;
+  final ValueChanged<String> onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -380,10 +356,7 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           activeZoneId: widget.activeZoneId,
           durationMs: widget.durationMs,
           playbackMode: widget.playbackMode,
-          volume: widget.volume,
-          muted: widget.muted,
-          volumeMode: widget.volumeMode,
-          systemVolumeSupported: widget.systemVolumeSupported,
+          volumeState: widget.volumeState,
           page: _page,
           onGoToPage: _goTo,
           onResume: widget.onResume,
@@ -397,7 +370,6 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           onShowDevices: widget.onShowDevices,
           onVolumeChanged: widget.onVolumeChanged,
           onToggleMute: widget.onToggleMute,
-          onVolumeModeChanged: widget.onVolumeModeChanged,
           onToggleFavorite: widget.onToggleFavorite,
           onOpenTrack: widget.onOpenTrack,
         ),
@@ -418,10 +390,7 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           lyricsPronunciation: widget.lyricsPronunciation,
           lyricsOffsetMs: widget.lyricsOffsetMs,
           playbackMode: widget.playbackMode,
-          volume: widget.volume,
-          muted: widget.muted,
-          volumeMode: widget.volumeMode,
-          systemVolumeSupported: widget.systemVolumeSupported,
+          volumeState: widget.volumeState,
           page: _page,
           onGoToPage: _goTo,
           onResume: widget.onResume,
@@ -435,7 +404,6 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           onShowDevices: widget.onShowDevices,
           onVolumeChanged: widget.onVolumeChanged,
           onToggleMute: widget.onToggleMute,
-          onVolumeModeChanged: widget.onVolumeModeChanged,
           onToggleFavorite: widget.onToggleFavorite,
           onOpenTrack: widget.onOpenTrack,
         ),
@@ -458,10 +426,7 @@ class _CompactPlayerPane extends StatelessWidget {
     required this.activeZoneId,
     required this.durationMs,
     required this.playbackMode,
-    required this.volume,
-    required this.muted,
-    required this.volumeMode,
-    required this.systemVolumeSupported,
+    required this.volumeState,
     required this.page,
     required this.onGoToPage,
     required this.onResume,
@@ -475,7 +440,6 @@ class _CompactPlayerPane extends StatelessWidget {
     required this.onShowDevices,
     required this.onVolumeChanged,
     required this.onToggleMute,
-    required this.onVolumeModeChanged,
     required this.onToggleFavorite,
     required this.onOpenTrack,
   });
@@ -492,10 +456,7 @@ class _CompactPlayerPane extends StatelessWidget {
   final String activeZoneId;
   final int durationMs;
   final _PlaybackMode playbackMode;
-  final double volume;
-  final bool muted;
-  final String volumeMode;
-  final bool systemVolumeSupported;
+  final _DualVolumeState volumeState;
   final int page;
   final ValueChanged<int> onGoToPage;
   final Future<void> Function(String) onResume;
@@ -507,9 +468,8 @@ class _CompactPlayerPane extends StatelessWidget {
   final void Function(BuildContext) onShowModeMenu;
   final void Function(BuildContext) onShowQueue;
   final void Function(BuildContext) onShowDevices;
-  final ValueChanged<double> onVolumeChanged;
-  final VoidCallback onToggleMute;
-  final ValueChanged<String> onVolumeModeChanged;
+  final void Function(String mode, double volume) onVolumeChanged;
+  final ValueChanged<String> onToggleMute;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final Future<void> Function(int) onOpenTrack;
 
@@ -570,10 +530,7 @@ class _CompactPlayerPane extends StatelessWidget {
               const SizedBox(height: 8),
               _CompactPlaybackExtensions(
                 page: page,
-                volume: volume,
-                muted: muted,
-                volumeMode: volumeMode,
-                systemVolumeSupported: systemVolumeSupported,
+                volumeState: volumeState,
                 onGoToPage: onGoToPage,
                 onShowDevices: onShowDevices,
                 onOpenTrack: trackId == null
@@ -581,7 +538,6 @@ class _CompactPlayerPane extends StatelessWidget {
                     : () => unawaited(onOpenTrack(trackId!)),
                 onVolumeChanged: onVolumeChanged,
                 onToggleMute: onToggleMute,
-                onVolumeModeChanged: onVolumeModeChanged,
               ),
             ],
           ),

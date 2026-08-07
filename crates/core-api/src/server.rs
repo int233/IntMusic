@@ -16,6 +16,7 @@ where
     let (listener, bind_addr) = bind_core_listener(&config).await?;
     let server_id = Uuid::parse_str(&core_db::sync_server_id(&pool).await?)
         .context("stored Core server ID is invalid")?;
+    let catalog_epoch = core_db::catalog_epoch(&pool).await?;
     let runtime_endpoint_file = write_runtime_endpoint(&paths, bind_addr, server_id).await?;
     let discovery_name = core_display_name(&config);
     let discovery_publisher = if config.server.advertise_mdns {
@@ -54,7 +55,7 @@ where
         config,
         paths,
         pool,
-        server_id,
+        (server_id, catalog_epoch),
         bind_addr,
         discovery_service,
         transcoder,

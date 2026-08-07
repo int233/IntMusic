@@ -457,7 +457,7 @@ class _SheetTrackRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final title = track['title']?.toString() ?? 'Untitled';
     final artist = track['artist_display']?.toString() ?? '';
-    final leading = coreBaseUrl == null
+    final regularLeading = coreBaseUrl == null
         ? SizedBox(
             width: 42,
             child: Text(
@@ -494,32 +494,157 @@ class _SheetTrackRow extends StatelessWidget {
             ),
           );
 
-    return _SimpleListRow(
-      height: 70,
-      leading: leading,
-      title: title,
-      subtitle: subtitle,
-      onTap: onOpen,
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _TrackActions(
-            track: track,
-            compact: true,
-            onToggleFavorite: onToggleFavorite,
-            onAddToPlaylist: onAddToPlaylist,
-            onPlay: onPlay,
-          ),
-          if (onRemove != null)
-            _AppTooltip(
-              message: 'Remove',
-              child: IconButton(
-                onPressed: onRemove,
-                icon: const Icon(Icons.remove_circle_outline),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 560) {
+          final compactLeading = coreBaseUrl == null
+              ? SizedBox(
+                  width: 28,
+                  child: Text(
+                    indexLabel,
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: IntMusicTheme.of(context).textSecondary,
+                    ),
+                  ),
+                )
+              : SizedBox(
+                  width: 72,
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 24,
+                        child: Text(
+                          indexLabel,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context).textTheme.labelLarge
+                              ?.copyWith(
+                                color: IntMusicTheme.of(context).textSecondary,
+                              ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      _ArtworkTile(
+                        title: title,
+                        subtitle: artist,
+                        size: 42,
+                        icon: Icons.music_note_outlined,
+                        imageUrl: _trackArtworkUrl(coreBaseUrl!, track['id']),
+                      ),
+                    ],
+                  ),
+                );
+          final trailing = Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _TrackActions(
+                track: track,
+                compact: true,
+                onToggleFavorite: onToggleFavorite,
+                onAddToPlaylist: onAddToPlaylist,
+                onPlay: onPlay,
+              ),
+              if (onRemove != null)
+                _AppTooltip(
+                  message: 'Remove',
+                  child: IconButton(
+                    onPressed: onRemove,
+                    icon: const Icon(Icons.remove_circle_outline),
+                  ),
+                ),
+            ],
+          );
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onOpen,
+              child: SizedBox(
+                height: 78,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                  child: Row(
+                    children: [
+                      compactLeading,
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodyLarge
+                                  ?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                            const SizedBox(height: 3),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    subtitle,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: IntMusicTheme.of(
+                                            context,
+                                          ).textSecondary,
+                                        ),
+                                  ),
+                                ),
+                                if (track['_availability'] is Map) ...[
+                                  const SizedBox(width: 6),
+                                  _TrackAvailabilityBadge(
+                                    track: track,
+                                    compact: true,
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      trailing,
+                    ],
+                  ),
+                ),
               ),
             ),
-        ],
-      ),
+          );
+        }
+        return _SimpleListRow(
+          height: 70,
+          leading: regularLeading,
+          title: title,
+          subtitle: subtitle,
+          onTap: onOpen,
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _TrackAvailabilityBadge(track: track, compact: true),
+              const SizedBox(width: 4),
+              _TrackActions(
+                track: track,
+                compact: true,
+                onToggleFavorite: onToggleFavorite,
+                onAddToPlaylist: onAddToPlaylist,
+                onPlay: onPlay,
+              ),
+              if (onRemove != null)
+                _AppTooltip(
+                  message: 'Remove',
+                  child: IconButton(
+                    onPressed: onRemove,
+                    icon: const Icon(Icons.remove_circle_outline),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

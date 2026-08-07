@@ -79,11 +79,11 @@ extension _DashboardLibrary on _CoreDashboardState {
     }
   }
 
-  Future<void> _syncAllClientLibraryRoots() async {
+  Future<void> _syncAllClientLibraryRoots({bool refreshAfter = true}) async {
     for (final root in List<_ClientLibraryRoot>.of(_clientLibraryRoots)) {
       await _syncClientLibraryRoot(root.externalId, refreshAfter: false);
     }
-    if (mounted && _clientLibraryRoots.isNotEmpty) {
+    if (refreshAfter && mounted && _clientLibraryRoots.isNotEmpty) {
       await _refreshAll();
     }
   }
@@ -432,6 +432,7 @@ extension _DashboardLibrary on _CoreDashboardState {
       _searchSortByQuery.putIfAbsent(query, () => _SearchSort.relevance);
       _navigateToInState(_AppRoute.search(query));
       _searchSuggestions = const [];
+      _decorateSearchTrackAvailability(query);
     });
   }
 

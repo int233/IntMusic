@@ -3,6 +3,7 @@ part of '../intmusic_client.dart';
 class _ClientCacheSnapshot {
   const _ClientCacheSnapshot({
     required this.serverId,
+    required this.catalogEpoch,
     required this.cursor,
     required this.values,
     required this.trackDetails,
@@ -14,6 +15,7 @@ class _ClientCacheSnapshot {
   });
 
   final String? serverId;
+  final String? catalogEpoch;
   final int cursor;
   final Map<String, dynamic> values;
   final Map<int, Map<String, dynamic>> trackDetails;
@@ -27,7 +29,7 @@ class _ClientCacheSnapshot {
 }
 
 class _ClientCacheStore {
-  static const _databaseVersion = 2;
+  static const _databaseVersion = 3;
   static Database? _database;
   static Future<void> _writeQueue = Future<void>.value();
 
@@ -68,6 +70,7 @@ class _ClientCacheStore {
             CREATE TABLE sync_state (
               core_url TEXT PRIMARY KEY,
               server_id TEXT NOT NULL,
+              catalog_epoch TEXT,
               cursor INTEGER NOT NULL DEFAULT 0,
               last_sync_at INTEGER,
               last_error TEXT
@@ -94,6 +97,18 @@ class _ClientCacheStore {
         onUpgrade: (database, oldVersion, _) async {
           if (oldVersion < 2) {
             await _createDetailWarmStateTable(database);
+          }
+          if (oldVersion < 3) {
+            await database.execute(
+              'ALTER TABLE sync_state ADD COLUMN catalog_epoch TEXT',
+            );
+            // v1/v2 rows contain logical IDs from the retired catalog model.
+            // Local folder preferences and SAF grants live in SharedPreferences
+            // and are intentionally preserved outside this database.
+            await database.delete('cache_entries');
+            await database.delete('search_index');
+            await database.delete('detail_warm_state');
+            await database.delete('sync_state');
           }
         },
       ),
@@ -130,6 +145,7 @@ class _ClientCacheStore {
         limit: 1,
       );
       final serverId = stateRows.firstOrNull?['server_id']?.toString();
+      final catalogEpoch = stateRows.firstOrNull?['catalog_epoch']?.toString();
       final cursor = _intValue(stateRows.firstOrNull?['cursor']) ?? 0;
       final rows = await database.query(
         'cache_entries',
@@ -161,6 +177,7 @@ class _ClientCacheStore {
       }
       return _ClientCacheSnapshot(
         serverId: serverId,
+        catalogEpoch: catalogEpoch,
         cursor: cursor,
         values: values,
         trackDetails: trackDetails,
@@ -173,6 +190,7 @@ class _ClientCacheStore {
     } catch (_) {
       return const _ClientCacheSnapshot(
         serverId: null,
+        catalogEpoch: null,
         cursor: 0,
         values: <String, dynamic>{},
         trackDetails: <int, Map<String, dynamic>>{},
@@ -233,6 +251,7 @@ class _ClientCacheStore {
   ) {
     final normalized = _normalizedCoreUrl(coreUrl);
     final serverId = snapshot['server_id']?.toString() ?? '';
+    final catalogEpoch = snapshot['catalog_epoch']?.toString() ?? '';
     final cursor = _intValue(snapshot['cursor']) ?? 0;
     final values = <String, dynamic>{
       'albums': (snapshot['albums'] as List?) ?? const <dynamic>[],
@@ -246,6 +265,8 @@ class _ClientCacheStore {
           (snapshot['library_roots'] as List?) ?? const <dynamic>[],
       'client_library_roots':
           (snapshot['client_library_roots'] as List?) ?? const <dynamic>[],
+      'client_file_bindings':
+          (snapshot['client_file_bindings'] as List?) ?? const <dynamic>[],
       'settings': _asMap(snapshot['settings']),
       'generated_at': snapshot['generated_at']?.toString(),
       if (snapshot['status'] is Map) 'status': _asMap(snapshot['status']),
@@ -257,13 +278,14 @@ class _ClientCacheStore {
       await database.transaction((transaction) async {
         final previous = await transaction.query(
           'sync_state',
-          columns: <String>['server_id'],
+          columns: <String>['server_id', 'catalog_epoch'],
           where: 'core_url = ?',
           whereArgs: <Object?>[normalized],
           limit: 1,
         );
         if (previous.isNotEmpty &&
-            previous.first['server_id']?.toString() != serverId) {
+            (previous.first['server_id']?.toString() != serverId ||
+                previous.first['catalog_epoch']?.toString() != catalogEpoch)) {
           await transaction.delete(
             'cache_entries',
             where: 'core_url = ?',
@@ -337,6 +359,7 @@ class _ClientCacheStore {
         batch.insert('sync_state', <String, Object?>{
           'core_url': normalized,
           'server_id': serverId,
+          'catalog_epoch': catalogEpoch,
           'cursor': cursor,
           'last_sync_at': now,
           'last_error': null,
@@ -359,6 +382,28 @@ class _ClientCacheStore {
           _addSearchInsert(batch, normalized, 'playlist', playlist);
         }
         await batch.commit(noResult: true);
+      });
+    });
+    return _writeQueue;
+  }
+
+  static Future<void> clear(String coreUrl) {
+    final normalized = _normalizedCoreUrl(coreUrl);
+    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
+      final database = await _open();
+      await database.transaction((transaction) async {
+        for (final table in const <String>[
+          'cache_entries',
+          'search_index',
+          'detail_warm_state',
+          'sync_state',
+        ]) {
+          await transaction.delete(
+            table,
+            where: 'core_url = ?',
+            whereArgs: <Object?>[normalized],
+          );
+        }
       });
     });
     return _writeQueue;

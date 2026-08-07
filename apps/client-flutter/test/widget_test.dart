@@ -153,7 +153,7 @@ void main() {
     expect(preferences.getBool('intmusic.diagnostics.logging'), isFalse);
   });
 
-  testWidgets('opens a vertical volume control from the playback bar', (
+  testWidgets('shows player and system volume controls together', (
     tester,
   ) async {
     await pumpDesktop(tester);
@@ -162,8 +162,16 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.byKey(const Key('vertical-volume-panel')), findsOneWidget);
-    expect(find.text('100%'), findsOneWidget);
+    final panel = find.byKey(const Key('vertical-volume-panel'));
+    expect(panel, findsOneWidget);
+    expect(
+      find.descendant(of: panel, matching: find.byType(Slider)),
+      findsNWidgets(2),
+    );
+    expect(
+      find.descendant(of: panel, matching: find.text('100%')),
+      findsNWidgets(2),
+    );
     expect(find.text('Player'), findsWidgets);
     expect(find.text('System'), findsOneWidget);
   });

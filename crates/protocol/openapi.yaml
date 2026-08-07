@@ -7,7 +7,7 @@ servers:
 paths:
   /status:
     get:
-      summary: Return core status and library counts.
+      summary: Return Core identity, catalog epoch, and library counts.
       responses:
         "200":
           description: Core status.
@@ -367,7 +367,7 @@ paths:
           description: Root removed.
   /client-sync/snapshot:
     get:
-      summary: Return the normalized offline-first Client snapshot.
+      summary: Return the normalized offline-first Client snapshot and authoritative physical-file bindings.
       responses:
         "200":
           description: Client synchronization snapshot.
@@ -395,6 +395,23 @@ paths:
       responses:
         "200":
           description: Album detail.
+  /albums/{album_id}/edit:
+    get:
+      summary: Return editable album metadata, credits, tracks, and artist references.
+      responses:
+        "200":
+          description: Album editor snapshot.
+    post:
+      summary: Update album metadata and optionally propagate selected fields to selected tracks.
+      responses:
+        "200":
+          description: Updated album editor snapshot.
+  /albums/{album_id}/migrate:
+    post:
+      summary: Move a duplicate album identity and all of its tracks into another album.
+      responses:
+        "200":
+          description: Canonical target album and migration result.
   /artists/{artist_id}:
     get:
       summary: Return artist metadata, releases, tracks, assets, and visuals.

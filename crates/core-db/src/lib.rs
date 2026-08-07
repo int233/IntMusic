@@ -8,20 +8,22 @@ use std::{
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use protocol::{
-    AlbumDetail, AlbumSummary, ArtistAsset, ArtistDetail, ArtistProfile, ArtistSummary,
-    ArtistVisual, ArtistVisualRegion, AudioMasterSummary, CatalogRecordingSummary,
-    CatalogWorkSummary, ClientLibraryFileBinding, ClientLibraryManifestRequest,
-    ClientLibraryManifestResult, ClientLibraryPendingFile, ClientLibraryRootStatus,
-    ClientMutationBatchRequest, ClientMutationBatchResult, ClientSyncChange, ClientTrackManifest,
-    CreateDistributionRequest, DistributionContentSource, DistributionJobSummary,
-    DistributionSourceTaskAssignment, DistributionTaskAssignment, DistributionTaskProgress,
-    DistributionTranscodeTask, LibraryCounts, LibraryRoot, LyricPayload, MediaReplicaSummary,
-    MediaVariantSummary, NewPlaylist, PlaybackEvent, PlaybackMode, PlaybackQueue,
-    PlaybackQueueItem, PlaybackSession, PlaybackStats, PlaylistDetail, PlaylistKind,
-    PlaylistSummary, PlaylistTrackMutation, RecordingLinkCandidate, RelatedReleaseTrackSummary,
-    ReleaseEditionSummary, ReplacePlaybackQueue, ResolveClientLibraryFileResult, ScanProblem,
-    TrackDetail, TrackEditSnapshot, TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField,
-    TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateArtistAsset, UpdateArtistProfile,
+    AlbumArtistReference, AlbumCredit, AlbumDetail, AlbumEditSnapshot, AlbumMetadataProfile,
+    AlbumMigrationResult, AlbumSummary, AlbumTrackPropagation, ArtistAsset, ArtistDetail,
+    ArtistProfile, ArtistSummary, ArtistVisual, ArtistVisualRegion, AudioMasterSummary,
+    CatalogRecordingSummary, CatalogWorkSummary, ClientLibraryCopyBinding,
+    ClientLibraryFileBinding, ClientLibraryManifestRequest, ClientLibraryManifestResult,
+    ClientLibraryPendingFile, ClientLibraryRootStatus, ClientMutationBatchRequest,
+    ClientMutationBatchResult, ClientSyncChange, ClientTrackManifest, CreateDistributionRequest,
+    DistributionContentSource, DistributionJobSummary, DistributionSourceTaskAssignment,
+    DistributionTaskAssignment, DistributionTaskProgress, DistributionTranscodeTask, LibraryCounts,
+    LibraryRoot, LyricPayload, MediaReplicaSummary, MediaVariantSummary, NewPlaylist,
+    PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession, PlaybackStats,
+    PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation, RecordingLinkCandidate,
+    RelatedReleaseTrackSummary, ReleaseEditionSummary, ReplacePlaybackQueue,
+    ResolveClientLibraryFileResult, ScanProblem, TrackDetail, TrackEditSnapshot,
+    TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField, TrackMetadataUpdate,
+    TrackPlaybackStat, TrackSummary, UpdateAlbumMetadata, UpdateArtistAsset, UpdateArtistProfile,
     UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
 };
 use protocol::{
@@ -46,6 +48,8 @@ pub type DbPool = SqlitePool;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./src/migrations");
 
+mod album_detail;
+mod album_edit;
 mod artists;
 mod auto_track_merge;
 mod client_file_resolution;
@@ -70,12 +74,15 @@ mod track_merge;
 mod track_snapshot;
 mod tracks;
 
+pub use album_detail::*;
+pub use album_edit::*;
 pub(crate) use artists::trimmed_option;
 pub use artists::*;
 pub use auto_track_merge::*;
 pub use client_file_resolution::*;
 pub(crate) use client_file_resolution::{
-    attach_client_file_to_track, mark_client_replica_ready, normalize_client_metadata_status,
+    attach_client_file_to_track, canonical_track_id_for_media_variant, mark_client_replica_ready,
+    normalize_client_metadata_status, reconcile_redundant_client_track,
 };
 pub use client_library::*;
 pub use client_mutations::*;

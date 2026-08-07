@@ -24,6 +24,7 @@ struct ExactIdentity {
     release_track_id: i64,
     title: String,
     artist_display: String,
+    artist_identity: String,
     album_title: String,
     subtitle: Option<String>,
     year: Option<i64>,
@@ -48,7 +49,7 @@ pub async fn preview_exact_track_merges(
     for identity in identities {
         let key = ExactIdentityKey {
             title: normalize_text(&identity.title),
-            artist: normalize_text(&identity.artist_display),
+            artist: identity.artist_identity.clone(),
             album: normalize_text(&identity.album_title),
             subtitle: normalize_optional(identity.subtitle.as_deref()),
             year: identity.year,
@@ -180,6 +181,16 @@ async fn exact_identity_candidates(pool: &DbPool) -> Result<Vec<ExactIdentity>> 
                 ) ordered_artist
             ) AS artist_display,
             (
+                SELECT GROUP_CONCAT(ordered_artist.normalized_name, char(30))
+                FROM (
+                    SELECT artist.normalized_name
+                    FROM track_artists credit
+                    JOIN artists artist ON artist.id = credit.artist_id
+                    WHERE credit.track_id = track.id AND credit.role = 'primary'
+                    ORDER BY artist.normalized_name
+                ) ordered_artist
+            ) AS artist_identity,
+            (
                 SELECT COUNT(DISTINCT replica.file_id)
                 FROM release_track_media_variants relation
                 JOIN media_replicas replica
@@ -194,8 +205,32 @@ async fn exact_identity_candidates(pool: &DbPool) -> Result<Vec<ExactIdentity>> 
             ) AS media_variant_count,
             (
                 CASE
-                    WHEN file.deleted_at IS NULL
-                     AND file.availability_state = 'ready' THEN 1000000000000000
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM release_track_media_variants active_relation
+                        JOIN media_replicas active_replica
+                          ON active_replica.media_variant_id = active_relation.media_variant_id
+                        LEFT JOIN files active_file ON active_file.id = active_replica.file_id
+                        LEFT JOIN library_roots active_root
+                          ON active_root.id = active_replica.library_root_id
+                        LEFT JOIN devices active_device
+                          ON active_device.id = active_replica.device_id
+                        WHERE active_relation.release_track_id = link.release_track_id
+                          AND active_replica.availability_state NOT IN ('retired', 'ignored', 'missing')
+                          AND (active_file.id IS NULL OR active_file.deleted_at IS NULL)
+                          AND (
+                              active_root.id IS NULL
+                              OR (
+                                  active_root.removed_at IS NULL
+                                  AND active_root.retired_at IS NULL
+                                  AND active_root.enabled = 1
+                              )
+                          )
+                          AND (
+                              active_device.id IS NULL
+                              OR active_device.removed_at IS NULL
+                          )
+                    ) THEN 1000000000000000
                     ELSE 0
                 END
                 + CASE WHEN track.cover_asset_id IS NOT NULL THEN 100000000000000 ELSE 0 END
@@ -216,8 +251,7 @@ async fn exact_identity_candidates(pool: &DbPool) -> Result<Vec<ExactIdentity>> 
         JOIN release_tracks release_track ON release_track.id = link.release_track_id
         JOIN catalog_recordings recording ON recording.id = release_track.recording_id
         JOIN albums album ON album.id = track.album_id
-        WHERE file.deleted_at IS NULL
-          AND file.scan_status IN ('ok', 'identified')
+        WHERE file.scan_status IN ('ok', 'identified')
           AND track.duration_ms IS NOT NULL
           AND trim(track.title) <> ''
           AND trim(album.title) <> ''
@@ -252,6 +286,13 @@ async fn exact_identity_candidates(pool: &DbPool) -> Result<Vec<ExactIdentity>> 
         let Some(artist_display) = artist_display else {
             continue;
         };
+        let artist_identity = row
+            .try_get::<Option<String>, _>("artist_identity")?
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let Some(artist_identity) = artist_identity else {
+            continue;
+        };
         if normalize_text(&artist_display) == "unknown artist" {
             continue;
         }
@@ -260,6 +301,7 @@ async fn exact_identity_candidates(pool: &DbPool) -> Result<Vec<ExactIdentity>> 
             release_track_id: row.try_get("release_track_id")?,
             title: row.try_get("title")?,
             artist_display,
+            artist_identity,
             album_title: row.try_get("album_title")?,
             subtitle: row.try_get("subtitle")?,
             year: row.try_get("year")?,

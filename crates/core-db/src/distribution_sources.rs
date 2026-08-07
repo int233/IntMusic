@@ -18,7 +18,7 @@ pub async fn claim_distribution_source_task(
     let now = Utc::now();
     let now_text = now.to_rfc3339();
     let lease_text = (now + chrono::Duration::minutes(30)).to_rfc3339();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let expired_jobs = sqlx::query_scalar::<_, String>(
         r#"
         SELECT DISTINCT job_id

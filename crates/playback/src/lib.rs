@@ -12,6 +12,8 @@ use protocol::{PlaybackState, PlaybackTransportState};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
 use tokio::sync::{oneshot, RwLock};
 
+pub mod session_v3;
+
 #[derive(Clone)]
 pub struct PlaybackController {
     states: Arc<RwLock<HashMap<String, PlaybackState>>>,

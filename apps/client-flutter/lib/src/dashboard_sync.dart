@@ -79,6 +79,22 @@ extension _DashboardSync on _CoreDashboardState {
         'position_ms': 0,
       },
     );
+    final availableLocalTrackIds = <int>{};
+    final localCopies = _offlineLibrary.distinctTracks.toList(growable: false);
+    for (var start = 0; start < localCopies.length; start += 32) {
+      final end = min(start + 32, localCopies.length);
+      final availability = await Future.wait(
+        localCopies.sublist(start, end).map((copy) async {
+          final path = _offlineCopyPath(copy, _clientLibraryRoots);
+          return path != null && await File(path).exists();
+        }),
+      );
+      for (var index = 0; index < availability.length; index += 1) {
+        if (availability[index]) {
+          availableLocalTrackIds.add(localCopies[start + index].trackId);
+        }
+      }
+    }
     final localTracks = <int, Map<String, dynamic>>{
       for (final value in _offlineTrackSummaries(
         _offlineLibrary,
@@ -101,7 +117,9 @@ extension _DashboardSync on _CoreDashboardState {
             'is_favorite': local['is_favorite'] ?? cached['is_favorite'],
             'play_count': local['play_count'] ?? cached['play_count'],
             '_offline': true,
-            '_local_available': true,
+            '_local_available': availableLocalTrackIds.contains(
+              _intValue(cached['id']),
+            ),
           };
         })
         .toList(growable: true);
@@ -116,7 +134,7 @@ extension _DashboardSync on _CoreDashboardState {
           .map(
             (entry) => <String, dynamic>{
               ...entry.value,
-              '_local_available': true,
+              '_local_available': availableLocalTrackIds.contains(entry.key),
               '_metadata_pending': true,
             },
           ),
@@ -173,6 +191,7 @@ extension _DashboardSync on _CoreDashboardState {
         'version': _status?['version']?.toString() ?? 'local',
         'api_version': 'offline',
         'server_id': _offlineLibrary.serverId ?? 'offline',
+        'catalog_epoch': _offlineLibrary.catalogEpoch ?? '',
         'database_path': '-',
         'counts': <String, dynamic>{
           'library_roots': _clientLibraryRoots.length,
@@ -187,6 +206,7 @@ extension _DashboardSync on _CoreDashboardState {
         'treat_max_rating_as_favorite': true,
         'write_rating_on_favorite': false,
       };
+      _refreshTrackAvailabilityProjection();
     });
     final activeOutput = _offlineOutputForZone(offlineSelectedOutput);
     if (_rendererLocalFileByOutput[activeOutput] == true &&
@@ -283,6 +303,7 @@ extension _DashboardSync on _CoreDashboardState {
     }
     await _saveCoreUrlPreference();
     final coreUrl = _coreUrlController.text.trim();
+    final catalogReset = await _adoptCatalogIdentity(status, coreUrl);
     await _sendRendererRegistration(
       resetPlayback: _rendererRegisteredCoreUrl != coreUrl,
     );
@@ -292,9 +313,13 @@ extension _DashboardSync on _CoreDashboardState {
     // the larger metadata/cache refresh that follows.
     _startRendererHeartbeat();
     final serverId = status['server_id']?.toString() ?? '';
+    artworkCacheCoordinator.registerServer(
+      serverId,
+      catalogEpoch: status['catalog_epoch']?.toString(),
+    );
     final syncSnapshot = await _fetchSyncSnapshot(
       status,
-      force: _cacheServerId != serverId || _tracks.isEmpty,
+      force: catalogReset || _cacheServerId != serverId || _tracks.isEmpty,
     );
     final results = await Future.wait<dynamic>([
       _api.getJson('/outputs'),
@@ -373,8 +398,10 @@ extension _DashboardSync on _CoreDashboardState {
         _rendererLoadedTrackByOutput[continuingOutputId] != null;
     if (wasOffline) {
       await _finishOfflinePlayback('reconnected');
+      artworkCacheCoordinator.retryFailedImages();
     }
     _offlineMode = false;
+    _refreshTrackAvailabilityProjection();
     _offlineReconnectTimer?.cancel();
     _offlineReconnectFailures = 0;
     _startRendererHeartbeat();
@@ -384,6 +411,7 @@ extension _DashboardSync on _CoreDashboardState {
     _startLibrarySync();
     unawaited(_refreshDistributionJobs());
     _offlineLibrary.serverId = status['server_id']?.toString();
+    _offlineLibrary.catalogEpoch = status['catalog_epoch']?.toString();
     final flushedOfflineMutations = await _flushOfflineMutations();
     if (flushedOfflineMutations) {
       await _backgroundLibrarySync();
@@ -443,6 +471,10 @@ extension _DashboardSync on _CoreDashboardState {
       if (_playbackQueue != null) 'playback_queue': _playbackQueue,
     });
     unawaited(_warmDetailCache());
+    unawaited(_warmOfflineArtworkCache());
+    if (catalogReset && _clientLibraryRoots.isNotEmpty) {
+      unawaited(_rebindLocalLibraryAfterCatalogReset());
+    }
   }
 
   Future<Map<String, dynamic>?> _fetchSyncSnapshot(
@@ -503,43 +535,13 @@ extension _DashboardSync on _CoreDashboardState {
       }
       return _asMap(
         await _api.getJson(
-          '/client-sync/snapshot',
+          '/client-sync/snapshot?device_id=${Uri.encodeQueryComponent(_clientId)}',
           requestTimeout: const Duration(seconds: 60),
         ),
       );
     } on HttpException {
       return _loadLegacySyncSnapshot(status);
     }
-  }
-
-  Future<Map<String, dynamic>> _loadLegacySyncSnapshot(
-    Map<String, dynamic> status,
-  ) async {
-    final values = await Future.wait<dynamic>([
-      _loadPagedList('/albums'),
-      _loadPagedList('/artists'),
-      _loadPagedList('/tracks'),
-      _api.getJson('/playlists'),
-      _api.getJson('/playback/history?limit=250'),
-      _api.getJson('/playback/stats?top_limit=50'),
-      _api.getJson('/library/roots'),
-      _api.getJson('/client-library/manifests'),
-      _api.getJson('/settings'),
-    ]);
-    return <String, dynamic>{
-      'server_id': status['server_id']?.toString() ?? '',
-      'cursor': _intValue(status['library_revision']) ?? 0,
-      'generated_at': DateTime.now().toUtc().toIso8601String(),
-      'albums': values[0],
-      'artists': values[1],
-      'tracks': values[2],
-      'playlists': values[3],
-      'playback_history': values[4],
-      'playback_stats': values[5],
-      'library_roots': values[6],
-      'client_library_roots': values[7],
-      'settings': values[8],
-    };
   }
 
   void _startLibrarySync() {
@@ -591,10 +593,18 @@ extension _DashboardSync on _CoreDashboardState {
       return;
     }
     _backgroundSyncBusy = true;
+    var catalogReset = false;
     try {
       final status = _asMap(await _api.getJson('/status'));
       if (!_isIntMusicCoreStatus(status)) return;
-      final snapshot = await _fetchSyncSnapshot(status, force: force);
+      catalogReset = await _adoptCatalogIdentity(
+        status,
+        _coreUrlController.text.trim(),
+      );
+      final snapshot = await _fetchSyncSnapshot(
+        status,
+        force: force || catalogReset,
+      );
       if (snapshot == null) return;
       final storageSnapshot = <String, dynamic>{
         ...snapshot,
@@ -635,6 +645,9 @@ extension _DashboardSync on _CoreDashboardState {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
     } finally {
       _backgroundSyncBusy = false;
+      if (catalogReset && _clientLibraryRoots.isNotEmpty && mounted) {
+        unawaited(_rebindLocalLibraryAfterCatalogReset());
+      }
     }
   }
 
@@ -645,10 +658,10 @@ extension _DashboardSync on _CoreDashboardState {
     var retryPending = false;
     try {
       for (final kind in const <String>[
+        'track',
         'artist',
         'album',
         'playlist',
-        'track',
       ]) {
         if (!_detailRefreshScopes.contains(kind)) continue;
         final target = switch (kind) {
@@ -716,8 +729,14 @@ extension _DashboardSync on _CoreDashboardState {
         _detailWarmAfterIds.remove(kind);
         _detailWarmTargetCursors.remove(kind);
         _detailRefreshScopes.remove(kind);
+        if (kind == 'track' && mounted) {
+          _mutate(() => _refreshTrackAvailabilityProjection());
+        }
       }
-      if (mounted) _mutate(() {});
+      if (mounted) {
+        _mutate(() => _refreshTrackAvailabilityProjection());
+      }
+      unawaited(_warmOfflineArtworkCache());
     } on HttpException catch (error) {
       // A 404 means an older Core: details are then cached on first visit.
       // Transient HTTP failures keep their durable cursor and retry later.

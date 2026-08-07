@@ -15,7 +15,7 @@ pub async fn create_distribution_job(
     let quality = request.quality.trim().to_ascii_lowercase();
     let profile_extension = distribution_profile_extension(&quality)?;
 
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     let target_exists: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT root.id
@@ -373,7 +373,7 @@ pub async fn claim_distribution_task(
     let now = Utc::now();
     let now_text = now.to_rfc3339();
     let lease_text = (now + chrono::Duration::minutes(30)).to_rfc3339();
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     sqlx::query(
         r#"
         UPDATE distribution_items
