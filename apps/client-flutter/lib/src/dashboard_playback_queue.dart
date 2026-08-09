@@ -9,9 +9,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
     if (previousIntent != null) {
       _locallyAppliedPlaybackIntents.remove(previousIntent);
     }
-    final intentId =
-        '$_clientId-${DateTime.now().microsecondsSinceEpoch}-'
-        '${++_playbackIntentSequence}';
+    final intentId = _newPlaybackCommandId();
     intents[zoneId] = intentId;
     if (action != 'volume') {
       _latestPlaybackIntentAtByZone[zoneId] = DateTime.now().toUtc();
@@ -58,10 +56,10 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
       data: <String, Object?>{
         'track_id': trackId,
         'zone_id': _activeZoneId(),
-        'offline': _offlineMode,
+        'offline': _localPlaybackFallbackActive,
       },
     );
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final trackIds = _tracks
           .map((track) => _intValue((track as Map)['id']))
           .whereType<int>()
@@ -96,7 +94,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
         .whereType<int>()
         .toList(growable: false);
     final startIndex = trackIds.indexOf(trackId);
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _playOfflineTrack(trackId, sourceTrackIds: trackIds);
       return;
     }
@@ -137,6 +135,35 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
       sourceTrackIds: trackIds,
       intentId: intentId,
     );
+    final v3Items = _newPlaybackQueueItems(trackIds);
+    final v3Playback =
+        await _postPlaybackSessionActionV3(zoneId, <String, dynamic>{
+          'type': 'replace_queue_and_play',
+          'items': v3Items,
+          'start_item_id': v3Items[startIndex]['item_id'],
+          'position_ms': 0,
+        }, commandId: intentId);
+    if (v3Playback != null) {
+      if (mounted) {
+        _mutatePlayback(() => _applyPlayback(v3Playback));
+      }
+      unawaited(_refreshPlaybackQueue(zoneId: zoneId));
+      ClientLog.event(
+        _playbackSessionCommandAcknowledgedV3(v3Playback)
+            ? 'playback.session_v3.play_collection.applied'
+            : 'playback.session_v3.play_collection.pending',
+        level: _playbackSessionCommandAcknowledgedV3(v3Playback)
+            ? 'info'
+            : 'warning',
+        data: <String, Object?>{
+          'track_id': trackId,
+          'zone_id': zoneId,
+          'elapsed_ms': requestWatch.elapsedMilliseconds,
+          'local_fast_start': localStarted,
+        },
+      );
+      return;
+    }
     try {
       final result = _asMap(
         await _serializePlaybackRequest<dynamic>(
@@ -254,7 +281,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
     bool tryLocalFastStart = true,
     String? intentId,
   }) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _playOfflineTrack(trackId);
       return _playback;
     }
@@ -268,6 +295,49 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
           zoneId: zoneId,
           intentId: playbackIntentId,
         );
+    final outputId = _clientOutputForZone(zoneId) ?? zoneId;
+    var agent = _playbackAgentsByOutput.putIfAbsent(
+      outputId,
+      () => PlaybackAgent(outputId),
+    );
+    if (!agent.hasSession && await _refreshPlaybackSessionV3(zoneId: zoneId)) {
+      agent = _playbackAgentsByOutput[outputId]!;
+    }
+    PlaybackAgentItem? queueItem;
+    for (final item in agent.items) {
+      if (item.trackId == trackId) {
+        queueItem = item;
+        break;
+      }
+    }
+    if (queueItem != null) {
+      final v3Playback = await _postPlaybackSessionActionV3(
+        zoneId,
+        <String, dynamic>{
+          'type': 'play',
+          'item_id': queueItem.itemId,
+          'position_ms': 0,
+        },
+        commandId: playbackIntentId,
+      );
+      if (v3Playback != null) {
+        ClientLog.event(
+          _playbackSessionCommandAcknowledgedV3(v3Playback)
+              ? 'playback.session_v3.play_track.applied'
+              : 'playback.session_v3.play_track.pending',
+          level: _playbackSessionCommandAcknowledgedV3(v3Playback)
+              ? 'info'
+              : 'warning',
+          data: <String, Object?>{
+            'track_id': trackId,
+            'zone_id': zoneId,
+            'elapsed_ms': watch.elapsedMilliseconds,
+            'local_fast_start': localStarted,
+          },
+        );
+        return _acceptIncomingPlayback(v3Playback) ? v3Playback : null;
+      }
+    }
     try {
       final playback = _asMap(
         await _serializePlaybackRequest<dynamic>(
@@ -328,79 +398,127 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
   }
 
   Future<void> _playPreviousTrack() async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _finishOfflinePlayback('previous');
       await _playPreviousOfflineTrack();
       return;
     }
     final zoneId = _activeZoneId();
     final intentId = _beginPlaybackIntent(zoneId, 'previous');
-    await _tryStartAdjacentLocalPlayback(next: false, intentId: intentId);
-    final playback = await _postPlaybackControl(
-      zoneId,
-      '/zones/${Uri.encodeComponent(zoneId)}/previous',
-      _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
+    final localStarted = await _tryStartAdjacentLocalPlayback(
+      next: false,
+      automatic: false,
+      intentId: intentId,
     );
+    final playback =
+        await _postPlaybackSessionActionV3(zoneId, <String, dynamic>{
+          'type': 'previous',
+        }, commandId: intentId) ??
+        await _postPlaybackControl(
+          zoneId,
+          '/zones/${Uri.encodeComponent(zoneId)}/previous',
+          _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
+        );
     if (mounted && playback != null) {
       _mutatePlayback(() => _applyPlayback(playback));
+    } else if (!localStarted &&
+        _latestPlaybackIntentByZone[zoneId] == intentId) {
+      await _playAvailableLocalAgentCandidate(
+        next: false,
+        automatic: false,
+        reason: 'previous_control_failed',
+      );
     }
   }
 
-  Future<void> _playNextTrack() async {
-    if (_offlineMode) {
+  Future<void> _playNextTrack({bool automatic = false}) async {
+    if (_localPlaybackFallbackActive) {
       await _finishOfflinePlayback('next');
-      await _playNextOfflineTrack();
+      await _playNextOfflineTrack(completed: automatic);
       return;
     }
     final zoneId = _activeZoneId();
     final intentId = _beginPlaybackIntent(zoneId, 'next');
-    await _tryStartAdjacentLocalPlayback(next: true, intentId: intentId);
-    final playback = await _postPlaybackControl(
-      zoneId,
-      '/zones/${Uri.encodeComponent(zoneId)}/next',
-      _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
+    final localStarted = await _tryStartAdjacentLocalPlayback(
+      next: true,
+      automatic: automatic,
+      intentId: intentId,
     );
+    if (automatic &&
+        !localStarted &&
+        _playbackAgentCandidates(next: true, automatic: true).isEmpty) {
+      await _setOfflineStopped(zoneId: zoneId);
+      unawaited(_reportRendererStateSafely('stopped'));
+      return;
+    }
+    final currentTrackId = _intValue(_playback?['track_id']);
+    final v3Playback = await _postPlaybackSessionActionV3(
+      zoneId,
+      <String, dynamic>{'type': 'next', 'automatic': automatic},
+      commandId: intentId,
+    );
+    final playback =
+        v3Playback ??
+        (automatic &&
+                _playbackMode == _PlaybackMode.repeatOne &&
+                currentTrackId != null
+            ? await _playTrackOnZone(
+                currentTrackId,
+                zoneId,
+                tryLocalFastStart: false,
+                intentId: intentId,
+              )
+            : await _postPlaybackControl(
+                zoneId,
+                '/zones/${Uri.encodeComponent(zoneId)}/next',
+                _playbackCommandBody(
+                  const <String, dynamic>{},
+                  intentId: intentId,
+                ),
+              ));
     if (mounted && playback != null) {
       _mutatePlayback(() => _applyPlayback(playback));
+    } else if (!localStarted &&
+        _latestPlaybackIntentByZone[zoneId] == intentId) {
+      final recovered = await _playAvailableLocalAgentCandidate(
+        next: true,
+        automatic: automatic,
+        reason: automatic ? 'completion_control_failed' : 'next_control_failed',
+      );
+      if (!recovered && automatic) {
+        await _setOfflineStopped(zoneId: zoneId);
+      }
     }
   }
 
   Future<bool> _tryStartAdjacentLocalPlayback({
     required bool next,
+    required bool automatic,
     required String intentId,
   }) async {
-    if (_playbackMode == _PlaybackMode.shuffle ||
-        _playbackMode == _PlaybackMode.repeatOne ||
-        !_zoneUsesThisClient(_activeZoneId())) {
+    if (!_zoneUsesThisClient(_activeZoneId())) {
       return false;
     }
-    final items = _queueItems();
-    if (items.isEmpty) return false;
-    var index = _intValue(_playbackQueue?['current_index']);
-    if (index == null || index < 0 || index >= items.length) {
-      final currentTrackId = _intValue(_playback?['track_id']);
-      index = items.indexWhere(
-        (item) => _intValue(_asMap(item['track'])['id']) == currentTrackId,
-      );
-    }
-    if (index < 0) return false;
-    index += next ? 1 : -1;
-    if (index < 0 || index >= items.length) {
-      if (_playbackMode != _PlaybackMode.repeatAll) return false;
-      index = next ? 0 : items.length - 1;
-    }
-    final trackId = _intValue(_asMap(items[index]['track'])['id']);
-    if (trackId == null) return false;
-    return _tryStartLocalPlayback(
-      trackId,
+    final candidates = _playbackAgentCandidates(
+      next: next,
+      automatic: automatic,
+    );
+    if (candidates.isEmpty) return false;
+    final candidate = candidates.first;
+    final started = await _tryStartLocalPlayback(
+      candidate.trackId,
       zoneId: _activeZoneId(),
       intentId: intentId,
     );
+    if (started) {
+      _selectPlaybackAgentItem(candidate);
+    }
+    return started;
   }
 
   Future<void> _refreshPlaybackQueue({String? zoneId}) async {
     final targetZoneId = zoneId ?? _activeZoneId();
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       _playbackQueue = <String, dynamic>{
         ...?_playbackQueue,
         'zone_id': targetZoneId,
@@ -415,9 +533,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
         return;
       }
       _mutatePlayback(() => _applyPlaybackQueue(queue));
-      unawaited(
-        _persistOverviewValues(<String, dynamic>{'playback_queue': queue}),
-      );
+      unawaited(_refreshPlaybackSessionV3(zoneId: targetZoneId));
     } catch (_) {
       // Zone refresh and the event stream will retry the queue snapshot.
     }
@@ -426,7 +542,9 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
   void _applyPlaybackQueue(Map<String, dynamic> queue) {
     _playbackQueue = queue;
     _playbackMode = _PlaybackMode.fromApi(queue['mode']?.toString());
+    _restorePlaybackAgentQueue();
     _decoratePlaybackQueueAvailability();
+    _schedulePlaybackCheckpoint(immediate: true);
   }
 
   List<Map<String, dynamic>> _queueItems() =>
@@ -434,97 +552,91 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
           .map((item) => (item as Map).cast<String, dynamic>())
           .toList(growable: false);
 
-  Future<void> _addTrackToQueue(int trackId, {bool playNext = false}) {
-    return _addTracksToQueue(<int>[trackId], playNext: playNext);
+  PlaybackAgent _restorePlaybackAgentQueue({String? outputId}) {
+    final queue = _playbackQueue ?? const <String, dynamic>{};
+    final queueZoneId = queue['zone_id']?.toString() ?? _activeZoneId();
+    final targetOutputId =
+        outputId ?? _clientOutputForZone(queueZoneId) ?? queueZoneId;
+    final agent = _playbackAgentsByOutput.putIfAbsent(
+      targetOutputId,
+      () => PlaybackAgent(targetOutputId),
+    );
+    if (!agent.hasSession) agent.restore(queue);
+    if (agent.currentIndex == null) {
+      final currentTrackId = _intValue(_playback?['track_id']);
+      if (currentTrackId != null && agent.selectTrack(currentTrackId)) {
+        _playbackQueue = agent.checkpoint(queue);
+      }
+    }
+    return agent;
   }
 
-  Future<void> _addTracksToQueue(
-    List<int> trackIds, {
-    bool playNext = false,
-  }) async {
-    if (trackIds.isEmpty) {
-      return;
-    }
-    if (_offlineMode) {
-      final ids = _queueItems()
-          .map((item) => _intValue(_asMap(item['track'])['id']))
-          .whereType<int>()
-          .toList();
-      final currentIndex = _intValue(_playbackQueue?['current_index']);
-      final insertAt = playNext
-          ? min((currentIndex ?? -1) + 1, ids.length)
-          : ids.length;
-      ids.insertAll(insertAt, trackIds);
-      if (mounted) {
-        _mutatePlayback(() => _setOfflineQueue(ids, startIndex: currentIndex));
-      }
-      return;
-    }
-    final currentIndex = _intValue(_playbackQueue?['current_index']);
-    final position = playNext ? (currentIndex ?? -1) + 1 : null;
-    final queue = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue/items',
-          <String, dynamic>{'track_ids': trackIds, 'position': ?position},
-        ),
-      ),
-    );
-    if (!mounted || queue == null) {
-      return;
-    }
-    _mutatePlayback(() => _applyPlaybackQueue(queue));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 2),
-        content: Text(
-          playNext
-              ? '${trackIds.length} track(s) will play next'
-              : '${trackIds.length} track(s) added to queue',
-        ),
-      ),
-    );
+  List<PlaybackAgentItem> _playbackAgentCandidates({
+    required bool next,
+    required bool automatic,
+  }) {
+    final agent = _restorePlaybackAgentQueue();
+    return next
+        ? agent.nextCandidates(automatic: automatic)
+        : agent.previousCandidates();
   }
 
-  Future<Map<String, dynamic>?> _replaceQueue(
-    List<int> trackIds, {
-    int? startIndex,
-    _PlaybackMode? mode,
+  void _selectPlaybackAgentItem(PlaybackAgentItem item) {
+    final agent = _restorePlaybackAgentQueue();
+    if (!agent.selectIndex(item.index)) return;
+    _playbackQueue = agent.checkpoint(
+      _playbackQueue ?? const <String, dynamic>{},
+    );
+    _schedulePlaybackCheckpoint(immediate: true);
+  }
+
+  Future<bool> _playAvailableLocalAgentCandidate({
+    required bool next,
+    required bool automatic,
+    required String reason,
   }) async {
-    if (_offlineMode) {
-      if (mode != null) _playbackMode = mode;
-      if (mounted) {
-        _mutatePlayback(
-          () => _setOfflineQueue(trackIds, startIndex: startIndex),
-        );
-      } else {
-        _setOfflineQueue(trackIds, startIndex: startIndex);
-      }
-      return _playbackQueue;
-    }
-    final queue = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue',
-          <String, dynamic>{
-            'track_ids': trackIds,
-            'start_index': startIndex,
-            'mode': (mode ?? _playbackMode).nameForApi,
+    final candidates = _playbackAgentCandidates(
+      next: next,
+      automatic: automatic,
+    );
+    for (final candidate in candidates) {
+      final copy = await _availableOfflineCopy(candidate.trackId);
+      if (copy == null) {
+        ClientLog.event(
+          'playback.agent.candidate_skipped',
+          data: <String, Object?>{
+            'track_id': candidate.trackId,
+            'queue_index': candidate.index,
+            'reason': 'local_copy_unavailable',
           },
-        ),
-      ),
-    );
-    if (mounted && queue != null) {
-      _mutatePlayback(() => _applyPlaybackQueue(queue));
+        );
+        continue;
+      }
+      _selectPlaybackAgentItem(candidate);
+      await _playOfflineTrack(candidate.trackId);
+      ClientLog.event(
+        'playback.agent.local_advance',
+        data: <String, Object?>{
+          'track_id': candidate.trackId,
+          'queue_index': candidate.index,
+          'reason': reason,
+        },
+      );
+      return true;
     }
-    return queue;
+    ClientLog.event(
+      'playback.agent.exhausted',
+      level: 'warning',
+      data: <String, Object?>{'reason': reason},
+    );
+    return false;
   }
 
   Future<void> _playCollection(List<int> trackIds, bool shuffle) async {
     if (trackIds.isEmpty) {
       return;
     }
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final offlineIds = List<int>.of(trackIds);
       if (shuffle) offlineIds.shuffle(Random.secure());
       _playbackMode = shuffle
@@ -573,7 +685,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
   }
 
   Future<Map<String, dynamic>?> _moveQueueItem(int from, int to) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final ids = _queueItems()
           .map((item) => _intValue(_asMap(item['track'])['id']))
           .whereType<int>()
@@ -590,6 +702,27 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
       }
       return _playbackQueue;
     }
+    final agent = _restorePlaybackAgentQueue();
+    if (from >= 0 &&
+        from < agent.items.length &&
+        to >= 0 &&
+        to < agent.items.length) {
+      final movedItemId = agent.items[from].itemId;
+      final beforeIndex = from < to ? to + 1 : to;
+      final beforeItemId = beforeIndex >= 0 && beforeIndex < agent.items.length
+          ? agent.items[beforeIndex].itemId
+          : null;
+      final v3Playback =
+          await _postPlaybackSessionActionV3(_activeZoneId(), <String, dynamic>{
+            'type': 'move_queue_item',
+            'item_id': movedItemId,
+            'before_item_id': ?beforeItemId,
+          });
+      if (v3Playback != null) {
+        unawaited(_refreshPlaybackQueue());
+        return _playbackQueue;
+      }
+    }
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
         await _api.postJson(
@@ -605,7 +738,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
   }
 
   Future<Map<String, dynamic>?> _removeQueueItem(int itemId) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final items = _queueItems();
       final ids = items
           .where((item) => _intValue(item['id']) != itemId)
@@ -618,6 +751,24 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
         _mutatePlayback(() => _setOfflineQueue(ids, startIndex: currentIndex));
       }
       return _playbackQueue;
+    }
+    final legacyItems = _queueItems();
+    final legacyIndex = legacyItems.indexWhere(
+      (item) => _intValue(item['id']) == itemId,
+    );
+    final agent = _restorePlaybackAgentQueue();
+    if (legacyIndex >= 0 && legacyIndex < agent.items.length) {
+      final v3Playback = await _postPlaybackSessionActionV3(
+        _activeZoneId(),
+        <String, dynamic>{
+          'type': 'remove_queue_item',
+          'item_id': agent.items[legacyIndex].itemId,
+        },
+      );
+      if (v3Playback != null) {
+        unawaited(_refreshPlaybackQueue());
+        return _playbackQueue;
+      }
     }
     final queue = await _run<Map<String, dynamic>>(
       () async => _asMap(
@@ -640,7 +791,7 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
   }
 
   Future<void> _setPlaybackMode(_PlaybackMode mode) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       if (mounted) {
         _mutatePlayback(() {
           _playbackMode = mode;
@@ -650,6 +801,32 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
           };
         });
       }
+      return;
+    }
+    final v3Mode = <String, dynamic>{
+      'repeat': mode == _PlaybackMode.repeatOne
+          ? 'one'
+          : mode == _PlaybackMode.repeatAll
+          ? 'all'
+          : 'off',
+      'shuffle': mode == _PlaybackMode.shuffle,
+      'stop_after_current': mode == _PlaybackMode.single,
+    };
+    final v3Playback = await _postPlaybackSessionActionV3(
+      _activeZoneId(),
+      <String, dynamic>{'type': 'set_mode', 'mode': v3Mode},
+    );
+    if (v3Playback != null) {
+      if (mounted) {
+        _mutatePlayback(() {
+          _playbackMode = mode;
+          _playbackQueue = <String, dynamic>{
+            ...?_playbackQueue,
+            'mode': mode.nameForApi,
+          };
+        });
+      }
+      unawaited(_refreshPlaybackQueue());
       return;
     }
     final queue = await _run<Map<String, dynamic>>(

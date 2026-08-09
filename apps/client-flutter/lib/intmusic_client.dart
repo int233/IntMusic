@@ -26,7 +26,7 @@ import 'core/artwork_cache_coordinator.dart';
 import 'core/json_values.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
-import 'core/playback_queue_policy.dart';
+import 'core/playback_agent.dart';
 import 'core/renderer_audio_output_policy.dart';
 import 'core/renderer_command_sequences.dart';
 import 'core/storage/client_cache_database.dart';
@@ -104,6 +104,8 @@ part 'src/dashboard_renderer_reporting.dart';
 part 'src/dashboard_details.dart';
 part 'src/dashboard_offline_playback.dart';
 part 'src/dashboard_playback_queue.dart';
+part 'src/dashboard_playback_session_v3.dart';
+part 'src/dashboard_queue_mutations.dart';
 part 'src/dashboard_playback_controls.dart';
 part 'src/dashboard_zone_state.dart';
 part 'src/dashboard_shell.dart';
@@ -211,6 +213,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Timer? _eventReconnectTimer;
   Timer? _eventHealthTimer;
   Timer? _offlineReconnectTimer;
+  Timer? _playbackCheckpointTimer;
+  DateTime? _lastPlaybackCheckpointAt;
   int _offlineReconnectFailures = 0;
   bool _offlineReconnectBusy = false;
   int _zoneRefreshFailures = 0;
@@ -221,7 +225,11 @@ class _CoreDashboardState extends State<CoreDashboard>
   int _eventPingSequence = 0;
   int _eventConnectionGeneration = 0;
   bool _eventRestartBusy = false;
+  int _eventReconnectFailures = 0;
   String? _rendererRegisteredCoreUrl;
+  Future<void>? _rendererRegistrationInFlight;
+  bool _rendererRegistrationNeedsReset = false;
+  bool _rendererRegistrationNeedsPlaybackSync = false;
   final RendererCommandSequences _rendererCommandSequences =
       RendererCommandSequences();
   final Map<String, DateTime> _latestRendererCommandIssuedAtByOutput = {};
@@ -234,7 +242,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, DateTime> _latestPlaybackIntentAtByZone = {};
   final Map<String, String> _desiredTransportStateByZone = {};
   final Set<String> _locallyAppliedPlaybackIntents = {};
-  int _playbackIntentSequence = 0;
+  final Map<String, Map<String, dynamic>> _pendingPlaybackCommandsV3 = {};
+  bool _reconcilingPendingPlaybackCommandsV3 = false;
   SharedPreferences? _preferences;
   final NavigationHistory<_AppRoute> _navigation = NavigationHistory<_AppRoute>(
     const _AppRoute.home(),
@@ -251,6 +260,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Map<String, dynamic>? _serverSettings;
   Map<String, dynamic>? _playback;
   Map<String, dynamic>? _playbackQueue;
+  final Map<String, PlaybackAgent> _playbackAgentsByOutput =
+      <String, PlaybackAgent>{};
   Map<String, dynamic>? _activeTrackDetail;
   final Map<int, Map<String, dynamic>> _trackDetailCache = {};
   final Map<int, Map<String, dynamic>> _albumDetailCache = {};
@@ -273,6 +284,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   List<dynamic> _clientLibraryStatuses = const [];
   List<dynamic> _distributionJobs = const [];
   Map<String, dynamic>? _transcodingStatus;
+  Future<void> _clientLibrarySyncQueue = Future<void>.value();
+  final Set<String> _clientLibraryQueuedRootIds = <String>{};
   final Set<String> _clientLibrarySyncingRootIds = <String>{};
   final Set<String> _distributionDirtyRootIds = <String>{};
   bool _distributionWorkerBusy = false;
@@ -280,17 +293,21 @@ class _CoreDashboardState extends State<CoreDashboard>
   String? _cacheServerId;
   String? _cacheCatalogEpoch;
   int _cacheCursor = 0;
+  int _eventCursor = 0;
   bool _backgroundSyncBusy = false;
   bool _detailWarmupBusy = false;
   bool _artworkWarmupBusy = false;
   bool _artworkWarmupRequested = false;
   bool _zoneRefreshBusy = false;
+  bool _coreOfflineProbeBusy = false;
+  int _coreReachabilityFailures = 0;
   bool _eventConnectBusy = false;
   int _backgroundSyncTicks = 0;
   final Set<String> _detailRefreshScopes = <String>{};
   final Map<String, int> _detailWarmAfterIds = <String, int>{};
   final Map<String, int> _detailWarmTargetCursors = <String, int>{};
-  bool _offlineMode = false;
+  bool _localPlaybackFallbackActive = false;
+  final Set<int> _verifiedLocalTrackIds = <int>{};
   bool _diagnosticLoggingEnabled = true;
   String _diagnosticLogPath = '';
   final Map<String, int> _optimisticLocalTrackByOutput = <String, int>{};
@@ -368,6 +385,7 @@ class _CoreDashboardState extends State<CoreDashboard>
     _eventReconnectTimer?.cancel();
     _eventHealthTimer?.cancel();
     _offlineReconnectTimer?.cancel();
+    _playbackCheckpointTimer?.cancel();
     _searchDebounce?.cancel();
     for (final timer in _rendererFailoverTimers.values) {
       timer.cancel();

@@ -81,6 +81,7 @@ fn event_schema_covers_every_emitted_literal() {
         include_str!("../../core-api/src/track_routes.rs"),
         include_str!("../../core-api/src/distribution_routes.rs"),
         include_str!("../../core-api/src/playback_service.rs"),
+        include_str!("../../core-api/src/playback_v3_routes.rs"),
         include_str!("../../core-api/src/settings_routes.rs"),
         include_str!("../../core-api/src/renderer_routes.rs"),
         include_str!("../../core-api/src/server.rs"),

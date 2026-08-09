@@ -51,21 +51,26 @@ The v3 contract lives in `crates/protocol/src/playback_session_v3.rs`.
 - Shuffle and repeat are independent. The shuffle order is derived from stable
   item IDs plus a persisted seed.
 
-## Connection states
+## Transport quality policy
 
-The connection manager uses a quality state rather than a single offline flag:
+Connection quality is an internal transport signal, not an application mode.
+Widgets, catalog queries, queue transitions, and playback controls must never
+branch into a separate "degraded" data model. The transport scheduler observes
+RTT, timeouts, socket stability, and in-flight work, then adjusts concurrency,
+deadlines, retries, polling, and media-copy preference.
 
-| State | Foreground reads | Commands | Media choice |
+| Transport observation | Foreground reads | Scheduling policy | Media choice |
 | --- | --- | --- | --- |
-| Healthy | Local projection | Send immediately, persist until ACK | Best eligible copy |
-| Degraded | Local projection | Optimistic local apply; short bounded send | Prefer local copy |
-| Reconnecting | Local projection | Durable outbox | Continue current local session |
-| Offline | Local projection | Durable outbox | Local copies only |
-| Resyncing | Local projection | Merge ACKs/events in background | Do not interrupt playback |
+| Stable | Local projection | Normal background budget | Best eligible copy |
+| Constrained | Local projection | Reduce opportunistic work | Prefer local copy |
+| Reconnecting | Local projection | Durable outbox and exponential backoff | Continue current local session |
+| Unreachable | Local projection | Durable outbox; probe independently | Local copies only |
+| Resynchronizing | Local projection | Merge ACKs/events in background | Do not interrupt playback |
 
-No state transition clears UI collections or constructs a second offline
-catalog. Missing uncached data is represented as unavailable detail, not as an
-empty authoritative result.
+These labels may appear in diagnostics, but they do not own business state. No
+transport transition clears UI collections, constructs a second catalog,
+changes queue order, or replaces canonical IDs. Missing uncached data is
+represented as unavailable detail, not as an empty authoritative result.
 
 ## Data and transport planes
 
@@ -77,18 +82,71 @@ empty authoritative result.
 
 ## Migration sequence
 
-1. **Foundation (current change):** introduce the v3 protocol, a pure Rust
-   session queue model, persist/expose legacy shuffle seeds, and use the same
-   deterministic transition in Flutter offline playback.
-2. Add Client normalized catalog tables, sync cursors, mutation outbox, and
-   session checkpoints. Redirect page reads away from live HTTP responses.
-3. Run a Playback Agent per output. Move completion/next/previous/mode handling
-   out of dashboard widgets into the agent.
-4. Add Core session command journal, event cursor storage, ACK replay, and
-   snapshot/resume endpoints.
-5. Dual-write legacy and v3 session state, compare decisions in diagnostics,
-   migrate active sessions, then remove `_offlineMode` catalog rewriting and
-   the legacy queue algorithms.
+1. **Transport isolation (implemented):** separate playback control,
+   connection health, inventory, and Client manifest traffic. A timeout retires
+   its connection generation without immediately cancelling unrelated work.
+   Manual manifest synchronization suppresses opportunistic catalog warmup,
+   history, artwork, and distribution polling. Renderer registration is
+   single-flight and WebSocket reconnects use bounded exponential backoff.
+2. **Resumable Client manifests (implemented):** serialize folder scans, use
+   adaptive batches and stable `batch_id` values, retry transient failures, and
+   let Core deduplicate committed batches after a lost response.
+3. **Normalized Client projection (implemented foundation):** albums, artists,
+   tracks, playlists, details, artwork references, playback checkpoints, and
+   queue checkpoints are read from individually keyed SQLite projection rows.
+   Search and detail navigation use the same projection and refresh it in the
+   background. Relationship tables, artwork byte inventory, and the durable
+   mutation outbox are the remaining normalized-cache work.
+4. **Playback Agent (implemented foundation):** each Client output owns one
+   deterministic queue cursor restored from a persisted checkpoint. Completion
+   and manual next/previous share traversal for sequential, single, repeat-one,
+   repeat-all, and stable-seed shuffle modes. The agent now restores the Core
+   v3 session identity, epoch, revision, event cursor, stable queue-item IDs,
+   and independent playback modes. Pause, resume, stop, seek, next, previous,
+   direct-track start, collection start, queue replacement/editing, and mode
+   changes now prefer revisioned v3 commands. Collection start uses one atomic
+   `replace_queue_and_play` intent, while legacy routes remain only as a
+   compatibility fallback for an older Core.
+5. **Resumable control and events (implemented foundation):** Core assigns
+   emitted events a monotonic cursor, persists one ordered event journal before
+   WebSocket delivery, retains a bounded replay window, and replays from the
+   Client's `after_cursor` after reconnect or subscriber lag. Client SQLite
+   stores the acknowledged cursor and ignores replay duplicates; a retention
+   gap requests authoritative catalog, queue, and playback snapshots without
+   replacing the foreground projection. Core persists v3 playback sessions and
+   queue item UUIDs, rejects obsolete epochs and conflicting revisions, and
+   stores command ACKs so a retry cannot execute the mutation twice. Clients
+   negotiate the session, resume from their last cursor, apply typed ACKs, and
+   rebase a revision conflict once against the returned snapshot. Commands are
+   written to a short-lived Client SQLite outbox before transmission. An
+   ambiguous timeout remains `pending` instead of being reported as success or
+   translated to a legacy command; session recovery retries the original
+   `command_id` for ACK/duplicate reconciliation and expires stale intents
+   after 30 seconds.
+6. **Remove legacy mode switching (in progress):** transport failure no longer
+   rewrites catalog lists, status identity, or detail metadata, and synthetic
+   offline album/artist/track summaries have been removed. Device and zone
+   projections are also retained: remote outputs become unreachable while
+   local output state is overlaid in place, rather than replacing the UI with a
+   one-device offline list. The remaining local playback fallback flag is
+   limited to command routing while the duplicated queue algorithms move into
+   the Playback Agent. A development build rebuilds the Client projection
+   instead of preserving obsolete local cache formats.
 
-Each step must preserve compatibility with v1 endpoints until telemetry and
-contract tests show that all supported Clients have migrated.
+Core canonical metadata and physical-file relationships remain migratable.
+Client caches are disposable during development: bump their schema identity
+and rebuild them rather than extending the lifetime of legacy state branches.
+
+## Implemented v3 HTTP surface
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/playback-v3/zones/{zone_id}/session` | Load or create the authoritative durable session snapshot. |
+| `POST /api/v1/playback-v3/zones/{zone_id}/commands` | Apply one idempotent, epoch- and revision-guarded command. |
+| `POST /api/v1/playback-v3/zones/{zone_id}/resume` | Return the current snapshot plus retained session events after a cursor. |
+
+Every command carries a UUID `command_id`, `session_id`, `epoch`, and
+`expected_revision`. Successful application advances the revision exactly
+once and emits `playback.session_v3.changed`. A repeated command returns the
+stored result; it is never translated into a second legacy command after an
+ambiguous timeout.

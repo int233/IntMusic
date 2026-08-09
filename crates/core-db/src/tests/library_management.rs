@@ -17,6 +17,7 @@ fn client_manifest(
             path_hint: Some("/storage/emulated/0/Music".to_string()),
         },
         scan_id: Uuid::now_v7().to_string(),
+        batch_id: None,
         complete: false,
         files: vec![protocol::ClientLibraryFileManifest {
             external_id: file_name.to_string(),

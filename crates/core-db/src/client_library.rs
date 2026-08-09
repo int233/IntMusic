@@ -1,4 +1,5 @@
 use super::*;
+use crate::client_manifest_batches::{prepare_client_manifest_batch, record_client_manifest_batch};
 
 pub async fn upsert_scanned_file(
     pool: &DbPool,
@@ -213,6 +214,10 @@ pub async fn upsert_client_library_manifest(
     if scan_id.is_empty() || scan_id.len() > 200 {
         bail!("scan_id must contain between 1 and 200 characters");
     }
+    let batch_id = manifest.batch_id.as_deref().map(str::trim);
+    if batch_id.is_some_and(|value| value.is_empty() || value.len() > 240) {
+        bail!("batch_id must contain between 1 and 240 characters");
+    }
     if manifest.files.len() > 1_000 {
         bail!("a client library manifest batch cannot exceed 1000 files");
     }
@@ -238,6 +243,9 @@ pub async fn upsert_client_library_manifest(
     .bind(&now)
     .execute(pool)
     .await?;
+
+    let duplicate_batch =
+        prepare_client_manifest_batch(pool, device_id, root_external_id, scan_id, batch_id).await?;
 
     let root_path = format!(
         "intmusic-client://{}/{}",
@@ -675,19 +683,8 @@ pub async fn upsert_client_library_manifest(
         accepted_files += 1;
     }
 
-    sqlx::query(
-        r#"
-        UPDATE client_library_sync_state
-        SET accepted_files = accepted_files + ?1
-        WHERE device_id = ?2 AND root_external_id = ?3 AND scan_id = ?4
-        "#,
-    )
-    .bind(accepted_files)
-    .bind(device_id)
-    .bind(root_external_id)
-    .bind(scan_id)
-    .execute(pool)
-    .await?;
+    let should_count_batch =
+        record_client_manifest_batch(pool, manifest, accepted_files, &now).await?;
 
     let mut missing_files = 0_i64;
     if manifest.complete {
@@ -747,6 +744,7 @@ pub async fn upsert_client_library_manifest(
         accepted_files,
         missing_files,
         complete: manifest.complete,
+        duplicate_batch: duplicate_batch || !should_count_batch,
         bindings,
     })
 }

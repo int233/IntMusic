@@ -69,20 +69,22 @@ pub(crate) async fn upsert_client_library_manifest(
     let root_external_id = payload.root.external_id.clone();
     let scan_id = payload.scan_id.clone();
     let result = core_db::upsert_client_library_manifest(state.pool(), &payload).await?;
-    state
-        .bump_library_revision("client library manifest updated")
-        .await;
-    state.emit(
-        "library.client_manifest_changed",
-        json!({
-            "device_id": device_id,
-            "root_external_id": root_external_id,
-            "scan_id": scan_id,
-            "complete": result.complete,
-            "accepted_files": result.accepted_files,
-            "missing_files": result.missing_files,
-        }),
-    );
+    if !result.duplicate_batch {
+        state
+            .bump_library_revision("client library manifest updated")
+            .await;
+        state.emit(
+            "library.client_manifest_changed",
+            json!({
+                "device_id": device_id,
+                "root_external_id": root_external_id,
+                "scan_id": scan_id,
+                "complete": result.complete,
+                "accepted_files": result.accepted_files,
+                "missing_files": result.missing_files,
+            }),
+        );
+    }
     Ok(Json(result))
 }
 

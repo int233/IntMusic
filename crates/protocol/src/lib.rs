@@ -126,6 +126,10 @@ pub struct ClientLibraryManifestRequest {
     pub platform: Option<String>,
     pub root: ClientLibraryRootManifest,
     pub scan_id: String,
+    /// Stable identity for one manifest batch. Retrying the same batch after a
+    /// lost response must not advance scan counters or emit another revision.
+    #[serde(default)]
+    pub batch_id: Option<String>,
     #[serde(default)]
     pub complete: bool,
     #[serde(default)]
@@ -138,6 +142,8 @@ pub struct ClientLibraryManifestResult {
     pub accepted_files: i64,
     pub missing_files: i64,
     pub complete: bool,
+    #[serde(default)]
+    pub duplicate_batch: bool,
     #[serde(default)]
     pub bindings: Vec<ClientLibraryFileBinding>,
 }
@@ -1673,6 +1679,8 @@ fn default_shuffle_seed() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
     pub id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<u64>,
     #[serde(rename = "type")]
     pub event_type: String,
     pub time: DateTime<Utc>,
@@ -1684,6 +1692,7 @@ impl EventEnvelope {
         let payload = serde_json::to_value(payload).unwrap_or(Value::Null);
         Self {
             id: Uuid::now_v7(),
+            cursor: None,
             event_type: event_type.into(),
             time: Utc::now(),
             payload,

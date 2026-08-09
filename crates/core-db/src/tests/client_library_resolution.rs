@@ -14,6 +14,7 @@ async fn untagged_client_files_wait_for_manual_resolution_without_path_inference
                 path_hint: Some("/storage/emulated/0/Music".to_string()),
             },
             scan_id: Uuid::now_v7().to_string(),
+            batch_id: None,
             complete: false,
             files: vec![protocol::ClientLibraryFileManifest {
                 external_id: external_id.to_string(),
@@ -122,6 +123,7 @@ async fn rescanning_a_linked_client_copy_reuses_its_existing_replica() {
             path_hint: Some("/storage/emulated/0/Music".to_string()),
         },
         scan_id: scan_id.to_string(),
+        batch_id: None,
         complete: false,
         files: vec![protocol::ClientLibraryFileManifest {
             external_id: "shared-copy".to_string(),

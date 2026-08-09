@@ -40,7 +40,7 @@ Widget responsiveQueueForTesting(
     coreBaseUrl: '',
     items: items,
     currentIndex: currentIndex,
-    onPlayTrack: (_) async {},
+    onPlayTrack: (_, _) async {},
     onMove: (_, _) async => null,
     onRemove: (_) async => null,
     onClearUpcoming: () async => null,

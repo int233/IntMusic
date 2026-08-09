@@ -3,6 +3,8 @@ use super::*;
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct EventsWsQuery {
     renderer_id: Option<String>,
+    #[serde(default)]
+    after_cursor: u64,
 }
 
 pub(crate) async fn events_ws(
@@ -10,46 +12,37 @@ pub(crate) async fn events_ws(
     Query(query): Query<EventsWsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, query.renderer_id))
+    ws.on_upgrade(move |socket| handle_ws(socket, state, query.renderer_id, query.after_cursor))
 }
 
-pub(crate) async fn handle_ws(socket: WebSocket, state: AppState, renderer_id: Option<String>) {
+pub(crate) async fn handle_ws(
+    socket: WebSocket,
+    state: AppState,
+    _renderer_id: Option<String>,
+    after_cursor: u64,
+) {
     let (mut sender, mut receiver) = socket.split();
-    let mut command_rx = state.inner.renderer_commands.subscribe();
     let mut event_rx = state.inner.events.subscribe();
+    let mut delivered_cursor = after_cursor;
+
+    match replay_missed_events(&mut sender, &state, delivered_cursor).await {
+        Ok(Some(cursor)) => delivered_cursor = cursor,
+        Ok(None) => return,
+        Err(error) => {
+            warn!(%error, after_cursor, "failed to replay Core events");
+            let event = EventEnvelope::new(
+                "connection.snapshot_required",
+                json!({ "reason": "event_replay_failed" }),
+            );
+            if !send_ws_event(&mut sender, &event).await {
+                return;
+            }
+        }
+    }
 
     loop {
         tokio::select! {
             biased;
-            command = command_rx.recv() => {
-                match command {
-                    Ok(command) => {
-                        if renderer_id.as_deref().is_some_and(|renderer_id| {
-                            command
-                                .payload
-                                .get("renderer_id")
-                                .and_then(|value| value.as_str())
-                                != Some(renderer_id)
-                        }) {
-                            continue;
-                        }
-                        if !send_ws_event(&mut sender, &command).await {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(skipped, "renderer command subscriber lagged");
-                        let event = EventEnvelope::new(
-                            "renderer.resync_required",
-                            json!({ "reason": "command_lag", "skipped": skipped }),
-                        );
-                        if !send_ws_event(&mut sender, &event).await {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
             inbound = receiver.next() => {
                 match inbound {
                     Some(Ok(Message::Text(text))) => {
@@ -83,23 +76,69 @@ pub(crate) async fn handle_ws(socket: WebSocket, state: AppState, renderer_id: O
             event = event_rx.recv() => {
                 match event {
                     Ok(event) => {
+                        let event_cursor = event.cursor.unwrap_or(0);
+                        if event_cursor > 0 && event_cursor <= delivered_cursor {
+                            continue;
+                        }
+                        if event_cursor > 0 {
+                            delivered_cursor = event_cursor;
+                        }
                         if !send_ws_event(&mut sender, &event).await {
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(skipped, "event subscriber lagged");
-                        let event = EventEnvelope::new(
-                            "connection.snapshot_required",
-                            json!({ "reason": "event_lag", "skipped": skipped }),
-                        );
-                        if !send_ws_event(&mut sender, &event).await {
-                            break;
+                        match replay_missed_events(
+                            &mut sender,
+                            &state,
+                            delivered_cursor,
+                        ).await {
+                            Ok(Some(cursor)) => delivered_cursor = cursor,
+                            Ok(None) => break,
+                            Err(error) => {
+                                warn!(%error, skipped, "failed to recover lagged event subscriber");
+                                let event = EventEnvelope::new(
+                                    "connection.snapshot_required",
+                                    json!({ "reason": "event_lag", "skipped": skipped }),
+                                );
+                                if !send_ws_event(&mut sender, &event).await {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
+        }
+    }
+}
+
+async fn replay_missed_events(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    state: &AppState,
+    mut cursor: u64,
+) -> Result<Option<u64>> {
+    loop {
+        let page = core_db::replay_events(state.pool(), cursor, 500).await?;
+        if page.requires_snapshot {
+            let event = EventEnvelope::new(
+                "connection.snapshot_required",
+                json!({ "reason": "event_retention_gap", "after_cursor": cursor }),
+            );
+            if !send_ws_event(sender, &event).await {
+                return Ok(None);
+            }
+        }
+        for event in page.events {
+            if !send_ws_event(sender, &event).await {
+                return Ok(None);
+            }
+        }
+        cursor = page.scanned_cursor;
+        if !page.has_more {
+            return Ok(Some(cursor));
         }
     }
 }

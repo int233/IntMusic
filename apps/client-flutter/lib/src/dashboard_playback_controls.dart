@@ -48,12 +48,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
           coreBaseUrl: _coreUrlController.text,
           items: _queueItems(),
           currentIndex: _intValue(_playbackQueue?['current_index']),
-          onPlayTrack: (trackId) async {
-            final playback = await _playTrackOnZone(trackId, _activeZoneId());
-            if (mounted && playback != null) {
-              _mutatePlayback(() => _applyPlayback(playback));
-            }
-          },
+          onPlayTrack: _playQueueItem,
           onMove: _moveQueueItem,
           onRemove: _removeQueueItem,
           onClearUpcoming: _clearUpcomingQueue,
@@ -98,7 +93,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   );
 
   Future<_DeviceSheetSnapshot> _refreshDeviceSheetSnapshot() async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _refreshOfflineRendererZones();
       return _currentDeviceSheetSnapshot();
     }
@@ -118,7 +113,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   }
 
   Future<void> _pausePlayback() async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _pauseZone(_activeZoneId());
       return;
     }
@@ -126,7 +121,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   }
 
   Future<void> _resumePlayback() async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final trackId = _intValue(_playback?['track_id']);
       if (trackId == null) {
         final items = _queueItems();
@@ -154,7 +149,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   }
 
   Future<void> _stopZone(String zoneId) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _finishOfflinePlayback('stopped');
       await _setOfflineStopped(zoneId: zoneId);
       return;
@@ -224,14 +219,24 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
         },
       );
     }
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       return;
     }
-    final playback = await _postPlaybackControl(
-      zoneId,
-      '/zones/${Uri.encodeComponent(zoneId)}/$action',
-      _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
-    );
+    final v3Action = <String, dynamic>{
+      'type': action == 'play' ? 'play' : action,
+      if (action == 'play') 'position_ms': 0,
+    };
+    final playback =
+        await _postPlaybackSessionActionV3(
+          zoneId,
+          v3Action,
+          commandId: intentId,
+        ) ??
+        await _postPlaybackControl(
+          zoneId,
+          '/zones/${Uri.encodeComponent(zoneId)}/$action',
+          _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
+        );
     if (mounted && playback != null) {
       _mutatePlayback(() {
         _applyPlayback(playback);
@@ -243,7 +248,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
     if (sourceZoneId == targetZoneId) {
       return;
     }
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final trackId = _intValue(_playback?['track_id']);
       if (trackId == null) return;
       final position = _estimatedPlaybackPositionMs(_playback);
@@ -284,7 +289,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
     if (trackId == null) {
       return;
     }
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       if (mounted) {
         _mutate(
           () => _error =
@@ -325,7 +330,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   }
 
   Future<void> _seekPlayback(int positionMs) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final outputId = _offlineOutputForZone();
       final player = await _playerForOutput(outputId);
       await player.seek(Duration(milliseconds: positionMs));
@@ -365,13 +370,18 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
         });
       }
     }
-    final playback = await _postPlaybackControl(
-      zoneId,
-      '/zones/${Uri.encodeComponent(zoneId)}/seek',
-      _playbackCommandBody(<String, dynamic>{
-        'position_ms': positionMs,
-      }, intentId: intentId),
-    );
+    final playback =
+        await _postPlaybackSessionActionV3(zoneId, <String, dynamic>{
+          'type': 'seek',
+          'position_ms': positionMs,
+        }, commandId: intentId) ??
+        await _postPlaybackControl(
+          zoneId,
+          '/zones/${Uri.encodeComponent(zoneId)}/seek',
+          _playbackCommandBody(<String, dynamic>{
+            'position_ms': positionMs,
+          }, intentId: intentId),
+        );
     if (mounted && playback != null) {
       _mutatePlayback(() {
         _applyPlayback(playback);

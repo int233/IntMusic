@@ -96,6 +96,15 @@ pub enum PlaybackSessionActionV3 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start_item_id: Option<Uuid>,
     },
+    /// Replaces the queue and starts its selected occurrence as one logical
+    /// command. This avoids exposing a half-applied queue when a weak link
+    /// drops between separate replace and play requests.
+    ReplaceQueueAndPlay {
+        items: Vec<PlaybackQueueItemV3>,
+        start_item_id: Uuid,
+        #[serde(default)]
+        position_ms: u64,
+    },
     AddQueueItems {
         items: Vec<PlaybackQueueItemV3>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,5 +195,25 @@ mod tests {
             serde_json::from_str("{}").expect("deserialize default mode");
 
         assert_eq!(mode, PlaybackSessionModeV3::default());
+    }
+
+    #[test]
+    fn queue_replacement_and_play_is_one_tagged_command() {
+        let item_id = Uuid::now_v7();
+        let action = PlaybackSessionActionV3::ReplaceQueueAndPlay {
+            items: vec![PlaybackQueueItemV3 {
+                item_id,
+                track_id: 42,
+                added_by_device_id: "client-a".to_string(),
+                added_at: Utc::now(),
+            }],
+            start_item_id: item_id,
+            position_ms: 1250,
+        };
+        let value = serde_json::to_value(action).expect("serialize action");
+
+        assert_eq!(value["type"], "replace_queue_and_play");
+        assert_eq!(value["start_item_id"], item_id.to_string());
+        assert_eq!(value["position_ms"], 1250);
     }
 }

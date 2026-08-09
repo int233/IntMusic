@@ -64,6 +64,10 @@ where
         core_db::sync_cursor(state.pool()).await?.max(1),
         Ordering::SeqCst,
     );
+    state.inner.event_cursor.store(
+        core_db::event_journal_cursor(state.pool()).await?,
+        Ordering::SeqCst,
+    );
     state.emit("core.ready", json!({ "api_prefix": API_PREFIX }));
     start_renderer_expiry_monitor(state.clone());
     start_local_playback_monitor(state.clone());

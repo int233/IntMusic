@@ -7,6 +7,7 @@ extension _DashboardConnection on _CoreDashboardState {
     try {
       final zones = await _api.getCriticalJson('/zones') as List<dynamic>;
       _zoneRefreshFailures = 0;
+      _coreReachabilityFailures = 0;
       if (!mounted) {
         return;
       }
@@ -16,15 +17,50 @@ extension _DashboardConnection on _CoreDashboardState {
         _syncPlaybackFromSelectedZone();
         _refreshTrackAvailabilityIfPresenceChanged();
       });
-    } catch (_) {
+    } catch (error) {
       _zoneRefreshFailures += 1;
-      if (!_offlineMode &&
+      if (!_localPlaybackFallbackActive &&
           _zoneRefreshFailures >= 3 &&
           _offlineLibrary.copies.isNotEmpty) {
-        await _activateOfflineMode();
+        await _confirmCoreUnavailable(error);
       }
     } finally {
       _zoneRefreshBusy = false;
+    }
+  }
+
+  Future<void> _confirmCoreUnavailable(Object zoneError) async {
+    if (_coreOfflineProbeBusy || _localPlaybackFallbackActive || !mounted) {
+      return;
+    }
+    _coreOfflineProbeBusy = true;
+    try {
+      final status = _asMap(await _api.getCriticalJson('/status'));
+      if (_isIntMusicCoreStatus(status)) {
+        _zoneRefreshFailures = 0;
+        _coreReachabilityFailures = 0;
+        ClientLog.event(
+          'core.transport.probe_recovered',
+          data: <String, Object?>{'trigger': zoneError.toString()},
+        );
+      }
+    } catch (error, stackTrace) {
+      _coreReachabilityFailures += 1;
+      ClientLog.error(
+        'core.transport.probe_failed',
+        error,
+        stackTrace: stackTrace,
+        data: <String, Object?>{
+          'failure_count': _coreReachabilityFailures,
+          'event_stream_connected': _eventSocket != null,
+          'zone_error': zoneError.toString(),
+        },
+      );
+      if (_coreReachabilityFailures >= 3 && _eventSocket == null && mounted) {
+        await _activateLocalPlaybackFallback();
+      }
+    } finally {
+      _coreOfflineProbeBusy = false;
     }
   }
 
@@ -44,7 +80,8 @@ extension _DashboardConnection on _CoreDashboardState {
       final socket = await WebSocket.connect(
         _api.wsUrl(
           '/ws/v1/events'
-          '?renderer_id=${Uri.encodeQueryComponent(_clientId)}',
+          '?renderer_id=${Uri.encodeQueryComponent(_clientId)}'
+          '&after_cursor=$_eventCursor',
         ),
       ).timeout(const Duration(seconds: 8));
       final connectionGeneration = ++_eventConnectionGeneration;
@@ -53,11 +90,13 @@ extension _DashboardConnection on _CoreDashboardState {
       _playbackStateSequenceByZone.clear();
       _eventSocket = socket;
       _eventLastPongAt = DateTime.now();
+      _coreReachabilityFailures = 0;
       ClientLog.event(
         'core.websocket.connected',
         data: <String, Object?>{
           'host': Uri.parse(baseUrl).host,
           'generation': connectionGeneration,
+          'after_cursor': _eventCursor,
           'request_playback_sync': requestPlaybackSync,
         },
       );
@@ -145,7 +184,7 @@ extension _DashboardConnection on _CoreDashboardState {
       }
       final lastPongAt = _eventLastPongAt;
       if (lastPongAt != null &&
-          DateTime.now().difference(lastPongAt) > const Duration(seconds: 9)) {
+          DateTime.now().difference(lastPongAt) > const Duration(seconds: 18)) {
         unawaited(_restartEventStream('pong_timeout'));
         return;
       }
@@ -187,20 +226,39 @@ extension _DashboardConnection on _CoreDashboardState {
       // Closing a stalled socket is best effort.
     } finally {
       _eventRestartBusy = false;
-      _scheduleEventReconnect(
-        delay: const Duration(milliseconds: 250),
-        requestPlaybackSync: true,
-      );
+      _scheduleEventReconnect(requestPlaybackSync: true);
     }
   }
 
   void _scheduleEventReconnect({
-    Duration delay = const Duration(seconds: 3),
+    Duration? delay,
     bool requestPlaybackSync = true,
   }) {
     _eventReconnectTimer?.cancel();
-    _eventReconnectTimer = Timer(delay, () {
-      if (!_offlineMode && mounted) {
+    final backoffSeconds = const <int>[
+      1,
+      2,
+      4,
+      8,
+      15,
+      30,
+    ][min(_eventReconnectFailures, 5)];
+    final effectiveDelay =
+        delay ??
+        Duration(
+          milliseconds: backoffSeconds * 1000 + Random.secure().nextInt(351),
+        );
+    _eventReconnectFailures += 1;
+    ClientLog.event(
+      'core.websocket.reconnect_scheduled',
+      level: 'warning',
+      data: <String, Object?>{
+        'delay_ms': effectiveDelay.inMilliseconds,
+        'failure_count': _eventReconnectFailures,
+      },
+    );
+    _eventReconnectTimer = Timer(effectiveDelay, () {
+      if (!_localPlaybackFallbackActive && mounted) {
         unawaited(
           _connectEventStream(requestPlaybackSync: requestPlaybackSync),
         );

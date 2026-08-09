@@ -2,7 +2,11 @@ part of '../intmusic_client.dart';
 
 extension _DashboardArtworkCache on _CoreDashboardState {
   Future<void> _warmOfflineArtworkCache() async {
-    if (_offlineMode || _cacheServerId == null) return;
+    if (_localPlaybackFallbackActive ||
+        _cacheServerId == null ||
+        _clientLibrarySyncingRootIds.isNotEmpty) {
+      return;
+    }
     if (_artworkWarmupBusy) {
       _artworkWarmupRequested = true;
       return;
@@ -12,7 +16,7 @@ extension _DashboardArtworkCache on _CoreDashboardState {
       do {
         _artworkWarmupRequested = false;
         final serverId = _cacheServerId;
-        if (serverId == null || _offlineMode) return;
+        if (serverId == null || _localPlaybackFallbackActive) return;
         final localTrackIds = _offlineLibrary.distinctTracks
             .map((copy) => copy.trackId)
             .where((id) => id > 0)
@@ -61,7 +65,8 @@ extension _DashboardArtworkCache on _CoreDashboardState {
         var nextIndex = 0;
         Future<void> worker() async {
           while (nextIndex < entries.length &&
-              !_offlineMode &&
+              !_localPlaybackFallbackActive &&
+              _clientLibrarySyncingRootIds.isEmpty &&
               _cacheServerId == serverId) {
             final entry = entries[nextIndex++];
             try {
@@ -82,7 +87,7 @@ extension _DashboardArtworkCache on _CoreDashboardState {
         }
 
         await Future.wait(List<Future<void>>.generate(4, (_) => worker()));
-      } while (_artworkWarmupRequested && !_offlineMode);
+      } while (_artworkWarmupRequested && !_localPlaybackFallbackActive);
     } finally {
       _artworkWarmupBusy = false;
     }

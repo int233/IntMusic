@@ -92,12 +92,26 @@ extension _DashboardLibrary on _CoreDashboardState {
     String externalId, {
     bool refreshAfter = true,
   }) async {
+    if (!_clientLibraryQueuedRootIds.add(externalId)) return;
+    final operation = _clientLibrarySyncQueue.then(
+      (_) => _syncClientLibraryRootNow(externalId, refreshAfter: refreshAfter),
+    );
+    _clientLibrarySyncQueue = operation;
+    try {
+      await operation;
+    } finally {
+      _clientLibraryQueuedRootIds.remove(externalId);
+    }
+  }
+
+  Future<void> _syncClientLibraryRootNow(
+    String externalId, {
+    required bool refreshAfter,
+  }) async {
     final root = _clientLibraryRoots
         .where((item) => item.externalId == externalId)
         .firstOrNull;
-    if (root == null || _clientLibrarySyncingRootIds.contains(externalId)) {
-      return;
-    }
+    if (root == null) return;
     _mutate(() {
       _clientLibrarySyncingRootIds.add(externalId);
       _replaceClientLibraryRoot(root.copyWith(clearError: true));
@@ -115,25 +129,61 @@ extension _DashboardLibrary on _CoreDashboardState {
       var accepted = 0;
       var batch = <Map<String, dynamic>>[];
       var inspectionPaths = <String>[];
+      var manifestBatchTarget = 20;
+      var manifestBatchSequence = 0;
       final seenExternalIds = <String>{};
       Future<void> sendBatch({required bool complete}) async {
         final sentBatch = List<Map<String, dynamic>>.of(batch);
-        final result = _asMap(
-          await _api.postJson('/client-library/manifests', <String, dynamic>{
-            'device_id': _clientId,
-            'device_name': _clientAlias(),
-            'platform': Platform.operatingSystem,
-            'root': <String, dynamic>{
-              'external_id': root.externalId,
-              'display_name': root.displayName,
-              'path_hint': root.path,
-            },
+        final sequence = manifestBatchSequence++;
+        final stopwatch = Stopwatch()..start();
+        ClientLog.event(
+          'client_library.manifest.start',
+          data: <String, Object?>{
+            'root_external_id': root.externalId,
             'scan_id': scanId,
+            'batch_sequence': sequence,
+            'file_count': sentBatch.length,
             'complete': complete,
-            'files': batch,
-          }),
+          },
         );
-        accepted += _intValue(result['accepted_files']) ?? batch.length;
+        final result = _asMap(
+          await _api.postLibrarySyncJson(
+            '/client-library/manifests',
+            <String, dynamic>{
+              'device_id': _clientId,
+              'device_name': _clientAlias(),
+              'platform': Platform.operatingSystem,
+              'root': <String, dynamic>{
+                'external_id': root.externalId,
+                'display_name': root.displayName,
+                'path_hint': root.path,
+              },
+              'scan_id': scanId,
+              'batch_id': '$scanId:$sequence',
+              'complete': complete,
+              'files': sentBatch,
+            },
+          ),
+        );
+        final elapsed = stopwatch.elapsed;
+        manifestBatchTarget = switch (elapsed.inSeconds) {
+          >= 8 => 10,
+          >= 3 => 20,
+          _ => 50,
+        };
+        ClientLog.event(
+          'client_library.manifest.end',
+          data: <String, Object?>{
+            'root_external_id': root.externalId,
+            'scan_id': scanId,
+            'batch_sequence': sequence,
+            'file_count': sentBatch.length,
+            'elapsed_ms': elapsed.inMilliseconds,
+            'next_batch_target': manifestBatchTarget,
+            'complete': complete,
+          },
+        );
+        accepted += _intValue(result['accepted_files']) ?? sentBatch.length;
         final bindings = <String, Map<String, dynamic>>{
           for (final value in ((result['bindings'] as List?) ?? const []))
             if (value is Map && value['external_id'] != null)
@@ -180,7 +230,7 @@ extension _DashboardLibrary on _CoreDashboardState {
           filePaths: paths,
         );
         batch.addAll(inspected);
-        if (batch.length >= 50) {
+        if (batch.length >= manifestBatchTarget) {
           await sendBatch(complete: false);
         }
       }

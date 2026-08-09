@@ -7,7 +7,7 @@ extension _DashboardDistribution on _CoreDashboardState {
     if (uniqueTrackIds.isEmpty || !mounted) {
       return;
     }
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
@@ -244,7 +244,9 @@ extension _DashboardDistribution on _CoreDashboardState {
   }
 
   Future<void> _pollDistributionTasks() async {
-    if (_distributionWorkerBusy || _offlineMode) {
+    if (_distributionWorkerBusy ||
+        _localPlaybackFallbackActive ||
+        _clientLibrarySyncingRootIds.isNotEmpty) {
       return;
     }
     _distributionWorkerBusy = true;

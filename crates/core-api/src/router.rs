@@ -205,6 +205,18 @@ pub fn build_router(state: AppState) -> Router {
         .route("/zones/{zone_id}/next", post(next_zone_track))
         .route("/zones/{zone_id}/previous", post(previous_zone_track))
         .route(
+            "/playback-v3/zones/{zone_id}/session",
+            get(get_playback_session_v3),
+        )
+        .route(
+            "/playback-v3/zones/{zone_id}/commands",
+            post(command_playback_session_v3),
+        )
+        .route(
+            "/playback-v3/zones/{zone_id}/resume",
+            post(resume_playback_session_v3),
+        )
+        .route(
             "/zones/{zone_id}/volume",
             get(get_zone_volume).post(update_zone_volume),
         )

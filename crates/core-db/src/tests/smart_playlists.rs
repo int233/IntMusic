@@ -15,6 +15,7 @@ fn source_manifest(
             path_hint: Some(format!("/music/{root_external_id}")),
         },
         scan_id: Uuid::now_v7().to_string(),
+        batch_id: None,
         complete: false,
         files: vec![protocol::ClientLibraryFileManifest {
             external_id: format!("{title}.flac"),

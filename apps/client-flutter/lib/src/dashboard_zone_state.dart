@@ -50,7 +50,7 @@ extension _DashboardZoneState on _CoreDashboardState {
     final volumeMode = mode ?? _activeZoneVolumeMode();
     final normalized = volume.clamp(0.0, 1.0);
     final effectiveMuted = muted ?? (normalized <= 0.001);
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       final localOutputId = _clientOutputForZone(zoneId);
       if (localOutputId == null) {
         return;
@@ -221,7 +221,7 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   Future<void> _renameZone(String zoneId, String? alias) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       _mutatePlayback(() {
         _zones = _zones
             .map((value) {
@@ -254,7 +254,7 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   Future<void> _stopEverywhere() async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       await _finishOfflinePlayback('stopped');
       for (final outputId in _rendererLoadedTrackByOutput.keys.toList()) {
         await (await _playerForOutput(outputId)).stop();
@@ -480,6 +480,39 @@ extension _DashboardZoneState on _CoreDashboardState {
     _playback = _withPlaybackTimestamp(playback);
     _scheduleActiveTrackDetailLoad(playback);
     _syncSystemPlayback();
+    _schedulePlaybackCheckpoint(
+      immediate: playback['state']?.toString() != 'playing',
+    );
+  }
+
+  void _schedulePlaybackCheckpoint({bool immediate = false}) {
+    if (_cacheServerId == null && _status?['server_id'] == null) return;
+    final now = DateTime.now();
+    final last = _lastPlaybackCheckpointAt;
+    final dueIn = last == null
+        ? Duration.zero
+        : const Duration(seconds: 5) - now.difference(last);
+    if (immediate || dueIn <= Duration.zero) {
+      _playbackCheckpointTimer?.cancel();
+      _playbackCheckpointTimer = null;
+      unawaited(_persistPlaybackCheckpoint());
+      return;
+    }
+    if (_playbackCheckpointTimer?.isActive == true) return;
+    _playbackCheckpointTimer = Timer(dueIn, () {
+      _playbackCheckpointTimer = null;
+      unawaited(_persistPlaybackCheckpoint());
+    });
+  }
+
+  Future<void> _persistPlaybackCheckpoint() async {
+    final playback = _playback;
+    if (playback == null) return;
+    _lastPlaybackCheckpointAt = DateTime.now();
+    await _persistOverviewValues(<String, dynamic>{
+      'playback': playback,
+      if (_playbackQueue != null) 'playback_queue': _playbackQueue,
+    });
   }
 
   void _syncSystemPlayback() {
@@ -511,27 +544,26 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   Future<void> _loadActiveTrackDetail(int trackId) async {
-    if (_offlineMode) {
+    var cached =
+        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+    if (_localPlaybackFallbackActive) {
       final copy = await _availableOfflineCopy(trackId);
       final path = copy == null
           ? null
           : _offlineCopyPath(copy, _clientLibraryRoots);
-      if (!mounted ||
-          copy == null ||
-          path == null ||
-          _activeTrackDetailId != trackId) {
+      if (!mounted || cached == null || _activeTrackDetailId != trackId) {
         return;
       }
-      final detail = copy.toTrackDetail(path);
+      if (copy != null && path != null) {
+        cached = _detailWithLocalCopy(cached, copy, path);
+      }
       _mutatePlayback(() {
-        _activeTrackDetail = detail;
-        _trackDetailCache[trackId] = detail;
+        _activeTrackDetail = cached;
+        _trackDetailCache[trackId] = cached!;
       });
       _syncSystemPlayback();
       return;
     }
-    final cached =
-        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
     if (cached != null && _activeTrackDetailId == trackId) {
       _activeTrackDetail = cached;
       if (mounted) _mutatePlayback(() {});

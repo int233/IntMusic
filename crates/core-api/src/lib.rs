@@ -4,6 +4,7 @@ mod distribution_routes;
 mod events;
 mod library_management_routes;
 mod playback_service;
+mod playback_v3_routes;
 mod playlist_routes;
 mod renderer_routes;
 mod renderers;
@@ -19,6 +20,7 @@ pub(crate) use distribution_routes::*;
 pub(crate) use events::*;
 pub(crate) use library_management_routes::*;
 pub(crate) use playback_service::*;
+pub(crate) use playback_v3_routes::*;
 pub(crate) use playlist_routes::*;
 pub(crate) use renderer_routes::*;
 pub use router::build_router;
@@ -111,8 +113,9 @@ struct AppStateInner {
     pool: DbPool,
     started_at: chrono::DateTime<Utc>,
     library_revision: AtomicU64,
+    event_cursor: AtomicU64,
+    event_journal_tx: mpsc::UnboundedSender<EventEnvelope>,
     events: broadcast::Sender<EventEnvelope>,
-    renderer_commands: broadcast::Sender<EventEnvelope>,
     playback: PlaybackController,
     renderers: RendererRegistry,
     playback_control_gates: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -137,7 +140,22 @@ impl AppState {
         transcoder: Transcoder,
     ) -> Self {
         let (events, _) = broadcast::channel(1024);
-        let (renderer_commands, _) = broadcast::channel(256);
+        let (event_journal_tx, mut event_journal_rx) = mpsc::unbounded_channel::<EventEnvelope>();
+        let event_pool = pool.clone();
+        let journal_events = events.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_journal_rx.recv().await {
+                if let Err(error) = core_db::record_event(&event_pool, &event).await {
+                    error!(
+                        %error,
+                        event_type = event.event_type,
+                        cursor = event.cursor,
+                        "failed to persist Core event"
+                    );
+                }
+                let _ = journal_events.send(event);
+            }
+        });
         let (server_id, catalog_epoch) = catalog_identity;
         Self {
             inner: Arc::new(AppStateInner {
@@ -146,8 +164,9 @@ impl AppState {
                 pool,
                 started_at: Utc::now(),
                 library_revision: AtomicU64::new(1),
+                event_cursor: AtomicU64::new(0),
+                event_journal_tx,
                 events,
-                renderer_commands,
                 playback: PlaybackController::new_local(),
                 renderers: RendererRegistry::default(),
                 playback_control_gates: tokio::sync::Mutex::new(HashMap::new()),
@@ -178,17 +197,34 @@ impl AppState {
     }
 
     fn emit(&self, event_type: impl Into<String>, payload: impl serde::Serialize) {
-        let _ = self
-            .inner
-            .events
-            .send(EventEnvelope::new(event_type, payload));
+        self.dispatch_event(EventEnvelope::new(event_type, payload));
+    }
+
+    fn emit_with_cursor(
+        &self,
+        event_type: impl Into<String>,
+        payload: impl serde::Serialize,
+    ) -> u64 {
+        self.dispatch_event(EventEnvelope::new(event_type, payload))
     }
 
     fn emit_renderer_command(&self, renderer_id: &str, command: &RendererCommandPayload) {
-        let _ = self.inner.renderer_commands.send(EventEnvelope::new(
+        self.dispatch_event(EventEnvelope::new(
             "renderer.command",
             json!({ "renderer_id": renderer_id, "command": command }),
         ));
+    }
+
+    fn dispatch_event(&self, mut event: EventEnvelope) -> u64 {
+        let cursor = self.inner.event_cursor.fetch_add(1, Ordering::SeqCst) + 1;
+        event.cursor = Some(cursor);
+        if let Err(error) = self.inner.event_journal_tx.send(event) {
+            error!(
+                event_type = error.0.event_type,
+                "Core event journal dispatcher is unavailable"
+            );
+        }
+        cursor
     }
 
     async fn playback_control_gate(&self, zone_id: &str) -> Arc<tokio::sync::Mutex<()>> {
@@ -285,6 +321,57 @@ impl PlayCollectionControlRequest {
             mode: self.mode,
         }
     }
+}
+
+async fn replay_playback_command<T: serde::de::DeserializeOwned>(
+    state: &AppState,
+    zone_id: &str,
+    action: &str,
+    context: &PlaybackCommandContext,
+) -> Result<Option<T>> {
+    let (Some(origin_client_id), Some(intent_id)) = (
+        context.origin_client_id.as_deref(),
+        context.intent_id.as_deref(),
+    ) else {
+        return Ok(None);
+    };
+    let Some(receipt) =
+        core_db::playback_command_receipt(state.pool(), origin_client_id, intent_id).await?
+    else {
+        return Ok(None);
+    };
+    if receipt.zone_id != zone_id || receipt.action != action {
+        anyhow::bail!(
+            "playback intent {intent_id} was already used for {} on {}",
+            receipt.action,
+            receipt.zone_id
+        );
+    }
+    Ok(Some(serde_json::from_str(&receipt.response_json)?))
+}
+
+async fn record_playback_command<T: serde::Serialize>(
+    state: &AppState,
+    zone_id: &str,
+    action: &str,
+    context: &PlaybackCommandContext,
+    response: &T,
+) -> Result<()> {
+    let (Some(origin_client_id), Some(intent_id)) = (
+        context.origin_client_id.as_deref(),
+        context.intent_id.as_deref(),
+    ) else {
+        return Ok(());
+    };
+    core_db::record_playback_command_receipt(
+        state.pool(),
+        origin_client_id,
+        intent_id,
+        zone_id,
+        action,
+        &serde_json::to_string(response)?,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]

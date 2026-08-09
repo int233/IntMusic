@@ -2,7 +2,10 @@ use super::*;
 
 mod album_identity;
 mod client_library_resolution;
+mod event_journal;
 mod library_management;
+mod playback_command_receipts;
+mod playback_session_v3;
 mod smart_playlists;
 mod track_merge;
 
@@ -658,6 +661,7 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
                     path_hint: Some(format!("/{device_id}/music")),
                 },
                 scan_id: scan_id.to_string(),
+                batch_id: Some(format!("{scan_id}:0")),
                 complete,
                 files: if include_file {
                     vec![protocol::ClientLibraryFileManifest {
@@ -693,13 +697,31 @@ async fn client_manifests_aggregate_exact_copies_and_reconcile_missing_files() {
             }
         };
 
-    let first =
-        upsert_client_library_manifest(&pool, &make_manifest("dev-a", "root-a", "a1", true, true))
-            .await
-            .expect("upload first client manifest");
+    let first_manifest = make_manifest("dev-a", "root-a", "a1", true, true);
+    let first = upsert_client_library_manifest(&pool, &first_manifest)
+        .await
+        .expect("upload first client manifest");
     assert_eq!(first.accepted_files, 1);
     assert_eq!(first.missing_files, 0);
     assert_eq!(first.bindings.len(), 1);
+    assert!(!first.duplicate_batch);
+    let duplicate = upsert_client_library_manifest(&pool, &first_manifest)
+        .await
+        .expect("retry committed manifest batch");
+    assert!(duplicate.duplicate_batch);
+    assert_eq!(duplicate.bindings.len(), first.bindings.len());
+    assert_eq!(duplicate.bindings[0].track_id, first.bindings[0].track_id);
+    assert_eq!(
+        duplicate.bindings[0].media_variant_id,
+        first.bindings[0].media_variant_id
+    );
+    let accepted_after_retry: i64 = sqlx::query_scalar(
+        "SELECT accepted_files FROM client_library_sync_state WHERE device_id = 'dev-a' AND root_external_id = 'root-a'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read idempotent scan counter");
+    assert_eq!(accepted_after_retry, 1);
 
     let tracks_after_first = list_tracks(&pool, 100, 0).await.expect("list tracks");
     assert_eq!(tracks_after_first.len(), 4);

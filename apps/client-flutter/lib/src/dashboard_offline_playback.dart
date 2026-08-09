@@ -69,6 +69,17 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
       );
       return false;
     }
+    final summary = _findEntity(_tracks, trackId);
+    final cachedDetail =
+        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+    if (summary == null || cachedDetail == null) {
+      ClientLog.event(
+        'playback.local_fast_start.projection_missing',
+        level: 'warning',
+        data: <String, Object?>{'track_id': trackId, 'zone_id': zoneId},
+      );
+      return false;
+    }
 
     if (sourceTrackIds != null) {
       _setOfflineQueue(
@@ -128,11 +139,6 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
       _markPlaybackIntentAppliedLocally(intentId);
     }
 
-    final summary = _findEntity(_tracks, trackId) ?? copy.toTrackSummary();
-    final cachedDetail =
-        _trackDetailCache[trackId] ??
-        _trackDetailFromOverview(trackId) ??
-        copy.toTrackDetail(path);
     final localDetail = _detailWithLocalCopy(cachedDetail, copy, path);
     final playback = _withPlaybackTimestamp(<String, dynamic>{
       'zone_id': zoneId,
@@ -176,14 +182,6 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
         if (_intValue(value['id']) != null)
           _intValue(value['id'])!: value.cast<String, dynamic>(),
     };
-    for (final value in _offlineTrackSummaries(
-      _offlineLibrary,
-    ).whereType<Map>()) {
-      final trackId = _intValue(value['id']);
-      if (trackId != null) {
-        summaries.putIfAbsent(trackId, () => value.cast<String, dynamic>());
-      }
-    }
     final validIds = trackIds
         .where((trackId) => summaries.containsKey(trackId))
         .toList(growable: false);
@@ -206,6 +204,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
           },
       ],
     };
+    _restorePlaybackAgentQueue(outputId: targetZoneId);
   }
 
   Future<void> _playOfflineTrack(
@@ -221,6 +220,20 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
           () => _error = _tr(
             context,
             'No accessible local copy is available for this track.',
+          ),
+        );
+      }
+      return;
+    }
+    final summary = _findEntity(_tracks, trackId);
+    final cachedDetail =
+        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+    if (summary == null || cachedDetail == null) {
+      if (mounted) {
+        _mutate(
+          () => _error = _tr(
+            context,
+            'Track metadata is not available in the local projection.',
           ),
         );
       }
@@ -274,11 +287,6 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     }
     _offlinePlaybackStartedAt = DateTime.now().toUtc();
     _offlinePlaybackStartPositionMs = 0;
-    final summary = _findEntity(_tracks, trackId) ?? copy.toTrackSummary();
-    final cachedDetail =
-        _trackDetailCache[trackId] ??
-        _trackDetailFromOverview(trackId) ??
-        copy.toTrackDetail(path);
     final detail = _detailWithLocalCopy(cachedDetail, copy, path);
     final playback = <String, dynamic>{
       'zone_id': outputId,
@@ -291,11 +299,6 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     _rendererPlaybackByOutput[outputId] = playback;
     if (!mounted) return;
     _mutate(() {
-      _replaceTrackInCollections(<String, dynamic>{
-        ...summary,
-        '_offline': true,
-        '_local_available': true,
-      });
       _activeTrackDetailId = trackId;
       _activeTrackDetail = detail;
       _trackDetailCache[trackId] = detail;
@@ -305,7 +308,9 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
   }
 
   Future<void> _finishOfflinePlayback(String reason) async {
-    if (!_offlineMode || _offlinePlaybackStartedAt == null) return;
+    if (!_localPlaybackFallbackActive || _offlinePlaybackStartedAt == null) {
+      return;
+    }
     final trackId = _intValue(_playback?['track_id']);
     if (trackId == null) return;
     final outputId = _offlineOutputForZone(_playback?['zone_id']?.toString());
@@ -333,50 +338,22 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
   }
 
   Future<void> _playNextOfflineTrack({bool completed = false}) async {
-    final items = _queueItems();
-    final advance = nextPlaybackQueueItem(
-      itemIds: [for (final item in items) _intValue(item['id']) ?? 0],
-      currentIndex: _intValue(_playbackQueue?['current_index']),
-      mode: _playbackMode.nameForApi,
-      shuffleSeed: _intValue(_playbackQueue?['shuffle_seed']) ?? 1,
+    final played = await _playAvailableLocalAgentCandidate(
+      next: true,
       automatic: completed,
+      reason: completed ? 'local_completion' : 'local_next',
     );
-    final currentIndex = advance.index;
-    if (advance.kind == PlaybackQueueAdvanceKind.stop || currentIndex == null) {
+    if (!played) {
       await _setOfflineStopped();
-      return;
     }
-    final trackId = _intValue(_asMap(items[currentIndex]['track'])['id']);
-    if (trackId == null) {
-      await _setOfflineStopped();
-      return;
-    }
-    _playbackQueue = <String, dynamic>{
-      ...?_playbackQueue,
-      'current_index': currentIndex,
-    };
-    await _playOfflineTrack(trackId);
   }
 
   Future<void> _playPreviousOfflineTrack() async {
-    final items = _queueItems();
-    final advance = previousPlaybackQueueItem(
-      itemIds: [for (final item in items) _intValue(item['id']) ?? 0],
-      currentIndex: _intValue(_playbackQueue?['current_index']),
-      mode: _playbackMode.nameForApi,
-      shuffleSeed: _intValue(_playbackQueue?['shuffle_seed']) ?? 1,
+    await _playAvailableLocalAgentCandidate(
+      next: false,
+      automatic: false,
+      reason: 'local_previous',
     );
-    final currentIndex = advance.index;
-    if (advance.kind == PlaybackQueueAdvanceKind.stop || currentIndex == null) {
-      return;
-    }
-    final trackId = _intValue(_asMap(items[currentIndex]['track'])['id']);
-    if (trackId == null) return;
-    _playbackQueue = <String, dynamic>{
-      ...?_playbackQueue,
-      'current_index': currentIndex,
-    };
-    await _playOfflineTrack(trackId);
   }
 
   Future<void> _setOfflineStopped({String? zoneId}) async {

@@ -16,15 +16,15 @@ use protocol::{
     ClientLibraryPendingFile, ClientLibraryRootStatus, ClientMutationBatchRequest,
     ClientMutationBatchResult, ClientSyncChange, ClientTrackManifest, CreateDistributionRequest,
     DistributionContentSource, DistributionJobSummary, DistributionSourceTaskAssignment,
-    DistributionTaskAssignment, DistributionTaskProgress, DistributionTranscodeTask, LibraryCounts,
-    LibraryRoot, LyricPayload, MediaReplicaSummary, MediaVariantSummary, NewPlaylist,
-    PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession, PlaybackStats,
-    PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation, RecordingLinkCandidate,
-    RelatedReleaseTrackSummary, ReleaseEditionSummary, ReplacePlaybackQueue,
-    ResolveClientLibraryFileResult, ScanProblem, TrackDetail, TrackEditSnapshot,
-    TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField, TrackMetadataUpdate,
-    TrackPlaybackStat, TrackSummary, UpdateAlbumMetadata, UpdateArtistAsset, UpdateArtistProfile,
-    UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
+    DistributionTaskAssignment, DistributionTaskProgress, DistributionTranscodeTask, EventEnvelope,
+    LibraryCounts, LibraryRoot, LyricPayload, MediaReplicaSummary, MediaVariantSummary,
+    NewPlaylist, PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession,
+    PlaybackStats, PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation,
+    RecordingLinkCandidate, RelatedReleaseTrackSummary, ReleaseEditionSummary,
+    ReplacePlaybackQueue, ResolveClientLibraryFileResult, ScanProblem, TrackDetail,
+    TrackEditSnapshot, TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField,
+    TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateAlbumMetadata, UpdateArtistAsset,
+    UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
 };
 use protocol::{
     AutoTrackMergeFailure, AutoTrackMergeGroup, AutoTrackMergePreview, AutoTrackMergeRequest,
@@ -54,11 +54,13 @@ mod artists;
 mod auto_track_merge;
 mod client_file_resolution;
 mod client_library;
+mod client_manifest_batches;
 mod client_mutations;
 mod connection;
 mod distribution_jobs;
 mod distribution_sources;
 mod distribution_transcode;
+mod event_journal;
 mod helpers;
 mod history;
 mod ingest;
@@ -66,7 +68,9 @@ mod library_management;
 mod library_management_actions;
 mod library_roots;
 mod metadata;
+mod playback_command_receipts;
 mod playback_queue;
+mod playback_session_v3;
 mod playlists;
 mod smart_playlist_sources;
 mod track_edit;
@@ -90,6 +94,7 @@ pub use connection::*;
 pub use distribution_jobs::*;
 pub use distribution_sources::*;
 pub use distribution_transcode::*;
+pub use event_journal::*;
 pub use helpers::*;
 pub use history::*;
 pub(crate) use ingest::*;
@@ -98,7 +103,9 @@ pub(crate) use library_management_actions::refresh_file_management_issues;
 pub use library_management_actions::*;
 pub use library_roots::*;
 pub(crate) use metadata::*;
+pub use playback_command_receipts::*;
 pub use playback_queue::*;
+pub use playback_session_v3::*;
 pub use playlists::*;
 pub(crate) use smart_playlist_sources::*;
 pub use track_edit::*;

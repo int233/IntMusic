@@ -27,7 +27,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
           false;
     }
     if (connected != true && _offlineLibrary.copies.isNotEmpty) {
-      await _activateOfflineMode();
+      await _activateLocalPlaybackFallback();
     }
   }
 
@@ -44,7 +44,9 @@ extension _DashboardBootstrap on _CoreDashboardState {
 
   Future<void> _loadClientCache() async {
     final cached = await _ClientCacheStore.load(_coreUrlController.text);
-    if (cached.isEmpty || !mounted) return;
+    if (!mounted) return;
+    _eventCursor = cached.eventCursor;
+    if (cached.isEmpty) return;
     _mutate(() {
       _cacheServerId = cached.serverId;
       _cacheCatalogEpoch = cached.catalogEpoch;
@@ -79,7 +81,9 @@ extension _DashboardBootstrap on _CoreDashboardState {
     }
     if (values['playback_queue'] is Map) {
       _playbackQueue = _asMap(values['playback_queue']);
+      _restorePlaybackAgentQueue();
     }
+    _restorePendingPlaybackCommandsV3(values['pending_playback_commands_v3']);
     _playbackHistory =
         (values['playback_history'] as List?) ?? _playbackHistory;
     if (values['playback_stats'] is Map) {

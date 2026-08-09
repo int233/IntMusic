@@ -13,123 +13,140 @@ extension _DashboardEventRouter on _CoreDashboardState {
       final envelope = _asMap(jsonDecode(message));
       final eventType = envelope['type']?.toString();
       final payload = envelope['payload'];
-
-      if (eventType == 'connection.pong') {
-        _eventLastPongAt = DateTime.now();
+      final eventCursor = _intValue(envelope['cursor']);
+      if (eventCursor != null && eventCursor <= _eventCursor) {
         return;
       }
 
-      if (eventType == 'renderer.resync_required') {
-        unawaited(_restartEventStream('renderer_resync_required'));
-        return;
-      }
-
-      if (eventType == 'connection.snapshot_required') {
-        unawaited(_refreshZonesSilently());
-        unawaited(_refreshPlaybackQueue());
-        return;
-      }
-
-      if (eventType == 'renderer.command') {
-        final commandEnvelope = _asMap(payload);
-        if (commandEnvelope['renderer_id']?.toString() != _clientId) {
+      try {
+        if (eventType == 'connection.pong') {
+          _eventLastPongAt = DateTime.now();
+          _eventReconnectFailures = 0;
           return;
         }
-        final command = _asMap(commandEnvelope['command']);
-        final targetOutputId = command['target_output_id']?.toString();
-        if (!_isClientOutputId(targetOutputId)) {
+
+        if (eventType == 'renderer.resync_required') {
+          unawaited(_restartEventStream('renderer_resync_required'));
           return;
         }
-        final issuedAt = _rendererCommandIssuedAt(command);
-        final ageMs = issuedAt == null
-            ? null
-            : DateTime.now().toUtc().difference(issuedAt).inMilliseconds;
-        ClientLog.event(
-          'renderer.command.received',
-          data: <String, Object?>{
-            'action': command['action']?.toString(),
-            'command_id': command['command_id']?.toString(),
-            'sequence': _intValue(command['sequence']),
-            'issued_at': issuedAt?.toIso8601String(),
-            'age_ms': ageMs,
-            'expires_after_ms': _intValue(command['expires_after_ms']),
-            'origin_client_id': command['origin_client_id']?.toString(),
-            'intent_id': command['intent_id']?.toString(),
-            'track_id': _intValue(command['track_id']),
-            'output_id': targetOutputId,
-          },
-        );
-        if (_acceptRendererCommand(command)) {
-          _enqueueRendererCommand(command, connectionGeneration);
-        }
-        return;
-      }
 
-      if ((eventType == 'playback.state_changed' ||
-              eventType == 'playback.position') &&
-          payload is Map) {
-        final playback = payload.cast<String, dynamic>();
-        if (!_acceptIncomingPlayback(playback)) {
+        if (eventType == 'connection.snapshot_required') {
+          unawaited(_refreshZonesSilently());
+          unawaited(_refreshPlaybackQueue());
+          unawaited(_backgroundLibrarySync(force: true));
           return;
         }
-        _mutatePlayback(() {
-          _mergePlaybackEvent(playback);
-        });
-        return;
-      }
 
-      if (eventType == 'playback.queue_changed' && payload is Map) {
-        final queue = payload.cast<String, dynamic>();
-        if (queue['zone_id']?.toString() == _activeZoneId()) {
-          _mutatePlayback(() => _applyPlaybackQueue(queue));
-          unawaited(
-            _persistOverviewValues(<String, dynamic>{'playback_queue': queue}),
+        if (eventType == 'renderer.command') {
+          final commandEnvelope = _asMap(payload);
+          if (commandEnvelope['renderer_id']?.toString() != _clientId) {
+            return;
+          }
+          final command = _asMap(commandEnvelope['command']);
+          final targetOutputId = command['target_output_id']?.toString();
+          if (!_isClientOutputId(targetOutputId)) {
+            return;
+          }
+          final issuedAt = _rendererCommandIssuedAt(command);
+          final ageMs = issuedAt == null
+              ? null
+              : DateTime.now().toUtc().difference(issuedAt).inMilliseconds;
+          ClientLog.event(
+            'renderer.command.received',
+            data: <String, Object?>{
+              'action': command['action']?.toString(),
+              'command_id': command['command_id']?.toString(),
+              'sequence': _intValue(command['sequence']),
+              'issued_at': issuedAt?.toIso8601String(),
+              'age_ms': ageMs,
+              'expires_after_ms': _intValue(command['expires_after_ms']),
+              'origin_client_id': command['origin_client_id']?.toString(),
+              'intent_id': command['intent_id']?.toString(),
+              'track_id': _intValue(command['track_id']),
+              'output_id': targetOutputId,
+            },
           );
-        }
-        return;
-      }
-
-      if (eventType == 'zone.volume_changed' && payload is Map) {
-        final volume = payload.cast<String, dynamic>();
-        final zoneId = volume['zone_id']?.toString();
-        if (zoneId == null) {
+          if (_acceptRendererCommand(command)) {
+            _enqueueRendererCommand(command, connectionGeneration);
+          }
           return;
         }
-        _mutatePlayback(() {
-          _zones = _zones
-              .map((item) {
-                final zone = (item as Map).cast<String, dynamic>();
-                if (zone['id']?.toString() != zoneId) {
-                  return zone;
-                }
-                return <String, dynamic>{
-                  ...zone,
-                  'volume': volume['volume'],
-                  'muted': volume['muted'],
-                  'volume_mode': volume['mode'],
-                  'player_volume': volume['player_volume'],
-                  'player_muted': volume['player_muted'],
-                  'system_volume': volume['system_volume'],
-                  'system_muted': volume['system_muted'],
-                };
-              })
-              .toList(growable: false);
-        });
-      }
-      if (eventType == 'distribution.created' ||
-          eventType == 'distribution.updated') {
-        unawaited(_refreshDistributionJobs());
-        unawaited(_pollDistributionTasks());
-      }
-      if (eventType == 'library.tracks_merged' ||
-          eventType == 'track.recording_changed') {
-        unawaited(_refreshAfterCatalogIdentityEvent());
-      } else if (eventType == 'library.changed' ||
-          eventType == 'client.mutations_applied') {
-        unawaited(_backgroundLibrarySync());
-      }
-      if (eventType == 'core.settings_changed') {
-        unawaited(_refreshSettingsCache());
+
+        if ((eventType == 'playback.state_changed' ||
+                eventType == 'playback.position') &&
+            payload is Map) {
+          final playback = payload.cast<String, dynamic>();
+          if (!_acceptIncomingPlayback(playback)) {
+            return;
+          }
+          _mutatePlayback(() {
+            _mergePlaybackEvent(playback);
+          });
+          return;
+        }
+
+        if (eventType == 'playback.queue_changed' && payload is Map) {
+          final queue = payload.cast<String, dynamic>();
+          if (queue['zone_id']?.toString() == _activeZoneId()) {
+            _mutatePlayback(() => _applyPlaybackQueue(queue));
+          }
+          return;
+        }
+
+        if (eventType == 'playback.session_v3.changed' && payload is Map) {
+          final zoneId = payload['zone_id']?.toString();
+          if (zoneId == _activeZoneId()) {
+            unawaited(_refreshPlaybackSessionV3(zoneId: zoneId));
+          }
+          return;
+        }
+
+        if (eventType == 'zone.volume_changed' && payload is Map) {
+          final volume = payload.cast<String, dynamic>();
+          final zoneId = volume['zone_id']?.toString();
+          if (zoneId == null) {
+            return;
+          }
+          _mutatePlayback(() {
+            _zones = _zones
+                .map((item) {
+                  final zone = (item as Map).cast<String, dynamic>();
+                  if (zone['id']?.toString() != zoneId) {
+                    return zone;
+                  }
+                  return <String, dynamic>{
+                    ...zone,
+                    'volume': volume['volume'],
+                    'muted': volume['muted'],
+                    'volume_mode': volume['mode'],
+                    'player_volume': volume['player_volume'],
+                    'player_muted': volume['player_muted'],
+                    'system_volume': volume['system_volume'],
+                    'system_muted': volume['system_muted'],
+                  };
+                })
+                .toList(growable: false);
+          });
+        }
+        if (eventType == 'distribution.created' ||
+            eventType == 'distribution.updated') {
+          unawaited(_refreshDistributionJobs());
+          unawaited(_pollDistributionTasks());
+        }
+        if (eventType == 'library.tracks_merged' ||
+            eventType == 'track.recording_changed') {
+          unawaited(_refreshAfterCatalogIdentityEvent());
+        } else if (eventType == 'library.changed' ||
+            eventType == 'client.mutations_applied') {
+          unawaited(_backgroundLibrarySync());
+        }
+        if (eventType == 'core.settings_changed') {
+          unawaited(_refreshSettingsCache());
+        }
+      } finally {
+        if (eventCursor != null) {
+          _acknowledgeCoreEventCursor(eventCursor);
+        }
       }
     } catch (error, stackTrace) {
       ClientLog.error('renderer.event.invalid', error, stackTrace: stackTrace);
@@ -137,6 +154,21 @@ extension _DashboardEventRouter on _CoreDashboardState {
         _mutate(() => _rendererStatus = 'Renderer event error');
       }
     }
+  }
+
+  void _acknowledgeCoreEventCursor(int cursor) {
+    if (cursor <= _eventCursor) return;
+    _eventCursor = cursor;
+    final serverId = _cacheServerId ?? _status?['server_id']?.toString();
+    if (serverId == null || serverId.isEmpty) return;
+    unawaited(
+      _ClientCacheStore.updateEventCursor(
+        _coreUrlController.text,
+        serverId,
+        _cacheCatalogEpoch ?? _status?['catalog_epoch']?.toString(),
+        cursor,
+      ),
+    );
   }
 
   bool _acceptRendererCommand(Map<String, dynamic> command) {

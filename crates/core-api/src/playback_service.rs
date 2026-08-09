@@ -243,9 +243,41 @@ pub(crate) async fn play_track_on_zone(
     position_ms: u64,
     context: &PlaybackCommandContext,
 ) -> Result<PlaybackState> {
+    play_track_on_zone_with_queue_selection(state, zone_id, track_id, position_ms, context, true)
+        .await
+}
+
+/// Starts a track after a v3 command has already selected its stable queue
+/// occurrence. Selecting by track ID here would jump to the first duplicate
+/// occurrence and lose the v3 queue cursor.
+pub(crate) async fn play_track_on_zone_preserving_queue(
+    state: &AppState,
+    zone_id: &str,
+    track_id: i64,
+    position_ms: u64,
+    context: &PlaybackCommandContext,
+) -> Result<PlaybackState> {
+    play_track_on_zone_with_queue_selection(state, zone_id, track_id, position_ms, context, false)
+        .await
+}
+
+async fn play_track_on_zone_with_queue_selection(
+    state: &AppState,
+    zone_id: &str,
+    track_id: i64,
+    position_ms: u64,
+    context: &PlaybackCommandContext,
+    select_queue_track: bool,
+) -> Result<PlaybackState> {
     let previous = playback_state_for_zone(state, zone_id).await.ok();
-    let queue = core_db::set_playback_queue_current_track(state.pool(), zone_id, track_id).await?;
-    state.emit("playback.queue_changed", &queue);
+    let queue = if select_queue_track {
+        let queue =
+            core_db::set_playback_queue_current_track(state.pool(), zone_id, track_id).await?;
+        state.emit("playback.queue_changed", &queue);
+        queue
+    } else {
+        core_db::playback_queue(state.pool(), zone_id).await?
+    };
     let detail = core_db::track_detail(state.pool(), track_id).await?;
     let track_title = detail.track.title.clone();
 

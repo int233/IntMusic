@@ -61,14 +61,17 @@ pub async fn replace_playback_queue(
     for (position, track_id) in payload.track_ids.iter().copied().enumerate() {
         sqlx::query(
             r#"
-            INSERT INTO playback_queue_items (zone_id, position, track_id, added_at)
-            VALUES (?1, ?2, ?3, ?4)
+            INSERT INTO playback_queue_items (
+                zone_id, position, track_id, added_at, stable_item_id, added_by_device_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, 'legacy')
             "#,
         )
         .bind(zone_id)
         .bind(position as i64)
         .bind(track_id)
         .bind(&now)
+        .bind(Uuid::now_v7().to_string())
         .execute(&mut *tx)
         .await?;
     }
@@ -471,7 +474,7 @@ pub async fn set_zone_system_volume_state(
     zone_volume(pool, zone_id).await
 }
 
-async fn ensure_playback_queue(pool: &DbPool, zone_id: &str) -> Result<()> {
+pub(crate) async fn ensure_playback_queue(pool: &DbPool, zone_id: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     sqlx::query(
         r#"

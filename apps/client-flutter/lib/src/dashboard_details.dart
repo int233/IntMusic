@@ -31,19 +31,6 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _openAlbumDetail(int albumId) async {
-    if (_offlineMode) {
-      final detail =
-          _albumDetailCache[albumId] ??
-          _albumDetailFromOverview(albumId) ??
-          _offlineAlbumDetail(_offlineLibrary, albumId);
-      if (detail != null && mounted) {
-        _mutate(() {
-          _albumDetailCache[albumId] = detail;
-          _navigateToInState(_AppRoute.album(albumId));
-        });
-      }
-      return;
-    }
     final detail =
         _albumDetailCache[albumId] ?? _albumDetailFromOverview(albumId);
     if (detail == null || !mounted) return;
@@ -51,7 +38,7 @@ extension _DashboardDetails on _CoreDashboardState {
       _albumDetailCache[albumId] = detail;
       _navigateToInState(_AppRoute.album(albumId));
     });
-    unawaited(_refreshAlbumDetail(albumId));
+    if (!_localPlaybackFallbackActive) unawaited(_refreshAlbumDetail(albumId));
   }
 
   Map<String, dynamic>? _albumDetailFromOverview(int albumId) {
@@ -85,7 +72,7 @@ extension _DashboardDetails on _CoreDashboardState {
   void _closeAlbumDetail() => _closeDetailPage();
 
   Future<void> _editAlbum(int albumId) async {
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(_tr(context, 'Album editing requires Core'))),
@@ -129,19 +116,6 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _openArtistDetail(int artistId) async {
-    if (_offlineMode) {
-      final detail =
-          _artistDetailCache[artistId] ??
-          _artistDetailFromOverview(artistId) ??
-          _offlineArtistDetail(_offlineLibrary, artistId);
-      if (detail != null && mounted) {
-        _mutate(() {
-          _artistDetailCache[artistId] = detail;
-          _navigateToInState(_AppRoute.artist(artistId));
-        });
-      }
-      return;
-    }
     final detail =
         _artistDetailCache[artistId] ?? _artistDetailFromOverview(artistId);
     if (detail == null || !mounted) return;
@@ -149,7 +123,9 @@ extension _DashboardDetails on _CoreDashboardState {
       _artistDetailCache[artistId] = detail;
       _navigateToInState(_AppRoute.artist(artistId));
     });
-    unawaited(_refreshArtistDetail(artistId));
+    if (!_localPlaybackFallbackActive) {
+      unawaited(_refreshArtistDetail(artistId));
+    }
   }
 
   Future<void> _openArtistByName(String displayName) async {
@@ -258,32 +234,25 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _openTrackDetail(int trackId) async {
-    if (_offlineMode) {
+    final projectedDetail =
+        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
+    if (projectedDetail == null || !mounted) return;
+    var detail = projectedDetail;
+    if (_localPlaybackFallbackActive) {
       final copy = await _availableOfflineCopy(trackId);
       final path = copy == null
           ? null
           : _offlineCopyPath(copy, _clientLibraryRoots);
-      final cached =
-          _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
-      if (cached != null && mounted) {
-        final detail = copy == null || path == null
-            ? cached
-            : _detailWithLocalCopy(cached, copy, path);
-        _mutate(() {
-          _trackDetailCache[trackId] = detail;
-          _navigateToInState(_AppRoute.track(trackId));
-        });
+      if (copy != null && path != null) {
+        detail = _detailWithLocalCopy(detail, copy, path);
       }
-      return;
     }
-    final detail =
-        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
-    if (detail == null || !mounted) return;
+    if (!mounted) return;
     _mutate(() {
       _trackDetailCache[trackId] = detail;
       _navigateToInState(_AppRoute.track(trackId));
     });
-    unawaited(_refreshTrackDetail(trackId));
+    if (!_localPlaybackFallbackActive) unawaited(_refreshTrackDetail(trackId));
   }
 
   Map<String, dynamic> _detailWithLocalCopy(
@@ -464,7 +433,7 @@ extension _DashboardDetails on _CoreDashboardState {
       _playlistDetailCache[playlistId] = detail;
       _navigateToInState(_AppRoute.playlist(playlistId));
     });
-    if (!_offlineMode) {
+    if (!_localPlaybackFallbackActive) {
       unawaited(_refreshPlaylistDetail(playlistId));
     }
   }
@@ -584,7 +553,7 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<List<Map<String, dynamic>>> _smartPlaylistSourceOptions() async {
-    if (_offlineMode) return const <Map<String, dynamic>>[];
+    if (_localPlaybackFallbackActive) return const <Map<String, dynamic>>[];
     final unknownDeviceLabel = _tr(context, 'Unknown device');
     final musicSourceLabel = _tr(context, 'Music source');
     try {
@@ -737,7 +706,7 @@ extension _DashboardDetails on _CoreDashboardState {
     }
     await _OfflineLibraryStore.save(_offlineLibrary);
     await _persistOverviewValues(<String, dynamic>{'tracks': _tracks});
-    if (_offlineMode) return;
+    if (_localPlaybackFallbackActive) return;
     Map<String, dynamic> detail;
     try {
       detail = _asMap(

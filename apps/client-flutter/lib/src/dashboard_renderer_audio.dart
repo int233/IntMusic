@@ -142,10 +142,14 @@ extension _DashboardRendererAudio on _CoreDashboardState {
   }
 
   Future<void> _handleOutputComplete(String outputId) async {
-    if (_offlineMode &&
-        outputId == _offlineOutputForZone(_playback?['zone_id']?.toString())) {
-      await _finishOfflinePlayback('completed');
-      await _playNextOfflineTrack(completed: true);
+    final ownsActivePlayback =
+        outputId == _offlineOutputForZone(_playback?['zone_id']?.toString());
+    if (ownsActivePlayback) {
+      if (_localPlaybackFallbackActive &&
+          _rendererLocalFileByOutput[outputId] == true) {
+        await _finishOfflinePlayback('completed');
+      }
+      await _playNextTrack(automatic: true);
       return;
     }
     await _reportRendererState('stopped', outputId: outputId);

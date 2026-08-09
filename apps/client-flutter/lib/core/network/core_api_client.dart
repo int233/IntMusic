@@ -24,6 +24,7 @@ class CoreApiClient {
     _controlClient = _createClient(_CoreApiChannel.control);
     _criticalClient = _createClient(_CoreApiChannel.critical);
     _bulkClient = _createClient(_CoreApiChannel.bulk);
+    _librarySyncClient = _createClient(_CoreApiChannel.librarySync);
   }
 
   static final Map<String, CoreApiClient> _instances =
@@ -35,6 +36,8 @@ class CoreApiClient {
   late HttpClient _controlClient;
   late HttpClient _criticalClient;
   late HttpClient _bulkClient;
+  late HttpClient _librarySyncClient;
+  final Map<HttpClient, Timer> _retiredClientTimers = <HttpClient, Timer>{};
   bool _closed = false;
 
   static String normalizeBaseUrl(String value) =>
@@ -101,6 +104,12 @@ class CoreApiClient {
     _controlClient.close(force: true);
     _criticalClient.close(force: true);
     _bulkClient.close(force: true);
+    _librarySyncClient.close(force: true);
+    for (final entry in _retiredClientTimers.entries) {
+      entry.value.cancel();
+      entry.key.close(force: true);
+    }
+    _retiredClientTimers.clear();
   }
 
   Future<dynamic> getJson(String path, {Duration? requestTimeout}) =>
@@ -157,6 +166,24 @@ class CoreApiClient {
     body: body,
     requestTimeout: requestTimeout,
     channel: _CoreApiChannel.bulk,
+  );
+
+  /// Uploads a Client library manifest without sharing sockets with catalog
+  /// warmup, renderer reporting, or distribution polling.
+  ///
+  /// Manifest batches can spend significant time in Core database
+  /// reconciliation. Keeping them on a serialized, long-timeout channel means
+  /// a slow scan cannot consume or recycle foreground transport capacity.
+  Future<dynamic> postLibrarySyncJson(
+    String path,
+    Map<String, dynamic> body, {
+    Duration requestTimeout = const Duration(seconds: 120),
+  }) => _request(
+    'POST',
+    path,
+    body: body,
+    requestTimeout: requestTimeout,
+    channel: _CoreApiChannel.librarySync,
   );
 
   Future<dynamic> postControlJson(
@@ -247,9 +274,19 @@ class CoreApiClient {
     Duration? requestTimeout,
     _CoreApiChannel channel = _CoreApiChannel.background,
   }) async {
-    final attempts = method == 'GET' && channel != _CoreApiChannel.bulk ? 2 : 1;
+    final hasIdempotencyKey =
+        body?['intent_id']?.toString().trim().isNotEmpty == true ||
+        body?['command_id']?.toString().trim().isNotEmpty == true;
+    final attempts = channel == _CoreApiChannel.librarySync
+        ? 3
+        : channel == _CoreApiChannel.control && hasIdempotencyKey
+        ? 2
+        : method == 'GET' && channel != _CoreApiChannel.bulk
+        ? 2
+        : 1;
     Object? lastError;
     for (var attempt = 0; attempt < attempts; attempt += 1) {
+      var retryable = true;
       try {
         return await _requestOnce(
           method,
@@ -262,11 +299,29 @@ class CoreApiClient {
         lastError = error;
       } on HttpException catch (error) {
         lastError = error;
+        if (RegExp(r'^HTTP 4\d\d:').hasMatch(error.message)) {
+          retryable = false;
+        }
       } on TimeoutException catch (error) {
         lastError = error;
       }
+      if (!retryable) break;
       if (attempt + 1 < attempts) {
-        await Future<void>.delayed(const Duration(milliseconds: 180));
+        final delay = channel == _CoreApiChannel.librarySync
+            ? Duration(milliseconds: 800 * (1 << attempt))
+            : const Duration(milliseconds: 180);
+        ClientLog.event(
+          'core.http.retry_scheduled',
+          level: 'warning',
+          data: <String, Object?>{
+            'method': method,
+            'path': path,
+            'channel': channel.logName,
+            'attempt': attempt + 2,
+            'delay_ms': delay.inMilliseconds,
+          },
+        );
+        await Future<void>.delayed(delay);
       }
     }
     throw lastError ?? StateError('request failed without an error');
@@ -346,7 +401,7 @@ class CoreApiClient {
           : jsonDecode(text);
     } catch (error, stackTrace) {
       if (error is TimeoutException) {
-        _recycleTimedOutClient(channel, client);
+        _retireTimedOutClient(channel, client, effectiveTimeout);
       }
       ClientLog.error(
         'core.http.error',
@@ -386,6 +441,11 @@ class CoreApiClient {
           ..connectionTimeout = const Duration(seconds: 8)
           ..idleTimeout = const Duration(seconds: 20)
           ..maxConnectionsPerHost = 2;
+      case _CoreApiChannel.librarySync:
+        client
+          ..connectionTimeout = const Duration(seconds: 15)
+          ..idleTimeout = const Duration(seconds: 30)
+          ..maxConnectionsPerHost = 1;
     }
     return client;
   }
@@ -395,11 +455,13 @@ class CoreApiClient {
     _CoreApiChannel.control => _controlClient,
     _CoreApiChannel.critical => _criticalClient,
     _CoreApiChannel.bulk => _bulkClient,
+    _CoreApiChannel.librarySync => _librarySyncClient,
   };
 
-  void _recycleTimedOutClient(
+  void _retireTimedOutClient(
     _CoreApiChannel channel,
     HttpClient timedOutClient,
+    Duration requestTimeout,
   ) {
     if (_closed || !identical(_clientFor(channel), timedOutClient)) return;
     final replacement = _createClient(channel);
@@ -412,12 +474,32 @@ class CoreApiClient {
         _criticalClient = replacement;
       case _CoreApiChannel.bulk:
         _bulkClient = replacement;
+      case _CoreApiChannel.librarySync:
+        _librarySyncClient = replacement;
     }
-    timedOutClient.close(force: true);
+    // Future.timeout does not cancel dart:io's underlying socket operation.
+    // Rotate new work onto a fresh pool, but give unrelated requests that were
+    // already using the retired pool time to finish before forcing it closed.
+    // Immediate force-close was the source of correlated background failures
+    // on high-latency links.
+    final graceMilliseconds = requestTimeout.inMilliseconds
+        .clamp(
+          const Duration(seconds: 5).inMilliseconds,
+          const Duration(seconds: 60).inMilliseconds,
+        )
+        .toInt();
+    final timer = Timer(Duration(milliseconds: graceMilliseconds), () {
+      _retiredClientTimers.remove(timedOutClient);
+      timedOutClient.close(force: true);
+    });
+    _retiredClientTimers[timedOutClient] = timer;
     ClientLog.event(
-      'core.http.channel_recycled',
+      'core.http.channel_retired',
       level: 'warning',
-      data: <String, Object?>{'channel': channel.logName},
+      data: <String, Object?>{
+        'channel': channel.logName,
+        'grace_ms': graceMilliseconds,
+      },
     );
   }
 }
@@ -426,7 +508,8 @@ enum _CoreApiChannel {
   background('background'),
   control('playback_control'),
   critical('connection_health'),
-  bulk('library_inventory');
+  bulk('library_inventory'),
+  librarySync('library_sync');
 
   const _CoreApiChannel(this.logName);
 

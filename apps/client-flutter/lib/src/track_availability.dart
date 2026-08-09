@@ -188,7 +188,7 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
 
   String _availabilityPresenceSignature() {
     final values = <String>[
-      _offlineMode ? 'offline' : 'online',
+      _localPlaybackFallbackActive ? 'offline' : 'online',
       for (final zone in _zones.whereType<Map>())
         if (zone['is_online'] != false) 'z:${zone['id']}',
       for (final output in _outputs.whereType<Map>())
@@ -212,16 +212,9 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
 
   Map<String, dynamic> _availabilityForTrack(int trackId) {
     final detail = _trackDetailCache[trackId];
-    Map<String, dynamic>? summary;
-    for (final value in _tracks.whereType<Map>()) {
-      if (_intValue(value['id']) == trackId) {
-        summary = value.cast<String, dynamic>();
-        break;
-      }
-    }
     final localCopyKnown = _offlineLibrary.track(trackId) != null;
-    final localAvailable = _offlineMode
-        ? summary != null && summary['_local_available'] == true
+    final localAvailable = _localPlaybackFallbackActive
+        ? _verifiedLocalTrackIds.contains(trackId)
         : localCopyKnown;
     final replicas = <Map<String, dynamic>>[];
     final media = detail?['media'];
@@ -265,7 +258,7 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
                 : deviceId);
       allSources.add(source);
       if (replica['availability_state']?.toString() != 'ready') continue;
-      final reachable = _offlineMode
+      final reachable = _localPlaybackFallbackActive
           ? source == '__this_device__' && localAvailable
           : source == '__core__' ||
                 source == '__this_device__' ||
@@ -282,7 +275,7 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
 
     final state = availableSources.isNotEmpty
         ? 'available'
-        : replicas.isEmpty && !_offlineMode
+        : replicas.isEmpty && !_localPlaybackFallbackActive
         ? 'checking'
         : 'unavailable';
     return <String, dynamic>{

@@ -91,6 +91,7 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
     _cacheServerId = serverId;
     _cacheCatalogEpoch = catalogEpoch;
     _cacheCursor = 0;
+    _eventCursor = 0;
     _albums = const <dynamic>[];
     _artists = const <dynamic>[];
     _tracks = const <dynamic>[];
@@ -122,7 +123,7 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
       data: <String, Object?>{'root_count': _clientLibraryRoots.length},
     );
     await _syncAllClientLibraryRoots(refreshAfter: false);
-    if (_offlineMode || !mounted) return;
+    if (_localPlaybackFallbackActive || !mounted) return;
     await _backgroundLibrarySync(force: true);
     ClientLog.event(
       'catalog.local_rebind_finished',

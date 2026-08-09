@@ -316,6 +316,11 @@ pub(crate) async fn play_zone(
     let request = payload.map(|Json(payload)| payload).unwrap_or_default();
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
+    if let Some(playback) =
+        replay_playback_command(&state, &zone_id, "play", &request.command).await?
+    {
+        return Ok(Json(playback));
+    }
     let playback = if let Some(track_id) = request.track_id {
         play_track_on_zone(
             &state,
@@ -328,6 +333,7 @@ pub(crate) async fn play_zone(
     } else {
         resume_zone_internal(&state, &zone_id, &request.command).await?
     };
+    record_playback_command(&state, &zone_id, "play", &request.command, &playback).await?;
     Ok(Json(playback))
 }
 
@@ -338,6 +344,11 @@ pub(crate) async fn play_zone_collection(
 ) -> ApiResult<serde_json::Value> {
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
+    if let Some(response) =
+        replay_playback_command(&state, &zone_id, "play_collection", &payload.command).await?
+    {
+        return Ok(Json(response));
+    }
     let request_started = tokio::time::Instant::now();
     let start_index = payload.start_index.unwrap_or(0);
     let index = usize::try_from(start_index)
@@ -351,7 +362,7 @@ pub(crate) async fn play_zone_collection(
     state.emit("playback.queue_changed", &queue);
     let playback = play_track_on_zone(&state, &zone_id, track_id, 0, &payload.command).await?;
     let total_elapsed_ms = request_started.elapsed().as_millis();
-    Ok(Json(json!({
+    let response = json!({
         "queue": queue,
         "playback": playback,
         "timing_ms": {
@@ -359,7 +370,16 @@ pub(crate) async fn play_zone_collection(
             "playback": total_elapsed_ms.saturating_sub(queue_elapsed_ms),
             "total": total_elapsed_ms
         }
-    })))
+    });
+    record_playback_command(
+        &state,
+        &zone_id,
+        "play_collection",
+        &payload.command,
+        &response,
+    )
+    .await?;
+    Ok(Json(response))
 }
 
 pub(crate) async fn play_many_zones(
@@ -432,7 +452,13 @@ pub(crate) async fn pause_zone(
     let request = payload.map(|Json(payload)| payload).unwrap_or_default();
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
+    if let Some(playback) =
+        replay_playback_command(&state, &zone_id, "pause", &request.command).await?
+    {
+        return Ok(Json(playback));
+    }
     let playback = pause_zone_internal(&state, &zone_id, &request.command).await?;
+    record_playback_command(&state, &zone_id, "pause", &request.command, &playback).await?;
     Ok(Json(playback))
 }
 
@@ -444,7 +470,13 @@ pub(crate) async fn stop_zone(
     let request = payload.map(|Json(payload)| payload).unwrap_or_default();
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
+    if let Some(playback) =
+        replay_playback_command(&state, &zone_id, "stop", &request.command).await?
+    {
+        return Ok(Json(playback));
+    }
     let playback = stop_zone_internal(&state, &zone_id, &request.command).await?;
+    record_playback_command(&state, &zone_id, "stop", &request.command, &playback).await?;
     Ok(Json(playback))
 }
 
@@ -455,8 +487,14 @@ pub(crate) async fn seek_zone(
 ) -> ApiResult<PlaybackState> {
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
+    if let Some(playback) =
+        replay_playback_command(&state, &zone_id, "seek", &payload.command).await?
+    {
+        return Ok(Json(playback));
+    }
     let playback =
         seek_zone_internal(&state, &zone_id, payload.position_ms, &payload.command).await?;
+    record_playback_command(&state, &zone_id, "seek", &payload.command, &playback).await?;
     Ok(Json(playback))
 }
 
@@ -531,9 +569,14 @@ pub(crate) async fn next_zone_track(
     let request = payload.map(|Json(payload)| payload).unwrap_or_default();
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
-    Ok(Json(
-        play_queue_step(&state, &zone_id, false, false, &request.command).await?,
-    ))
+    if let Some(playback) =
+        replay_playback_command(&state, &zone_id, "next", &request.command).await?
+    {
+        return Ok(Json(playback));
+    }
+    let playback = play_queue_step(&state, &zone_id, false, false, &request.command).await?;
+    record_playback_command(&state, &zone_id, "next", &request.command, &playback).await?;
+    Ok(Json(playback))
 }
 
 pub(crate) async fn previous_zone_track(
@@ -544,9 +587,14 @@ pub(crate) async fn previous_zone_track(
     let request = payload.map(|Json(payload)| payload).unwrap_or_default();
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
-    Ok(Json(
-        play_queue_step(&state, &zone_id, true, false, &request.command).await?,
-    ))
+    if let Some(playback) =
+        replay_playback_command(&state, &zone_id, "previous", &request.command).await?
+    {
+        return Ok(Json(playback));
+    }
+    let playback = play_queue_step(&state, &zone_id, true, false, &request.command).await?;
+    record_playback_command(&state, &zone_id, "previous", &request.command, &playback).await?;
+    Ok(Json(playback))
 }
 
 pub(crate) async fn get_zone_volume(
@@ -563,6 +611,11 @@ pub(crate) async fn update_zone_volume(
 ) -> ApiResult<ZoneVolume> {
     let gate = state.playback_control_gate(&zone_id).await;
     let _guard = gate.lock().await;
+    if let Some(volume) =
+        replay_playback_command(&state, &zone_id, "volume", &payload.command).await?
+    {
+        return Ok(Json(volume));
+    }
     if payload.mode == VolumeControlMode::System
         && (is_core_zone(&zone_id)
             || !state
@@ -585,5 +638,6 @@ pub(crate) async fn update_zone_volume(
     .await?;
     apply_zone_volume(&state, &volume, &payload.command).await?;
     state.emit("zone.volume_changed", &volume);
+    record_playback_command(&state, &zone_id, "volume", &payload.command, &volume).await?;
     Ok(Json(volume))
 }

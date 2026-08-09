@@ -5,6 +5,43 @@ extension _DashboardRendererDevices on _CoreDashboardState {
     bool resetPlayback = false,
     bool requestPlaybackSync = false,
   }) async {
+    _rendererRegistrationNeedsReset |= resetPlayback;
+    _rendererRegistrationNeedsPlaybackSync |= requestPlaybackSync;
+    final existing = _rendererRegistrationInFlight;
+    if (existing != null) {
+      return existing;
+    }
+
+    late final Future<void> operation;
+    operation = _drainRendererRegistrationRequests();
+    _rendererRegistrationInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (identical(_rendererRegistrationInFlight, operation)) {
+        _rendererRegistrationInFlight = null;
+      }
+    }
+  }
+
+  Future<void> _drainRendererRegistrationRequests() async {
+    do {
+      final resetPlayback = _rendererRegistrationNeedsReset;
+      final requestPlaybackSync = _rendererRegistrationNeedsPlaybackSync;
+      _rendererRegistrationNeedsReset = false;
+      _rendererRegistrationNeedsPlaybackSync = false;
+      await _performRendererRegistration(
+        resetPlayback: resetPlayback,
+        requestPlaybackSync: requestPlaybackSync,
+      );
+    } while (_rendererRegistrationNeedsReset ||
+        _rendererRegistrationNeedsPlaybackSync);
+  }
+
+  Future<void> _performRendererRegistration({
+    required bool resetPlayback,
+    required bool requestPlaybackSync,
+  }) async {
     await _rendererAudioInitialization;
     final outputPrefix = 'renderer:$_clientId:';
     final rendererOutputs = await Future.wait(
@@ -115,7 +152,7 @@ extension _DashboardRendererDevices on _CoreDashboardState {
       _rendererSystemVolumeByOutput.remove(outputId);
     }
 
-    if (_offlineMode) {
+    if (_localPlaybackFallbackActive) {
       unawaited(_refreshOfflineRendererZones());
     } else if (_rendererRegisteredCoreUrl != null) {
       unawaited(
@@ -268,13 +305,51 @@ extension _DashboardRendererDevices on _CoreDashboardState {
     );
   }
 
+  List<dynamic> _mergeOfflineRendererProjection(
+    List<dynamic> existingValues,
+    List<Map<String, dynamic>> localZones,
+  ) {
+    final localByOutput = <String, Map<String, dynamic>>{
+      for (final zone in localZones)
+        (zone['output_id']?.toString() ?? zone['id']?.toString() ?? ''): zone,
+    }..remove('');
+    final merged = <dynamic>[];
+    final consumedOutputs = <String>{};
+    for (final value in existingValues.whereType<Map>()) {
+      final existing = _asMap(value);
+      final outputId =
+          existing['output_id']?.toString() ?? existing['id']?.toString();
+      final local = outputId == null ? null : localByOutput[outputId];
+      if (local != null) {
+        consumedOutputs.add(outputId!);
+        merged.add(<String, dynamic>{
+          ...existing,
+          ...local,
+          // A Core zone ID is the durable playback-session address; the
+          // renderer overlay contributes output state but never renames it.
+          'id': existing['id'] ?? local['id'],
+        });
+      } else {
+        merged.add(<String, dynamic>{
+          ...existing,
+          'is_online': false,
+          'transport_reachable': false,
+        });
+      }
+    }
+    for (final entry in localByOutput.entries) {
+      if (!consumedOutputs.contains(entry.key)) merged.add(entry.value);
+    }
+    return merged;
+  }
+
   Future<void> _refreshOfflineRendererZones() async {
-    if (!_offlineMode || !mounted) return;
+    if (!_localPlaybackFallbackActive || !mounted) return;
     final zones = await _buildOfflineRendererZones();
-    if (!mounted || !_offlineMode) return;
+    if (!mounted || !_localPlaybackFallbackActive) return;
     _mutatePlayback(() {
-      _zones = zones;
-      _outputs = zones;
+      _zones = _mergeOfflineRendererProjection(_zones, zones);
+      _outputs = _mergeOfflineRendererProjection(_outputs, zones);
       _keepSelectedZoneValid();
       _selectedZoneLabel = _zoneLabelById(_selectedZoneId);
     });
@@ -337,7 +412,7 @@ extension _DashboardRendererDevices on _CoreDashboardState {
               previous.muted != current.muted ||
               (previous.volume - current.volume).abs() >= 0.005;
           if (changed) {
-            if (_offlineMode) {
+            if (_localPlaybackFallbackActive) {
               offlineChanged = true;
             } else {
               await _reportRendererSystemVolume(outputId, current);

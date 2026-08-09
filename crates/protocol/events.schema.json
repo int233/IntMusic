@@ -6,6 +6,7 @@
   "required": ["id", "type", "time", "payload"],
   "properties": {
     "id": { "type": "string", "format": "uuid" },
+    "cursor": { "type": "integer", "minimum": 1 },
     "type": {
       "type": "string",
       "enum": [
@@ -29,6 +30,7 @@
         "playback.state_changed",
         "playback.position",
         "playback.queue_changed",
+        "playback.session_v3.changed",
         "zone.alias_updated",
         "zone.volume_changed",
         "renderer.command",

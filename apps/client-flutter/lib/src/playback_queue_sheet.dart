@@ -15,7 +15,7 @@ class _QueueSheet extends StatefulWidget {
   final String coreBaseUrl;
   final List<Map<String, dynamic>> items;
   final int? currentIndex;
-  final Future<void> Function(int) onPlayTrack;
+  final Future<void> Function(int index, int trackId) onPlayTrack;
   final Future<Map<String, dynamic>?> Function(int, int) onMove;
   final Future<Map<String, dynamic>?> Function(int) onRemove;
   final Future<Map<String, dynamic>?> Function() onClearUpcoming;
@@ -241,8 +241,9 @@ class _QueueSheetState extends State<_QueueSheet> {
                                   child: InkWell(
                                     onTap: id == null
                                         ? null
-                                        : () =>
-                                              unawaited(widget.onPlayTrack(id)),
+                                        : () => unawaited(
+                                            widget.onPlayTrack(index, id),
+                                          ),
                                     child: Padding(
                                       padding: const EdgeInsets.only(left: 6),
                                       child: Row(
@@ -327,7 +328,9 @@ class _QueueSheetState extends State<_QueueSheet> {
                                   ),
                                   onTap: id == null
                                       ? null
-                                      : () => unawaited(widget.onPlayTrack(id)),
+                                      : () => unawaited(
+                                          widget.onPlayTrack(index, id),
+                                        ),
                                 ),
                         );
                       },

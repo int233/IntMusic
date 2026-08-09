@@ -5,6 +5,7 @@ class _ClientCacheSnapshot {
     required this.serverId,
     required this.catalogEpoch,
     required this.cursor,
+    required this.eventCursor,
     required this.values,
     required this.trackDetails,
     required this.albumDetails,
@@ -17,6 +18,7 @@ class _ClientCacheSnapshot {
   final String? serverId;
   final String? catalogEpoch;
   final int cursor;
+  final int eventCursor;
   final Map<String, dynamic> values;
   final Map<int, Map<String, dynamic>> trackDetails;
   final Map<int, Map<String, dynamic>> albumDetails;
@@ -29,7 +31,7 @@ class _ClientCacheSnapshot {
 }
 
 class _ClientCacheStore {
-  static const _databaseVersion = 3;
+  static const _databaseVersion = 5;
   static Database? _database;
   static Future<void> _writeQueue = Future<void>.value();
 
@@ -72,6 +74,7 @@ class _ClientCacheStore {
               server_id TEXT NOT NULL,
               catalog_epoch TEXT,
               cursor INTEGER NOT NULL DEFAULT 0,
+              event_cursor INTEGER NOT NULL DEFAULT 0,
               last_sync_at INTEGER,
               last_error TEXT
             )
@@ -92,6 +95,7 @@ class _ClientCacheStore {
             CREATE INDEX idx_search_index_core_kind
             ON search_index(core_url, kind)
           ''');
+          await _createCatalogEntitiesTable(database);
           await _createDetailWarmStateTable(database);
         },
         onUpgrade: (database, oldVersion, _) async {
@@ -109,6 +113,21 @@ class _ClientCacheStore {
             await database.delete('search_index');
             await database.delete('detail_warm_state');
             await database.delete('sync_state');
+          }
+          if (oldVersion < 4) {
+            await _createCatalogEntitiesTable(database);
+            // Development builds deliberately rebuild the disposable Client
+            // projection instead of migrating legacy whole-list JSON rows.
+            await database.delete('cache_entries');
+            await database.delete('catalog_entities');
+            await database.delete('search_index');
+            await database.delete('detail_warm_state');
+            await database.delete('sync_state');
+          }
+          if (oldVersion < 5) {
+            await database.execute(
+              'ALTER TABLE sync_state ADD COLUMN event_cursor INTEGER NOT NULL DEFAULT 0',
+            );
           }
         },
       ),
@@ -134,6 +153,26 @@ class _ClientCacheStore {
     )
   ''');
 
+  static Future<void> _createCatalogEntitiesTable(
+    DatabaseExecutor database,
+  ) async {
+    await database.execute('''
+      CREATE TABLE IF NOT EXISTS catalog_entities (
+        core_url TEXT NOT NULL,
+        server_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        entity_id INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (core_url, kind, entity_id)
+      )
+    ''');
+    await database.execute('''
+      CREATE INDEX IF NOT EXISTS idx_catalog_entities_core_kind
+      ON catalog_entities(core_url, kind)
+    ''');
+  }
+
   static Future<_ClientCacheSnapshot> load(String coreUrl) async {
     try {
       final normalized = _normalizedCoreUrl(coreUrl);
@@ -147,13 +186,26 @@ class _ClientCacheStore {
       final serverId = stateRows.firstOrNull?['server_id']?.toString();
       final catalogEpoch = stateRows.firstOrNull?['catalog_epoch']?.toString();
       final cursor = _intValue(stateRows.firstOrNull?['cursor']) ?? 0;
+      final eventCursor =
+          _intValue(stateRows.firstOrNull?['event_cursor']) ?? 0;
       final rows = await database.query(
         'cache_entries',
         columns: <String>['kind', 'entity_key', 'payload'],
         where: 'core_url = ?',
         whereArgs: <Object?>[normalized],
       );
-      final decoded = await Isolate.run(() => _decodeRows(rows));
+      final catalogRows = await database.query(
+        'catalog_entities',
+        columns: <String>['kind', 'entity_id', 'payload'],
+        where: 'core_url = ?',
+        whereArgs: <Object?>[normalized],
+        orderBy: 'kind, entity_id',
+      );
+      final decoded = await Isolate.run(() {
+        final result = _decodeRows(rows);
+        _decodeCatalogRows(catalogRows, result.values);
+        return result;
+      });
       final values = decoded.values;
       final trackDetails = decoded.trackDetails;
       final albumDetails = decoded.albumDetails;
@@ -179,6 +231,7 @@ class _ClientCacheStore {
         serverId: serverId,
         catalogEpoch: catalogEpoch,
         cursor: cursor,
+        eventCursor: eventCursor,
         values: values,
         trackDetails: trackDetails,
         albumDetails: albumDetails,
@@ -192,6 +245,7 @@ class _ClientCacheStore {
         serverId: null,
         catalogEpoch: null,
         cursor: 0,
+        eventCursor: 0,
         values: <String, dynamic>{},
         trackDetails: <int, Map<String, dynamic>>{},
         albumDetails: <int, Map<String, dynamic>>{},
@@ -245,6 +299,31 @@ class _ClientCacheStore {
     );
   }
 
+  static void _decodeCatalogRows(
+    List<Map<String, Object?>> rows,
+    Map<String, dynamic> values,
+  ) {
+    if (rows.isEmpty) return;
+    for (final key in const <String>[
+      'albums',
+      'artists',
+      'tracks',
+      'playlists',
+    ]) {
+      values[key] = <dynamic>[];
+    }
+    for (final row in rows) {
+      final overviewKey = _overviewKeyForCatalogKind(
+        row['kind']?.toString() ?? '',
+      );
+      final payload = _decodeCachePayload(row['payload']);
+      if (overviewKey == null || payload is! Map) continue;
+      (values[overviewKey] as List<dynamic>).add(
+        payload.cast<String, dynamic>(),
+      );
+    }
+  }
+
   static Future<void> replaceSnapshot(
     String coreUrl,
     Map<String, dynamic> snapshot,
@@ -253,11 +332,13 @@ class _ClientCacheStore {
     final serverId = snapshot['server_id']?.toString() ?? '';
     final catalogEpoch = snapshot['catalog_epoch']?.toString() ?? '';
     final cursor = _intValue(snapshot['cursor']) ?? 0;
-    final values = <String, dynamic>{
+    final catalogValues = <String, List<dynamic>>{
       'albums': (snapshot['albums'] as List?) ?? const <dynamic>[],
       'artists': (snapshot['artists'] as List?) ?? const <dynamic>[],
       'tracks': (snapshot['tracks'] as List?) ?? const <dynamic>[],
       'playlists': (snapshot['playlists'] as List?) ?? const <dynamic>[],
+    };
+    final values = <String, dynamic>{
       'playback_history':
           (snapshot['playback_history'] as List?) ?? const <dynamic>[],
       'playback_stats': _asMap(snapshot['playback_stats']),
@@ -278,16 +359,26 @@ class _ClientCacheStore {
       await database.transaction((transaction) async {
         final previous = await transaction.query(
           'sync_state',
-          columns: <String>['server_id', 'catalog_epoch'],
+          columns: <String>['server_id', 'catalog_epoch', 'event_cursor'],
           where: 'core_url = ?',
           whereArgs: <Object?>[normalized],
           limit: 1,
         );
-        if (previous.isNotEmpty &&
-            (previous.first['server_id']?.toString() != serverId ||
-                previous.first['catalog_epoch']?.toString() != catalogEpoch)) {
+        final sameIdentity =
+            previous.isNotEmpty &&
+            previous.first['server_id']?.toString() == serverId &&
+            previous.first['catalog_epoch']?.toString() == catalogEpoch;
+        final eventCursor = sameIdentity
+            ? _intValue(previous.first['event_cursor']) ?? 0
+            : 0;
+        if (previous.isNotEmpty && !sameIdentity) {
           await transaction.delete(
             'cache_entries',
+            where: 'core_url = ?',
+            whereArgs: <Object?>[normalized],
+          );
+          await transaction.delete(
+            'catalog_entities',
             where: 'core_url = ?',
             whereArgs: <Object?>[normalized],
           );
@@ -304,22 +395,22 @@ class _ClientCacheStore {
         } else {
           final validIds = <String, Set<String>>{
             'track_detail': {
-              for (final value in values['tracks'] as List<dynamic>)
+              for (final value in catalogValues['tracks']!)
                 if (value is Map && _intValue(value['id']) != null)
                   _intValue(value['id'])!.toString(),
             },
             'album_detail': {
-              for (final value in values['albums'] as List<dynamic>)
+              for (final value in catalogValues['albums']!)
                 if (value is Map && _intValue(value['id']) != null)
                   _intValue(value['id'])!.toString(),
             },
             'artist_detail': {
-              for (final value in values['artists'] as List<dynamic>)
+              for (final value in catalogValues['artists']!)
                 if (value is Map && _intValue(value['id']) != null)
                   _intValue(value['id'])!.toString(),
             },
             'playlist_detail': {
-              for (final value in values['playlists'] as List<dynamic>)
+              for (final value in catalogValues['playlists']!)
                 if (value is Map && _intValue(value['id']) != null)
                   _intValue(value['id'])!.toString(),
             },
@@ -346,6 +437,24 @@ class _ClientCacheStore {
         }
         final now = DateTime.now().millisecondsSinceEpoch;
         final batch = transaction.batch();
+        batch.delete(
+          'catalog_entities',
+          where: 'core_url = ?',
+          whereArgs: <Object?>[normalized],
+        );
+        for (final entry in catalogValues.entries) {
+          final kind = _catalogKindForOverviewKey(entry.key)!;
+          for (final value in entry.value) {
+            _addCatalogEntityInsert(
+              batch,
+              normalized,
+              serverId,
+              kind,
+              value,
+              now,
+            );
+          }
+        }
         for (final entry in values.entries) {
           batch.insert('cache_entries', <String, Object?>{
             'core_url': normalized,
@@ -361,6 +470,7 @@ class _ClientCacheStore {
           'server_id': serverId,
           'catalog_epoch': catalogEpoch,
           'cursor': cursor,
+          'event_cursor': eventCursor,
           'last_sync_at': now,
           'last_error': null,
         }, conflictAlgorithm: ConflictAlgorithm.replace);
@@ -369,20 +479,66 @@ class _ClientCacheStore {
           where: 'core_url = ?',
           whereArgs: <Object?>[normalized],
         );
-        for (final track in values['tracks'] as List<dynamic>) {
+        for (final track in catalogValues['tracks']!) {
           _addSearchInsert(batch, normalized, 'track', track);
         }
-        for (final album in values['albums'] as List<dynamic>) {
+        for (final album in catalogValues['albums']!) {
           _addSearchInsert(batch, normalized, 'album', album);
         }
-        for (final artist in values['artists'] as List<dynamic>) {
+        for (final artist in catalogValues['artists']!) {
           _addSearchInsert(batch, normalized, 'artist', artist);
         }
-        for (final playlist in values['playlists'] as List<dynamic>) {
+        for (final playlist in catalogValues['playlists']!) {
           _addSearchInsert(batch, normalized, 'playlist', playlist);
         }
         await batch.commit(noResult: true);
       });
+    });
+    return _writeQueue;
+  }
+
+  static Future<void> updateEventCursor(
+    String coreUrl,
+    String serverId,
+    String? catalogEpoch,
+    int eventCursor,
+  ) {
+    if (serverId.isEmpty || eventCursor <= 0) return Future<void>.value();
+    final normalized = _normalizedCoreUrl(coreUrl);
+    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
+      final database = await _open();
+      await database.rawInsert(
+        '''
+        INSERT INTO sync_state (
+          core_url, server_id, catalog_epoch, cursor, event_cursor, last_sync_at
+        ) VALUES (?, ?, ?, 0, ?, ?)
+        ON CONFLICT(core_url) DO UPDATE SET
+          server_id = excluded.server_id,
+          catalog_epoch = excluded.catalog_epoch,
+          cursor = CASE
+            WHEN sync_state.server_id = excluded.server_id
+              AND COALESCE(sync_state.catalog_epoch, '') =
+                  COALESCE(excluded.catalog_epoch, '')
+              THEN sync_state.cursor
+            ELSE 0
+          END,
+          event_cursor = CASE
+            WHEN sync_state.server_id = excluded.server_id
+              AND COALESCE(sync_state.catalog_epoch, '') =
+                  COALESCE(excluded.catalog_epoch, '')
+              THEN MAX(sync_state.event_cursor, excluded.event_cursor)
+            ELSE excluded.event_cursor
+          END,
+          last_sync_at = excluded.last_sync_at
+        ''',
+        <Object?>[
+          normalized,
+          serverId,
+          catalogEpoch,
+          eventCursor,
+          DateTime.now().millisecondsSinceEpoch,
+        ],
+      );
     });
     return _writeQueue;
   }
@@ -394,6 +550,7 @@ class _ClientCacheStore {
       await database.transaction((transaction) async {
         for (final table in const <String>[
           'cache_entries',
+          'catalog_entities',
           'search_index',
           'detail_warm_state',
           'sync_state',
@@ -435,6 +592,44 @@ class _ClientCacheStore {
       'subtitle': subtitle,
       'terms': '$title $subtitle'.toLowerCase(),
       'payload': jsonEncode(item),
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static String? _catalogKindForOverviewKey(String key) => switch (key) {
+    'albums' => 'album',
+    'artists' => 'artist',
+    'tracks' => 'track',
+    'playlists' => 'playlist',
+    _ => null,
+  };
+
+  static String? _overviewKeyForCatalogKind(String kind) => switch (kind) {
+    'album' => 'albums',
+    'artist' => 'artists',
+    'track' => 'tracks',
+    'playlist' => 'playlists',
+    _ => null,
+  };
+
+  static void _addCatalogEntityInsert(
+    Batch batch,
+    String coreUrl,
+    String serverId,
+    String kind,
+    dynamic value,
+    int updatedAt,
+  ) {
+    if (value is! Map) return;
+    final entity = value.cast<String, dynamic>();
+    final id = _intValue(entity['id']);
+    if (id == null) return;
+    batch.insert('catalog_entities', <String, Object?>{
+      'core_url': coreUrl,
+      'server_id': serverId,
+      'kind': kind,
+      'entity_id': id,
+      'payload': jsonEncode(entity),
+      'updated_at': updatedAt,
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
@@ -486,19 +681,46 @@ class _ClientCacheStore {
     final normalized = _normalizedCoreUrl(coreUrl);
     _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
       final database = await _open();
-      final batch = database.batch();
-      final now = DateTime.now().millisecondsSinceEpoch;
-      for (final entry in values.entries) {
-        batch.insert('cache_entries', <String, Object?>{
-          'core_url': normalized,
-          'server_id': serverId,
-          'kind': 'overview',
-          'entity_key': entry.key,
-          'payload': jsonEncode(entry.value),
-          'updated_at': now,
-        }, conflictAlgorithm: ConflictAlgorithm.replace);
-      }
-      await batch.commit(noResult: true);
+      await database.transaction((transaction) async {
+        final batch = transaction.batch();
+        final now = DateTime.now().millisecondsSinceEpoch;
+        for (final entry in values.entries) {
+          final catalogKind = _catalogKindForOverviewKey(entry.key);
+          if (catalogKind == null) {
+            batch.insert('cache_entries', <String, Object?>{
+              'core_url': normalized,
+              'server_id': serverId,
+              'kind': 'overview',
+              'entity_key': entry.key,
+              'payload': jsonEncode(entry.value),
+              'updated_at': now,
+            }, conflictAlgorithm: ConflictAlgorithm.replace);
+            continue;
+          }
+          batch.delete(
+            'catalog_entities',
+            where: 'core_url = ? AND kind = ?',
+            whereArgs: <Object?>[normalized, catalogKind],
+          );
+          batch.delete(
+            'search_index',
+            where: 'core_url = ? AND kind = ?',
+            whereArgs: <Object?>[normalized, catalogKind],
+          );
+          for (final value in (entry.value as List?) ?? const <dynamic>[]) {
+            _addCatalogEntityInsert(
+              batch,
+              normalized,
+              serverId,
+              catalogKind,
+              value,
+              now,
+            );
+            _addSearchInsert(batch, normalized, catalogKind, value);
+          }
+        }
+        await batch.commit(noResult: true);
+      });
     });
     return _writeQueue;
   }

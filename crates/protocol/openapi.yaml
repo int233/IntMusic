@@ -608,6 +608,24 @@ paths:
       responses:
         "200":
           description: Playback events.
+  /playback-v3/zones/{zone_id}/session:
+    get:
+      summary: Return the durable v3 playback session snapshot for one output.
+      responses:
+        "200":
+          description: Playback session snapshot with epoch and revision.
+  /playback-v3/zones/{zone_id}/commands:
+    post:
+      summary: Apply one idempotent revision-checked playback command.
+      responses:
+        "200":
+          description: Applied, duplicate, rejected, or conflict ACK.
+  /playback-v3/zones/{zone_id}/resume:
+    post:
+      summary: Resume a playback session from an event cursor and known revision.
+      responses:
+        "200":
+          description: Authoritative snapshot and any retained session events.
   /playback/sessions:
     get:
       summary: List completed and active listening sessions.
