@@ -86,7 +86,12 @@ extension _DashboardArtworkCache on _CoreDashboardState {
           }
         }
 
-        await Future.wait(List<Future<void>>.generate(4, (_) => worker()));
+        await Future.wait(
+          List<Future<void>>.generate(
+            Platform.isAndroid ? 1 : 4,
+            (_) => worker(),
+          ),
+        );
       } while (_artworkWarmupRequested && !_localPlaybackFallbackActive);
     } finally {
       _artworkWarmupBusy = false;

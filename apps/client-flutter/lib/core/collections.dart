@@ -38,6 +38,7 @@ class CollectionStore extends ChangeNotifier {
   int _generation = 0;
   int _mutation = 0;
   bool _disposed = false;
+  bool _backgrounded = false;
   bool supported = false, online = false, loading = false;
   String? error;
   List<JsonMap> items = [];
@@ -139,8 +140,17 @@ class CollectionStore extends ChangeNotifier {
     await refresh();
   }
 
+  /// Pause catalog work while the screen is hidden; renderer tasks are separate.
+  void setBackgrounded(bool value) {
+    if (_disposed || value == _backgrounded) return;
+    _backgrounded = value;
+    if (!value) unawaited(refresh());
+  }
+
   Future<void> refresh() {
-    if (_disposed || !supported || _api == null) return Future.value();
+    if (_disposed || _backgrounded || !supported || _api == null) {
+      return Future.value();
+    }
     if (_refresh != null) {
       _refreshAgain = true;
       return _refresh!;
@@ -151,7 +161,7 @@ class CollectionStore extends ChangeNotifier {
           do {
             _refreshAgain = false;
             await _refreshData(generation);
-          } while (_current(generation) && _refreshAgain);
+          } while (_current(generation) && !_backgrounded && _refreshAgain);
         })().whenComplete(() {
           if (_current(generation)) _refresh = null;
         });

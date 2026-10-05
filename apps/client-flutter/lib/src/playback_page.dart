@@ -330,6 +330,10 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
   }
 
   void _goTo(int page) {
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _controller.jumpToPage(page.clamp(0, 1));
+      return;
+    }
     _controller.animateToPage(
       page.clamp(0, 1),
       duration: const Duration(milliseconds: 240),
@@ -373,39 +377,42 @@ class _CompactPlaybackPagerState extends State<_CompactPlaybackPager> {
           onToggleFavorite: widget.onToggleFavorite,
           onOpenTrack: widget.onOpenTrack,
         ),
-        _CompactLyricsPane(
-          coreBaseUrl: widget.coreBaseUrl,
-          playback: widget.playback,
-          track: widget.track,
-          trackId: widget.trackId,
-          title: widget.title,
-          artist: widget.artist,
-          album: widget.album,
-          state: widget.state,
-          isPaused: widget.isPaused,
-          activeZoneId: widget.activeZoneId,
-          durationMs: widget.durationMs,
-          lyricsText: widget.lyricsText,
-          lyricsTranslation: widget.lyricsTranslation,
-          lyricsPronunciation: widget.lyricsPronunciation,
-          lyricsOffsetMs: widget.lyricsOffsetMs,
-          playbackMode: widget.playbackMode,
-          volumeState: widget.volumeState,
-          page: _page,
-          onGoToPage: _goTo,
-          onResume: widget.onResume,
-          onPause: widget.onPause,
-          onPrevious: widget.onPrevious,
-          onNext: widget.onNext,
-          onSeek: widget.onSeek,
-          onCycleMode: widget.onCycleMode,
-          onShowModeMenu: widget.onShowModeMenu,
-          onShowQueue: widget.onShowQueue,
-          onShowDevices: widget.onShowDevices,
-          onVolumeChanged: widget.onVolumeChanged,
-          onToggleMute: widget.onToggleMute,
-          onToggleFavorite: widget.onToggleFavorite,
-          onOpenTrack: widget.onOpenTrack,
+        TickerMode(
+          enabled: _page == 1,
+          child: _CompactLyricsPane(
+            coreBaseUrl: widget.coreBaseUrl,
+            playback: widget.playback,
+            track: widget.track,
+            trackId: widget.trackId,
+            title: widget.title,
+            artist: widget.artist,
+            album: widget.album,
+            state: widget.state,
+            isPaused: widget.isPaused,
+            activeZoneId: widget.activeZoneId,
+            durationMs: widget.durationMs,
+            lyricsText: widget.lyricsText,
+            lyricsTranslation: widget.lyricsTranslation,
+            lyricsPronunciation: widget.lyricsPronunciation,
+            lyricsOffsetMs: widget.lyricsOffsetMs,
+            playbackMode: widget.playbackMode,
+            volumeState: widget.volumeState,
+            page: _page,
+            onGoToPage: _goTo,
+            onResume: widget.onResume,
+            onPause: widget.onPause,
+            onPrevious: widget.onPrevious,
+            onNext: widget.onNext,
+            onSeek: widget.onSeek,
+            onCycleMode: widget.onCycleMode,
+            onShowModeMenu: widget.onShowModeMenu,
+            onShowQueue: widget.onShowQueue,
+            onShowDevices: widget.onShowDevices,
+            onVolumeChanged: widget.onVolumeChanged,
+            onToggleMute: widget.onToggleMute,
+            onToggleFavorite: widget.onToggleFavorite,
+            onOpenTrack: widget.onOpenTrack,
+          ),
         ),
       ],
     );
@@ -477,12 +484,18 @@ class _CompactPlayerPane extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
+        final minimumHeight = 390.0 + max(0.0, textScale - 1) * 180;
+        final contentHeight = max(constraints.maxHeight, minimumHeight);
         final artworkSize = min(
-          min(constraints.maxWidth - 72, constraints.maxHeight * 0.48),
-          360.0,
-        ).clamp(180.0, 360.0);
+          min(
+            constraints.maxWidth - 48,
+            max(80.0, contentHeight - 310 - max(0.0, textScale - 1) * 180),
+          ),
+          300.0,
+        );
         final content = Padding(
-          padding: const EdgeInsets.fromLTRB(24, 18, 24, 20),
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
           child: Column(
             children: [
               Align(
@@ -542,9 +555,9 @@ class _CompactPlayerPane extends StatelessWidget {
             ],
           ),
         );
-        if (constraints.maxHeight < 560) {
+        if (constraints.maxHeight < minimumHeight) {
           return SingleChildScrollView(
-            child: SizedBox(height: 560, child: content),
+            child: SizedBox(height: minimumHeight, child: content),
           );
         }
         return content;

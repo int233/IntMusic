@@ -23,6 +23,7 @@ pub(crate) async fn handle_ws(socket: WebSocket, state: AppState, renderer_id: O
         return;
     }
 
+    let mut presence_updated_at: Option<tokio::time::Instant> = None;
     loop {
         tokio::select! {
             biased;
@@ -35,6 +36,19 @@ pub(crate) async fn handle_ws(socket: WebSocket, state: AppState, renderer_id: O
                         if message.get("type").and_then(|value| value.as_str())
                             == Some("client.ping")
                         {
+                            // The event channel is also proof that the device is alive.
+                            // Throttle database writes; failed writes retry on the next ping.
+                            if presence_updated_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(10)) {
+                                if let Some(id) = renderer_id.as_deref() {
+                                    if state.inner.renderers.heartbeat(id).await {
+                                        match tokio::time::timeout(Duration::from_secs(2), core_db::renew_device_presence(state.pool(), id)).await {
+                                            Ok(Ok(())) => presence_updated_at = Some(tokio::time::Instant::now()),
+                                            Ok(Err(error)) => warn!(%error, renderer_id = id, "could not renew device presence"),
+                                            Err(_) => warn!(renderer_id = id, "device presence renewal timed out"),
+                                        }
+                                    }
+                                }
+                            }
                             let event = EventEnvelope::new(
                                 "connection.pong",
                                 json!({

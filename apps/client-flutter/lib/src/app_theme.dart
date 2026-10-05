@@ -14,6 +14,12 @@ const appPrimary = Color(0xffff5c78);
 const appSecondary = Color(0xffffc15c);
 const appPlaying = Color(0xff56d6a0);
 
+/// Small Android screens use opaque surfaces and avoid compositing effects.
+/// Logical size follows the device's display scaling, including landscape.
+bool useCompactAndroidRendering(BuildContext context) =>
+    Theme.of(context).platform == TargetPlatform.android &&
+    (MediaQuery.maybeSizeOf(context)?.shortestSide ?? double.infinity) <= 400;
+
 @immutable
 class IntMusicTheme extends ThemeExtension<IntMusicTheme> {
   const IntMusicTheme({
@@ -196,6 +202,7 @@ ThemeData buildIntMusicTheme({
       );
 
   return ThemeData(
+    platform: targetPlatform,
     colorScheme: scheme,
     brightness: brightness,
     scaffoldBackgroundColor: Colors.transparent,
@@ -354,7 +361,8 @@ class IntMusicBackdrop extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          if (!usesNativeWindowMaterial) ...[
+          if (!usesNativeWindowMaterial &&
+              !useCompactAndroidRendering(context)) ...[
             IgnorePointer(
               child: DecoratedBox(
                 decoration: BoxDecoration(
@@ -419,30 +427,37 @@ class IntMusicGlass extends StatelessWidget {
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
     final radius = borderRadius ?? BorderRadius.circular(tokens.radiusLarge);
+    final lightweight = useCompactAndroidRendering(context);
+    final surface = DecoratedBox(
+      decoration: BoxDecoration(
+        color: lightweight
+            ? (tint ?? tokens.surface).withAlpha(255)
+            : tint ?? tokens.surfaceGlass,
+        border: border ?? Border.all(color: tokens.stroke),
+        borderRadius: radius,
+      ),
+      child: Padding(padding: padding ?? EdgeInsets.zero, child: child),
+    );
     return DecoratedBox(
       decoration: BoxDecoration(
         borderRadius: radius,
-        boxShadow:
-            shadows ??
-            const [BoxShadow(color: Color(0x30000000), blurRadius: 28)],
+        boxShadow: lightweight
+            ? const []
+            : shadows ??
+                  const [BoxShadow(color: Color(0x30000000), blurRadius: 28)],
       ),
       child: ClipRRect(
         borderRadius: radius,
         clipBehavior: clipBehavior,
-        child: BackdropFilter(
-          filter: ImageFilter.blur(
-            sigmaX: blur ?? tokens.glassBlur,
-            sigmaY: blur ?? tokens.glassBlur,
-          ),
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: tint ?? tokens.surfaceGlass,
-              border: border ?? Border.all(color: tokens.stroke),
-              borderRadius: radius,
-            ),
-            child: Padding(padding: padding ?? EdgeInsets.zero, child: child),
-          ),
-        ),
+        child: lightweight
+            ? surface
+            : BackdropFilter(
+                filter: ImageFilter.blur(
+                  sigmaX: blur ?? tokens.glassBlur,
+                  sigmaY: blur ?? tokens.glassBlur,
+                ),
+                child: surface,
+              ),
       ),
     );
   }

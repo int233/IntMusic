@@ -228,3 +228,47 @@ Widget collectionHomeForTesting(CollectionStore store) => _HomePage(
   onOpenTrack: (_) async {},
   onPlayTrack: (_) async {},
 );
+
+@visibleForTesting
+Widget compactPlaybackForTesting({Map<String, dynamic>? playback}) =>
+    _PlaybackPage(
+      coreBaseUrl: '',
+      playback:
+          playback ?? {'state': 'paused', 'track_id': 1, 'position_ms': 0},
+      trackDetail: {
+        'track': {
+          'id': 1,
+          'title': '只想一生跟你走（现场特别版本）',
+          'artist_display': '张学友',
+          'album_title': '完整专辑名称',
+          'duration_ms': 180000,
+        },
+        'lyrics': {'text': '[00:00.00]第一行歌词\n[00:10.00]第二行歌词'},
+      },
+      activeZoneId: 'test',
+      playbackMode: _PlaybackMode.sequential,
+      volumeState: const _DualVolumeState(
+        playerVolume: 1,
+        playerMuted: false,
+        systemVolume: 1,
+        systemMuted: false,
+        systemVolumeSupported: true,
+      ),
+      onResume: (_) async {},
+      onPause: (_) async {},
+      onPrevious: () async {},
+      onNext: () async {},
+      onSeek: (_) async {},
+      onCycleMode: () {},
+      onShowModeMenu: (_) {},
+      onShowQueue: (_) {},
+      onShowDevices: (_) {},
+      onVolumeChanged: (_, _) {},
+      onToggleMute: (_) {},
+      onToggleFavorite: (_) async {},
+      onOpenTrack: (_) async {},
+    );
+
+@visibleForTesting
+Object parsedLyricsForTesting(String text, {int offset = 0}) =>
+    _parseLyricLines(text, offsetMs: offset);

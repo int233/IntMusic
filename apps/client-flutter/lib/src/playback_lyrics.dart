@@ -27,13 +27,51 @@ class _LyricsPanel extends StatefulWidget {
   State<_LyricsPanel> createState() => _LyricsPanelState();
 }
 
-class _LyricsPanelState extends State<_LyricsPanel> {
+class _LyricsPanelState extends State<_LyricsPanel>
+    with WidgetsBindingObserver {
+  bool _visible = true;
+  bool _foreground = true;
+  (int, int)? _frame;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _foreground =
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
     _syncTimer();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _visible = TickerMode.valuesOf(context).enabled;
+    _syncTimer();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    _syncTimer();
+    if (_foreground && mounted) setState(() {});
+  }
+
+  (int, int) _currentFrame(int position) {
+    final lines = _parseLyricLines(
+      widget.lyricsText,
+      translationText: widget.translationText,
+      pronunciationText: widget.pronunciationText,
+      offsetMs: widget.offsetMs,
+    );
+    final index = _currentLyricIndex(lines, position);
+    return (
+      index,
+      index < 0
+          ? 0
+          : lines[index].segments.where((s) => position >= s.startMs).length,
+    );
   }
 
   @override
@@ -44,6 +82,7 @@ class _LyricsPanelState extends State<_LyricsPanel> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     super.dispose();
   }
@@ -56,6 +95,8 @@ class _LyricsPanelState extends State<_LyricsPanel> {
       offsetMs: widget.offsetMs,
     ).any((line) => line.timeMs != null);
     final shouldTick =
+        _visible &&
+        _foreground &&
         hasTimedLyrics &&
         widget.playback?['state']?.toString() == 'playing' &&
         _intValue(widget.playback?['track_id']) != null;
@@ -65,9 +106,10 @@ class _LyricsPanelState extends State<_LyricsPanel> {
       return;
     }
     _timer ??= Timer.periodic(const Duration(milliseconds: 250), (_) {
-      if (mounted) {
-        setState(() {});
-      }
+      final frame = _currentFrame(
+        _estimatedPlaybackPositionMs(widget.playback, widget.durationMs),
+      );
+      if (mounted && frame != _frame) setState(() => _frame = frame);
     });
   }
 
@@ -78,6 +120,7 @@ class _LyricsPanelState extends State<_LyricsPanel> {
       widget.durationMs,
     );
 
+    _frame = _currentFrame(positionMs);
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border.all(color: IntMusicTheme.of(context).stroke),
@@ -99,7 +142,9 @@ class _LyricsPanelState extends State<_LyricsPanel> {
           ],
           Expanded(
             child: ExcludeSemantics(
-              child: ShaderMask(
+              child: _LyricFade(
+                enabled:
+                    widget.glassFade && !useCompactAndroidRendering(context),
                 shaderCallback: (rect) {
                   if (!widget.glassFade) {
                     return const LinearGradient(
@@ -134,6 +179,27 @@ class _LyricsPanelState extends State<_LyricsPanel> {
       ),
     );
   }
+}
+
+class _LyricFade extends StatelessWidget {
+  const _LyricFade({
+    required this.enabled,
+    required this.shaderCallback,
+    required this.blendMode,
+    required this.child,
+  });
+  final bool enabled;
+  final ShaderCallback shaderCallback;
+  final BlendMode blendMode;
+  final Widget child;
+  @override
+  Widget build(BuildContext context) => enabled
+      ? ShaderMask(
+          shaderCallback: shaderCallback,
+          blendMode: blendMode,
+          child: child,
+        )
+      : child;
 }
 
 class _LyricsView extends StatefulWidget {
@@ -399,7 +465,36 @@ class _LyricSegment {
   final String text;
 }
 
+final _lyricParseCache = <(String, String, String, int), List<_LyricLine>>{};
+
 List<_LyricLine> _parseLyricLines(
+  String text, {
+  String translationText = '',
+  String pronunciationText = '',
+  int offsetMs = 0,
+}) {
+  final key = (text, translationText, pronunciationText, offsetMs);
+  final cached = _lyricParseCache.remove(key);
+  if (cached != null) {
+    _lyricParseCache[key] = cached;
+    return cached;
+  }
+  final lines = List<_LyricLine>.unmodifiable(
+    _decodeLyricLines(
+      text,
+      translationText: translationText,
+      pronunciationText: pronunciationText,
+      offsetMs: offsetMs,
+    ),
+  );
+  if (_lyricParseCache.length >= 4) {
+    _lyricParseCache.remove(_lyricParseCache.keys.first);
+  }
+  _lyricParseCache[key] = lines;
+  return lines;
+}
+
+List<_LyricLine> _decodeLyricLines(
   String text, {
   String translationText = '',
   String pronunciationText = '',

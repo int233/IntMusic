@@ -22,6 +22,7 @@ import 'package:sqflite/sqflite.dart' as mobile_sqlite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/navigation_history.dart';
+import 'core/connection_watchdog.dart';
 import 'core/artwork_cache_coordinator.dart';
 import 'core/json_values.dart';
 import 'core/library_sync.dart';
@@ -175,7 +176,14 @@ class IntMusicClientApp extends StatelessWidget {
         if (child == null) {
           return const SizedBox.shrink();
         }
-        return _WindowsA11yQuiet(child: child);
+        final media = MediaQuery.of(context);
+        return MediaQuery(
+          data: media.copyWith(
+            disableAnimations:
+                media.disableAnimations || useCompactAndroidRendering(context),
+          ),
+          child: _WindowsA11yQuiet(child: child),
+        );
       },
     );
   }
@@ -226,7 +234,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   Timer? _searchDebounce;
   WebSocket? _eventSocket;
   String? _eventSocketBaseUrl;
-  DateTime? _eventLastPongAt;
+  final _connectionClock = Stopwatch()..start();
+  ConnectionWatchdog? _connectionWatchdog;
   int _eventPingSequence = 0;
   int _eventConnectionGeneration = 0;
   bool _eventRestartBusy = false;
@@ -420,11 +429,9 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    _taskScheduler.setBackgrounded(
-      state == AppLifecycleState.inactive ||
-          state == AppLifecycleState.hidden ||
-          state == AppLifecycleState.paused,
-    );
+    final backgrounded = state != AppLifecycleState.resumed;
+    _taskScheduler.setBackgrounded(backgrounded);
+    _collections.setBackgrounded(backgrounded);
     if (state == AppLifecycleState.detached) {
       unawaited(_reportRendererShutdown());
     }

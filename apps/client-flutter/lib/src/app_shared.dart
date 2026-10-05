@@ -67,13 +67,15 @@ class _ArtworkTile extends StatelessWidget {
             end: Alignment.bottomRight,
             colors: [base, accent],
           ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.28),
-              blurRadius: size >= 120 ? 22 : 10,
-              offset: const Offset(0, 8),
-            ),
-          ],
+          boxShadow: useCompactAndroidRendering(context)
+              ? const []
+              : [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.28),
+                    blurRadius: size >= 120 ? 22 : 10,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(radius),
@@ -93,8 +95,11 @@ class _ArtworkTile extends StatelessWidget {
                       imageUrl: url,
                       fit: BoxFit.cover,
                       memCacheWidth: imageCacheExtent,
+                      memCacheHeight: imageCacheExtent,
                       filterQuality: FilterQuality.low,
-                      fadeInDuration: const Duration(milliseconds: 80),
+                      fadeInDuration: useCompactAndroidRendering(context)
+                          ? Duration.zero
+                          : const Duration(milliseconds: 80),
                       fadeOutDuration: Duration.zero,
                       useOldImageOnUrlChange: true,
                       placeholder: (context, url) => fallback,

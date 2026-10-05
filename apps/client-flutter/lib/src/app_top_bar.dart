@@ -42,8 +42,11 @@ class _AppTopBar extends StatelessWidget {
         ? Duration.zero
         : const Duration(milliseconds: 240);
     return Container(
-      height: 66,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      height: useCompactAndroidRendering(context) ? 56 : 66,
+      padding: EdgeInsets.symmetric(
+        horizontal: 8,
+        vertical: useCompactAndroidRendering(context) ? 4 : 10,
+      ),
       decoration: BoxDecoration(
         color: IntMusicTheme.of(context).canvas.withValues(alpha: 0.42),
         border: Platform.isMacOS
@@ -65,14 +68,15 @@ class _AppTopBar extends StatelessWidget {
                     icon: const Icon(Icons.chevron_left),
                   ),
                 ),
-                _AppTooltip(
-                  message: _tr(context, 'Forward'),
-                  child: IconButton(
-                    key: const Key('navigation-forward'),
-                    onPressed: canGoForward ? onForward : null,
-                    icon: const Icon(Icons.chevron_right),
+                if (canGoForward)
+                  _AppTooltip(
+                    message: _tr(context, 'Forward'),
+                    child: IconButton(
+                      key: const Key('navigation-forward'),
+                      onPressed: canGoForward ? onForward : null,
+                      icon: const Icon(Icons.chevron_right),
+                    ),
                   ),
-                ),
                 const SizedBox(width: 2),
                 Expanded(
                   child: AnimatedSwitcher(

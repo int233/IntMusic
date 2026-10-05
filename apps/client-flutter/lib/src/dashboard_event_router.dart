@@ -20,7 +20,7 @@ extension _DashboardEventRouter on _CoreDashboardState {
 
       try {
         if (eventType == 'connection.pong') {
-          _eventLastPongAt = DateTime.now();
+          _connectionWatchdog?.pong(_connectionClock.elapsed);
           _eventReconnectFailures = 0;
           return;
         }

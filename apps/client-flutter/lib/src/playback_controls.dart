@@ -71,69 +71,79 @@ class _CompactLyricsPane extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 20),
-      child: Column(
-        children: [
-          _PlaybackTrackHeader(
-            coreBaseUrl: coreBaseUrl,
-            track: track,
-            trackId: trackId,
-            title: title,
-            artist: artist,
-            album: album,
-            compact: true,
-            leadingSize: 54,
-            onToggleFavorite: onToggleFavorite,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final minimumHeight =
+            420.0 + (MediaQuery.textScalerOf(context).scale(16) - 16) * 6;
+        final content = Padding(
+          padding: const EdgeInsets.fromLTRB(18, 14, 18, 20),
+          child: Column(
+            children: [
+              _PlaybackTrackHeader(
+                coreBaseUrl: coreBaseUrl,
+                track: track,
+                trackId: trackId,
+                title: title,
+                artist: artist,
+                album: album,
+                compact: true,
+                leadingSize: 54,
+                onToggleFavorite: onToggleFavorite,
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: _LyricsPanel(
+                  lyricsText: lyricsText,
+                  translationText: lyricsTranslation,
+                  pronunciationText: lyricsPronunciation,
+                  offsetMs: lyricsOffsetMs,
+                  playback: playback,
+                  durationMs: durationMs,
+                  onSeek: onSeek,
+                  showHeader: false,
+                  glassFade: true,
+                ),
+              ),
+              const SizedBox(height: 10),
+              _PlaybackProgressControl(
+                playback: playback,
+                durationMs: durationMs,
+                onSeek: onSeek,
+                dense: true,
+              ),
+              _PlaybackButtonRow(
+                hasTrack: trackId != null,
+                isPaused: isPaused,
+                state: state,
+                activeZoneId: activeZoneId,
+                playbackMode: playbackMode,
+                onResume: onResume,
+                onPause: onPause,
+                onPrevious: onPrevious,
+                onNext: onNext,
+                onCycleMode: onCycleMode,
+                onShowModeMenu: onShowModeMenu,
+                onShowQueue: onShowQueue,
+              ),
+              _CompactPlaybackExtensions(
+                page: page,
+                volumeState: volumeState,
+                onGoToPage: onGoToPage,
+                onShowDevices: onShowDevices,
+                onOpenTrack: trackId == null
+                    ? null
+                    : () => unawaited(onOpenTrack(trackId!)),
+                onVolumeChanged: onVolumeChanged,
+                onToggleMute: onToggleMute,
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
-          Expanded(
-            child: _LyricsPanel(
-              lyricsText: lyricsText,
-              translationText: lyricsTranslation,
-              pronunciationText: lyricsPronunciation,
-              offsetMs: lyricsOffsetMs,
-              playback: playback,
-              durationMs: durationMs,
-              onSeek: onSeek,
-              showHeader: false,
-              glassFade: true,
-            ),
-          ),
-          const SizedBox(height: 10),
-          _PlaybackProgressControl(
-            playback: playback,
-            durationMs: durationMs,
-            onSeek: onSeek,
-            dense: true,
-          ),
-          _PlaybackButtonRow(
-            hasTrack: trackId != null,
-            isPaused: isPaused,
-            state: state,
-            activeZoneId: activeZoneId,
-            playbackMode: playbackMode,
-            onResume: onResume,
-            onPause: onPause,
-            onPrevious: onPrevious,
-            onNext: onNext,
-            onCycleMode: onCycleMode,
-            onShowModeMenu: onShowModeMenu,
-            onShowQueue: onShowQueue,
-          ),
-          _CompactPlaybackExtensions(
-            page: page,
-            volumeState: volumeState,
-            onGoToPage: onGoToPage,
-            onShowDevices: onShowDevices,
-            onOpenTrack: trackId == null
-                ? null
-                : () => unawaited(onOpenTrack(trackId!)),
-            onVolumeChanged: onVolumeChanged,
-            onToggleMute: onToggleMute,
-          ),
-        ],
-      ),
+        );
+        if (constraints.maxHeight >= minimumHeight) return content;
+        return SingleChildScrollView(
+          child: SizedBox(height: minimumHeight, child: content),
+        );
+      },
     );
   }
 }
@@ -339,10 +349,10 @@ class _PlaybackInlineActions extends StatelessWidget {
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Builder(
-          builder: (buttonContext) => TextButton.icon(
+          builder: (buttonContext) => IconButton(
             onPressed: () => onShowDevices(buttonContext),
             icon: const Icon(Icons.cast_connected_outlined),
-            label: Text(_tr(context, 'Devices')),
+            tooltip: _tr(context, 'Devices'),
           ),
         ),
         TextButton.icon(
@@ -394,16 +404,16 @@ class _CompactPlaybackExtensions extends StatelessWidget {
           ),
         ),
         Builder(
-          builder: (buttonContext) => TextButton.icon(
+          builder: (buttonContext) => IconButton(
             onPressed: () => onShowDevices(buttonContext),
             icon: const Icon(Icons.cast_connected_outlined),
-            label: Text(_tr(context, 'Devices')),
+            tooltip: _tr(context, 'Devices'),
           ),
         ),
-        TextButton.icon(
+        IconButton(
           onPressed: onOpenTrack,
           icon: const Icon(Icons.info_outline),
-          label: Text(_tr(context, 'Details')),
+          tooltip: _tr(context, 'Details'),
         ),
         _VolumeControl(
           state: volumeState,

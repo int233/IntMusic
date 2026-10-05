@@ -382,12 +382,18 @@ extension _DashboardRendererDevices on _CoreDashboardState {
     _startSystemVolumeMonitor();
     _taskScheduler.schedule(
       'renderer-heartbeat',
-      interval: const Duration(seconds: 15),
+      interval: const Duration(seconds: 10),
       runInBackground: true,
       callback: _sendRendererRegistration,
-      onError: (_, _) {
-        if (mounted) {
-          _mutate(() => _rendererStatus = 'Renderer offline');
+      onError: (error, stackTrace) {
+        ClientLog.error(
+          'renderer.heartbeat.failed',
+          error,
+          stackTrace: stackTrace,
+        );
+        // A failed HTTP request is not evidence that the live WebSocket died.
+        if (mounted && _eventSocket == null) {
+          _mutate(() => _rendererStatus = 'Renderer reconnecting');
         }
       },
     );

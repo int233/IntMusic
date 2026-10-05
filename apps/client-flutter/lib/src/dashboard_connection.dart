@@ -88,7 +88,7 @@ extension _DashboardConnection on _CoreDashboardState {
       _rendererCommandSequences.clear();
       _playbackStateSequenceByZone.clear();
       _eventSocket = socket;
-      _eventLastPongAt = DateTime.now();
+      _connectionWatchdog = ConnectionWatchdog(_connectionClock.elapsed);
       _coreReachabilityFailures = 0;
       ClientLog.event(
         'core.websocket.connected',
@@ -181,9 +181,8 @@ extension _DashboardConnection on _CoreDashboardState {
         _eventHealthTimer?.cancel();
         return;
       }
-      final lastPongAt = _eventLastPongAt;
-      if (lastPongAt != null &&
-          DateTime.now().difference(lastPongAt) > const Duration(seconds: 18)) {
+      if (_connectionWatchdog?.shouldReconnect(_connectionClock.elapsed) ??
+          false) {
         unawaited(_restartEventStream('pong_timeout'));
         return;
       }

@@ -118,6 +118,17 @@ impl RendererRegistry {
             .collect()
     }
 
+    /// Actual inbound traffic renews liveness without re-registering outputs
+    /// or resetting playback. An unknown/disconnected renderer stays unknown.
+    pub async fn heartbeat(&self, client_id: &str) -> bool {
+        let mut guard = self.inner.write().await;
+        let Some(node) = guard.get_mut(client_id) else {
+            return false;
+        };
+        node.last_seen_at = Utc::now();
+        true
+    }
+
     pub async fn list_outputs(&self) -> Vec<OutputDevice> {
         let now = Utc::now();
         self.inner
@@ -556,5 +567,40 @@ mod tests {
         assert_eq!(stale.state, PlaybackTransportState::Playing);
         assert_eq!(stale.command_sequence, Some(2));
         assert_eq!(stale.intent_id.as_deref(), Some("new-intent"));
+    }
+    #[tokio::test]
+    async fn event_heartbeat_revives_presence_without_changing_playback() {
+        let registry = RendererRegistry::default();
+        registry.register(registration()).await;
+        let before = registry
+            .state_for_output("renderer:client-a:default")
+            .await
+            .unwrap();
+        registry
+            .inner
+            .write()
+            .await
+            .get_mut("client-a")
+            .unwrap()
+            .last_seen_at = Utc::now() - Duration::seconds(ONLINE_WINDOW_SECONDS + 1);
+        assert!(!registry.list_outputs().await[0].is_online);
+        assert!(registry.heartbeat("client-a").await);
+        assert!(registry.list_outputs().await[0].is_online);
+        let after = registry
+            .state_for_output("renderer:client-a:default")
+            .await
+            .unwrap();
+        assert_eq!(after.track_id, before.track_id);
+        assert_eq!(after.position_ms, before.position_ms);
+        assert_eq!(after.command_sequence, before.command_sequence);
+        assert!(!registry.heartbeat("unknown").await);
+        registry
+            .inner
+            .write()
+            .await
+            .get_mut("client-a")
+            .unwrap()
+            .last_seen_at = Utc::now() - Duration::seconds(ONLINE_WINDOW_SECONDS + 1);
+        assert!(!registry.list_outputs().await[0].is_online);
     }
 }

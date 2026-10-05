@@ -39,6 +39,11 @@ extension _DashboardRendererAudio on _CoreDashboardState {
           }
         }
         final player = ap.AudioPlayer();
+        await player.setAudioContext(
+          ap.AudioContext(
+            android: const ap.AudioContextAndroid(stayAwake: true),
+          ),
+        );
         await player.setReleaseMode(ap.ReleaseMode.stop);
         return _MobileRendererAudioPlayer(player);
       },

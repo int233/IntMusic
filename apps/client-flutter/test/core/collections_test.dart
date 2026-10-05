@@ -248,6 +248,21 @@ class CollectionFixture {
 
 void main() {
   test(
+    'background refresh is deferred and resume reloads the catalog',
+    () async {
+      final f = await CollectionFixture.create();
+      addTearDown(f.close);
+      await f.store.refresh();
+      f.requests.clear();
+      f.store.setBackgrounded(true);
+      await f.store.refresh();
+      expect(f.requests, isEmpty);
+      f.store.setBackgrounded(false);
+      await f.store.refresh();
+      expect(f.requests, contains('GET /collections'));
+    },
+  );
+  test(
     'one shared result cache pages beyond the home preview; playback uses the complete batch',
     () async {
       final f = await CollectionFixture.create();
