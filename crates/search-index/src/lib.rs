@@ -1,5 +1,4 @@
 use anyhow::Result;
-use async_trait::async_trait;
 use protocol::TrackSummary;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -22,12 +21,18 @@ pub struct SearchResult {
     pub title: String,
 }
 
-#[async_trait]
 pub trait SearchIndex: Send + Sync {
-    async fn rebuild(&self) -> Result<()>;
-    async fn upsert_track(&self, track: &TrackSearchDoc) -> Result<()>;
-    async fn delete_track(&self, track_id: i64) -> Result<()>;
-    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>>;
+    fn rebuild(&self) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn upsert_track(
+        &self,
+        track: &TrackSearchDoc,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn delete_track(&self, track_id: i64) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<SearchResult>>> + Send;
 }
 
 #[derive(Clone)]
@@ -45,7 +50,6 @@ impl SqliteSearchIndex {
     }
 }
 
-#[async_trait]
 impl SearchIndex for SqliteSearchIndex {
     async fn rebuild(&self) -> Result<()> {
         sqlx::query("DELETE FROM search_fts")

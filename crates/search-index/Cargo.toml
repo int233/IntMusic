@@ -7,7 +7,6 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 core-db = { path = "../core-db" }
 protocol = { path = "../protocol" }
 serde.workspace = true
