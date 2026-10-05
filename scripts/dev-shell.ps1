@@ -28,7 +28,13 @@ $env:Path = @(
 
 Write-Host "Rust:" (rustc --version)
 Write-Host "Cargo:" (cargo --version)
-Write-Host "Flutter:" (flutter --version | Select-Object -First 1)
+# Drain the native command before selecting a line. Closing its stdout early
+# interrupts Flutter's first-run bootstrap on a clean Windows runner.
+$flutterVersion = @(flutter --version)
+if ($LASTEXITCODE -ne 0) {
+  throw "Flutter initialization failed with exit code $LASTEXITCODE."
+}
+Write-Host "Flutter:" $flutterVersion[0]
 if (Test-Path (Join-Path $DevEcoBin "devecostudio64.exe")) {
   Write-Host "DevEco Studio:" (Join-Path $DevEcoBin "devecostudio64.exe")
 }
