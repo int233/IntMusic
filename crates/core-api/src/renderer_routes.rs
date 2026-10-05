@@ -22,6 +22,13 @@ pub(crate) async fn register_renderer(
     State(state): State<AppState>,
     Json(payload): Json<RendererRegistration>,
 ) -> ApiResult<protocol::RegisteredRenderer> {
+    core_db::register_device_presence(
+        state.pool(),
+        &payload.client_id,
+        &payload.name,
+        &payload.platform,
+    )
+    .await?;
     let request_playback_sync = payload.request_playback_sync;
     let reported_system_volumes = payload
         .outputs
@@ -58,7 +65,7 @@ pub(crate) async fn register_renderer(
                 continue;
             };
             let (action, stream_path) = match playback.state {
-                PlaybackTransportState::Playing => (
+                PlaybackTransportState::Playing | PlaybackTransportState::Loading => (
                     "play",
                     playback
                         .track_id
@@ -109,6 +116,7 @@ pub(crate) async fn report_renderer_state(
         .renderers
         .report_state(&client_id, payload)
         .await?;
+    core_db::renew_device_presence(state.pool(), &client_id).await?;
     let transport_changed = previous.as_ref().is_none_or(|previous| {
         previous.state != playback.state
             || previous.track_id != playback.track_id
@@ -117,12 +125,6 @@ pub(crate) async fn report_renderer_state(
     let position_changed = previous
         .as_ref()
         .is_none_or(|previous| previous.position_ms.abs_diff(playback.position_ms) >= 4_000);
-    let completed = previous.as_ref().is_some_and(|previous| {
-        previous.track_id.is_some()
-            && previous.state == PlaybackTransportState::Playing
-            && playback.state == PlaybackTransportState::Stopped
-            && transport_changed
-    });
     if transport_changed || position_changed {
         record_renderer_state_transition(&state, previous, &playback).await;
         state.emit(
@@ -133,22 +135,6 @@ pub(crate) async fn report_renderer_state(
             },
             &playback,
         );
-    }
-    if completed {
-        if let Some(track_id) =
-            step_playback_queue_and_emit(&state, &output_id, false, true).await?
-        {
-            return Ok(Json(
-                play_track_on_zone(
-                    &state,
-                    &output_id,
-                    track_id,
-                    0,
-                    &PlaybackCommandContext::default(),
-                )
-                .await?,
-            ));
-        }
     }
     Ok(Json(playback))
 }
@@ -170,6 +156,7 @@ pub(crate) async fn report_renderer_volume_state(
             payload.steps,
         )
         .await?;
+    core_db::renew_device_presence(state.pool(), &client_id).await?;
     let zone_id = if payload.output_id.starts_with("renderer:") {
         payload.output_id
     } else {

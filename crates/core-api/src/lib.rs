@@ -1,11 +1,12 @@
 mod artist_routes;
 mod artwork_routes;
+mod catalog_guard;
+mod collection_routes;
 mod distribution_routes;
 mod events;
 mod library_management_routes;
 mod playback_service;
 mod playback_v3_routes;
-mod playlist_routes;
 mod renderer_routes;
 mod renderers;
 mod router;
@@ -16,12 +17,12 @@ mod track_routes;
 
 pub(crate) use artist_routes::*;
 pub(crate) use artwork_routes::*;
+pub(crate) use collection_routes::*;
 pub(crate) use distribution_routes::*;
 pub(crate) use events::*;
 pub(crate) use library_management_routes::*;
 pub(crate) use playback_service::*;
 pub(crate) use playback_v3_routes::*;
-pub(crate) use playlist_routes::*;
 pub(crate) use renderer_routes::*;
 pub use router::build_router;
 pub use server::{serve, serve_with_shutdown};
@@ -77,15 +78,14 @@ use protocol::{
     ClientSyncChanges, ClientSyncSnapshot, CoreStatus, CreateDistributionRequest,
     DistributionTaskProgress, EventEnvelope, FavoriteSettingsUpdate, LibraryChangedPayload,
     LinkTrackRecordingRequest, MetadataSettingsUpdate, MovePlaybackQueueItem, MultiZonePlayRequest,
-    MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, NewPlaylist,
-    PlaybackEvent, PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState,
-    PlaybackStats, PlaybackTransportState, PlaylistDetail, PlaylistTrackMutation,
-    RendererCommandPayload, RendererRegistration, RendererStateReport, RendererVolumeStateReport,
-    ReplacePlaybackQueue, ResolveClientLibraryFileRequest, ScanProgressPayload, SearchResponse,
-    ServerSettingsUpdate, TrackFavoriteUpdate, TrackMergePreviewRequest, TrackMergeRequest,
-    TrackMetadataUpdate, UpdateAlbumMetadata, UpdateArtistAsset, UpdateArtistProfile,
-    UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneAliasUpdate, ZoneTransferRequest,
-    ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
+    MusicBrainzArtistPreview, MusicBrainzArtistPreviewRequest, NewLibraryRoot, PlaybackEvent,
+    PlaybackMode, PlaybackModeUpdate, PlaybackQueue, PlaybackSession, PlaybackState, PlaybackStats,
+    PlaybackTransportState, RendererCommandPayload, RendererRegistration, RendererStateReport,
+    RendererVolumeStateReport, ReplacePlaybackQueue, ResolveClientLibraryFileRequest,
+    ScanProgressPayload, ServerSettingsUpdate, TrackFavoriteUpdate, TrackMergePreviewRequest,
+    TrackMergeRequest, TrackMetadataUpdate, UpdateAlbumMetadata, UpdateArtistAsset,
+    UpdateArtistProfile, UpdateArtistVisual, VolumeControlMode, ZoneAliasUpdate,
+    ZoneTransferRequest, ZoneVolume, API_PREFIX, EVENTS_WS_PATH,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -125,6 +125,7 @@ struct AppStateInner {
     discovery_service: Option<String>,
     musicbrainz_gate: tokio::sync::Mutex<tokio::time::Instant>,
     distribution_claim_gate: tokio::sync::Mutex<()>,
+    metadata_rules_gate: tokio::sync::Mutex<()>,
     waveform_cache: tokio::sync::RwLock<HashMap<String, Vec<f32>>>,
     transcoder: Transcoder,
 }
@@ -178,6 +179,7 @@ impl AppState {
                     tokio::time::Instant::now() - Duration::from_secs(1),
                 ),
                 distribution_claim_gate: tokio::sync::Mutex::new(()),
+                metadata_rules_gate: tokio::sync::Mutex::new(()),
                 waveform_cache: tokio::sync::RwLock::new(HashMap::new()),
                 transcoder,
             }),
@@ -209,7 +211,7 @@ impl AppState {
     }
 
     fn emit_renderer_command(&self, renderer_id: &str, command: &RendererCommandPayload) {
-        self.dispatch_event(EventEnvelope::new(
+        let _ = self.inner.events.send(EventEnvelope::new(
             "renderer.command",
             json!({ "renderer_id": renderer_id, "command": command }),
         ));
@@ -431,48 +433,6 @@ fn content_type_for_extension(extension: &str) -> &'static str {
     }
 }
 
-type ApiResult<T> = Result<Json<T>, ApiError>;
-
-#[derive(Debug)]
-struct ApiError(anyhow::Error);
-
-impl From<anyhow::Error> for ApiError {
-    fn from(error: anyhow::Error) -> Self {
-        Self(error)
-    }
-}
-
-impl From<std::io::Error> for ApiError {
-    fn from(error: std::io::Error) -> Self {
-        Self(error.into())
-    }
-}
-
-impl From<reqwest::Error> for ApiError {
-    fn from(error: reqwest::Error) -> Self {
-        Self(error.into())
-    }
-}
-
-impl From<axum::extract::multipart::MultipartError> for ApiError {
-    fn from(error: axum::extract::multipart::MultipartError) -> Self {
-        Self(error.into())
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        error!(error = %self.0, "api error");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorBody {
-                error: self.0.to_string(),
-            }),
-        )
-            .into_response()
-    }
-}
-
 pub async fn initialize_database(paths: &CorePaths, config: &CoreConfig) -> Result<DbPool> {
     core_config::ensure_runtime_dirs(paths)?;
     let pool = core_db::connect(&paths.database_file).await?;
@@ -493,3 +453,6 @@ pub async fn run_until_shutdown(bind_addr: SocketAddr, router: Router) -> Result
 
 #[cfg(test)]
 mod tests;
+
+mod api_error;
+use api_error::{ApiError, ApiResult};

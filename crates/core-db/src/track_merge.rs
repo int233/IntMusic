@@ -295,8 +295,10 @@ pub async fn merge_tracks(pool: &DbPool, request: &TrackMergeRequest) -> Result<
         }
         sqlx::query(
             r#"
-            UPDATE legacy_track_catalog_links
-            SET release_track_id = ?1, match_kind = 'confirmed_same_release',
+            UPDATE track_catalog_links
+            SET release_track_id = ?1,
+                release_identity_id = (SELECT COALESCE(release_identity_id, release_track_id) FROM track_catalog_links WHERE release_track_id = ?1 ORDER BY track_id LIMIT 1),
+                match_kind = 'confirmed_same_release',
                 match_confidence = 1.0, updated_at = ?2
             WHERE track_id = ?3
             "#,
@@ -474,8 +476,8 @@ pub async fn undo_track_merge(pool: &DbPool, merge_id: &str) -> Result<TrackMerg
     for link in previous_links {
         sqlx::query(
             r#"
-            UPDATE legacy_track_catalog_links
-            SET release_track_id = ?1, match_kind = 'merge_undone',
+            UPDATE track_catalog_links
+            SET release_track_id = ?1, release_identity_id = ?1, match_kind = 'merge_undone',
                 match_confidence = 1.0, updated_at = ?2
             WHERE track_id = ?3
             "#,
@@ -558,7 +560,7 @@ async fn track_ids_for_files(pool: &DbPool, file_ids: &[i64]) -> Result<Vec<i64>
                 FROM media_replicas replica
                 JOIN release_track_media_variants relation
                   ON relation.media_variant_id = replica.media_variant_id
-                JOIN legacy_track_catalog_links link
+                JOIN track_catalog_links link
                   ON link.release_track_id = relation.release_track_id
                 WHERE replica.file_id = file.id
             )
@@ -636,7 +638,7 @@ async fn merge_identities(pool: &DbPool, track_ids: &[i64]) -> Result<Vec<MergeI
                     WHERE relation.release_track_id = link.release_track_id
                 ) AS media_variant_count
             FROM tracks track
-            JOIN legacy_track_catalog_links link ON link.track_id = track.id
+            JOIN track_catalog_links link ON link.track_id = track.id
             JOIN release_tracks release_track ON release_track.id = link.release_track_id
             JOIN catalog_recordings recording ON recording.id = release_track.recording_id
             LEFT JOIN albums album ON album.id = track.album_id
@@ -769,7 +771,7 @@ pub(crate) async fn preserve_recording_user_state(
             MIN(links.track_id) AS canonical_track_id,
             MAX(COALESCE(state.is_favorite, 0)) AS is_favorite,
             MAX(state.user_rating) AS user_rating
-        FROM legacy_track_catalog_links links
+        FROM track_catalog_links links
         JOIN release_tracks release_track
           ON release_track.id = links.release_track_id
         LEFT JOIN track_merge_members member ON member.track_id = links.track_id

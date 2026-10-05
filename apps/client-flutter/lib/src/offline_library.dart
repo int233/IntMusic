@@ -247,7 +247,7 @@ class _OfflineLibraryStore {
       '${directory.path}${Platform.pathSeparator}offline',
     );
     await storage.create(recursive: true);
-    return File('${storage.path}${Platform.pathSeparator}library-v1.json');
+    return File('${storage.path}${Platform.pathSeparator}library-v2.json');
   }
 
   static Future<_OfflineLibrarySnapshot> load() async {
@@ -269,9 +269,7 @@ class _OfflineLibraryStore {
       final file = await _snapshotFile();
       final temporary = File('${file.path}.tmp');
       await temporary.writeAsString(encoded, flush: true);
-      if (await file.exists()) {
-        await file.delete();
-      }
+      // Rename replaces the destination without a delete-before-rename gap.
       await temporary.rename(file.path);
     });
     return _writeQueue;

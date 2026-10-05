@@ -25,6 +25,7 @@ class PlaybackAgent {
   int shuffleSeed = 1;
   String mode = 'sequential';
   String? sessionId;
+  Map<String, dynamic>? queueSource;
   int sessionEpoch = 0;
   int sessionRevision = 0;
   int eventCursor = 0;
@@ -37,10 +38,14 @@ class PlaybackAgent {
   bool get hasSession => sessionId != null && sessionEpoch > 0;
 
   void restore(Map<String, dynamic> queue) {
+    sessionId = null;
+    queueSource = (queue['queue_source'] as Map?)?.cast<String, dynamic>();
+    sessionEpoch = 0;
+    sessionRevision = 0;
     revision = _intValue(queue['revision']) ?? revision;
     shuffleSeed = _intValue(queue['shuffle_seed']) ?? shuffleSeed;
     mode = queue['mode']?.toString() ?? mode;
-    _restoreLegacyMode(mode);
+    _restoreUiMode(mode);
     final values = (queue['items'] as List?) ?? const <dynamic>[];
     _items = <PlaybackAgentItem>[
       for (var index = 0; index < values.length; index += 1)
@@ -55,12 +60,19 @@ class PlaybackAgent {
         : null;
   }
 
-  /// Applies the authoritative v3 session without replacing the richer legacy
-  /// queue projection used by queue UI rows.
+  /// Ignores stale responses from overlapping reads and command receipts.
   void restoreSession(Map<String, dynamic> snapshot) {
     final restoredSessionId = snapshot['session_id']?.toString();
     if (restoredSessionId == null || restoredSessionId.isEmpty) return;
+    final epoch = _intValue(snapshot['epoch']) ?? 0;
+    final revision = _intValue(snapshot['revision']) ?? 0;
+    if (restoredSessionId == sessionId &&
+        (epoch < sessionEpoch ||
+            epoch == sessionEpoch && revision < sessionRevision)) {
+      return;
+    }
     sessionId = restoredSessionId;
+    queueSource = (snapshot['queue_source'] as Map?)?.cast<String, dynamic>();
     sessionEpoch = _intValue(snapshot['epoch']) ?? sessionEpoch;
     sessionRevision = _intValue(snapshot['revision']) ?? sessionRevision;
     eventCursor = _intValue(snapshot['event_cursor']) ?? eventCursor;
@@ -70,7 +82,7 @@ class PlaybackAgent {
       repeatMode = modeValue['repeat']?.toString() ?? 'off';
       shuffle = modeValue['shuffle'] == true;
       stopAfterCurrent = modeValue['stop_after_current'] == true;
-      mode = _legacyModeName();
+      mode = _uiModeName();
     }
     final values = (snapshot['queue'] as List?) ?? const <dynamic>[];
     final restoredItems = <PlaybackAgentItem>[
@@ -123,50 +135,30 @@ class PlaybackAgent {
     if (automatic && repeatMode == 'one' && current >= 0) {
       return <PlaybackAgentItem>[_items[current]];
     }
-    if (shuffle) {
-      final order = _shuffleOrder();
-      final cursor = order.indexOf(current);
-      final start = cursor >= 0 ? cursor + 1 : 0;
-      return <PlaybackAgentItem>[
-        for (var offset = 0; offset < order.length; offset += 1)
-          _items[order[(start + offset) % order.length]],
-      ];
-    }
-
-    final result = <PlaybackAgentItem>[];
-    for (var index = current + 1; index < _items.length; index += 1) {
-      result.add(_items[index]);
-    }
-    if (repeatMode == 'all' || !automatic) {
-      final wrapEnd = current < 0 ? 0 : current + 1;
-      for (
-        var index = 0;
-        index < wrapEnd && index < _items.length;
-        index += 1
-      ) {
-        result.add(_items[index]);
-      }
-    }
-    return result;
+    final order = shuffle
+        ? _shuffleOrder()
+        : List<int>.generate(_items.length, (i) => i);
+    final cursor = order.indexOf(current);
+    return [
+      for (final index in order.skip(cursor + 1)) _items[index],
+      if (repeatMode == 'all')
+        for (final index in order.take(cursor + 1)) _items[index],
+    ];
   }
 
   List<PlaybackAgentItem> previousCandidates() {
-    if (_items.isEmpty) return const <PlaybackAgentItem>[];
-    final current = currentIndex ?? _items.length;
-    if (shuffle) {
-      final order = _shuffleOrder();
-      final cursor = order.indexOf(current);
-      final start = cursor >= 0 ? cursor - 1 : order.length - 1;
-      return <PlaybackAgentItem>[
-        for (var offset = 0; offset < order.length; offset += 1)
-          _items[order[(start - offset) % order.length]],
-      ];
-    }
-
-    return <PlaybackAgentItem>[
-      for (var index = current - 1; index >= 0; index -= 1) _items[index],
-      for (var index = _items.length - 1; index >= current; index -= 1)
-        _items[index],
+    if (_items.isEmpty) return const [];
+    final order = shuffle
+        ? _shuffleOrder()
+        : List<int>.generate(_items.length, (i) => i);
+    final cursor = currentIndex == null
+        ? order.length
+        : order.indexOf(currentIndex!);
+    if (cursor == 0 && repeatMode != 'all') return [_items[order.first]];
+    return [
+      for (final index in order.take(cursor).toList().reversed) _items[index],
+      if (repeatMode == 'all')
+        for (final index in order.skip(cursor).toList().reversed) _items[index],
     ];
   }
 
@@ -209,7 +201,7 @@ class PlaybackAgent {
     if (trackId == null) return null;
     return PlaybackAgentItem(
       index: index,
-      itemId: value['id']?.toString() ?? 'index:$index:track:$trackId',
+      itemId: value['id'] as String,
       trackId: trackId,
     );
   }
@@ -222,7 +214,7 @@ class PlaybackAgent {
     return PlaybackAgentItem(index: index, itemId: itemId, trackId: trackId);
   }
 
-  void _restoreLegacyMode(String value) {
+  void _restoreUiMode(String value) {
     repeatMode = switch (value) {
       'repeat_one' => 'one',
       'repeat_all' => 'all',
@@ -232,7 +224,7 @@ class PlaybackAgent {
     stopAfterCurrent = value == 'single';
   }
 
-  String _legacyModeName() {
+  String _uiModeName() {
     if (stopAfterCurrent) return 'single';
     if (repeatMode == 'one') return 'repeat_one';
     if (shuffle) return 'shuffle';
@@ -247,21 +239,20 @@ int? _intValue(Object? value) {
   return int.tryParse(value?.toString() ?? '');
 }
 
-const int _mask64 = 0xFFFFFFFFFFFFFFFF;
-
-int _shuffleKey(String itemId, int seed) {
-  var identity = int.tryParse(itemId);
-  if (identity == null) {
-    var hash = 0xcbf29ce484222325;
-    for (final codeUnit in itemId.codeUnits) {
-      hash = ((hash ^ codeUnit) * 0x100000001b3) & _mask64;
-    }
-    identity = hash;
-  }
-  var value = (identity & _mask64) ^ ((seed * 0x9E3779B97F4A7C15) & _mask64);
+// Identical to Core's UUID-based splitmix64 ordering, including unsigned math.
+BigInt _shuffleKey(String itemId, int seed) {
+  final hex = itemId.replaceAll('-', '');
+  final high = BigInt.parse(hex.substring(0, 16), radix: 16);
+  final low = BigInt.parse(hex.substring(16), radix: 16);
+  final mask = (BigInt.one << 64) - BigInt.one;
+  var value =
+      (high ^
+          low ^
+          (BigInt.from(seed) * BigInt.parse('9E3779B97F4A7C15', radix: 16))) &
+      mask;
   value ^= value >> 30;
-  value = (value * 0xBF58476D1CE4E5B9) & _mask64;
+  value = (value * BigInt.parse('BF58476D1CE4E5B9', radix: 16)) & mask;
   value ^= value >> 27;
-  value = (value * 0x94D049BB133111EB) & _mask64;
-  return (value ^ (value >> 31)) & _mask64;
+  value = (value * BigInt.parse('94D049BB133111EB', radix: 16)) & mask;
+  return (value ^ (value >> 31)) & mask;
 }

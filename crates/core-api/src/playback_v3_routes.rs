@@ -41,6 +41,7 @@ pub(crate) async fn command_playback_session_v3(
         ) {
             ack.status = PlaybackCommandStatusV3::Duplicate;
         }
+        ack.snapshot = Some(playback_session_snapshot_v3(&state, &zone_id).await?);
         return Ok(Json(ack));
     }
 
@@ -89,7 +90,10 @@ pub(crate) async fn command_playback_session_v3(
             command.command_id,
             &snapshot,
             PlaybackCommandStatusV3::Rejected,
-            "command_rejected",
+            error
+                .downcast_ref::<core_db::CollectionError>()
+                .map(|e| e.code)
+                .unwrap_or("command_rejected"),
         );
         record_ack_v3(&state, &zone_id, &command, &ack).await?;
         return Ok(Json(ack));
@@ -203,10 +207,12 @@ async fn playback_session_snapshot_v3(
         revision: meta.revision,
         event_cursor: meta.event_cursor.max(cursor),
         transport: playback.state,
+        command_sequence: playback.command_sequence,
         current_item_id: queue.current_item_id,
         position_ms: playback.position_ms,
         mode: meta.mode,
         shuffle_seed: queue.shuffle_seed,
+        queue_source: queue.source,
         queue: queue.items,
         last_command_id: meta.last_command_id,
         updated_at: meta.updated_at,
@@ -248,6 +254,17 @@ async fn apply_session_action_v3(
         PlaybackSessionActionV3::Next { automatic } => {
             apply_queue_advance_v3(state, zone_id, context, next_item(snapshot, automatic)).await?;
         }
+        PlaybackSessionActionV3::Complete { command_sequence } => {
+            let current = playback_state_for_zone(state, zone_id).await?;
+            if current.command_sequence != Some(command_sequence)
+                || current.track_id.is_none()
+                || current.state == PlaybackTransportState::Stopped
+            {
+                anyhow::bail!("Completion belongs to an inactive decoder command");
+            }
+            record_playback_finish(state, &current, "completed", "completed", None).await;
+            apply_queue_advance_v3(state, zone_id, context, next_item(snapshot, true)).await?;
+        }
         PlaybackSessionActionV3::Previous => {
             apply_queue_advance_v3(state, zone_id, context, previous_item(snapshot)).await?;
         }
@@ -255,11 +272,15 @@ async fn apply_session_action_v3(
             items,
             start_item_id,
         } => {
-            core_db::replace_playback_queue_v3(state.pool(), zone_id, &items, start_item_id)
+            core_db::replace_playback_queue_v3(state.pool(), zone_id, &items, start_item_id, None)
                 .await?;
             emit_legacy_queue_changed(state, zone_id).await?;
+            if snapshot.current_item_id != start_item_id && snapshot.current_item_id.is_some() {
+                stop_zone_internal(state, zone_id, context).await?;
+            }
         }
         PlaybackSessionActionV3::ReplaceQueueAndPlay {
+            source,
             items,
             start_item_id,
             position_ms,
@@ -271,8 +292,36 @@ async fn apply_session_action_v3(
                 .ok_or_else(|| {
                     anyhow::anyhow!("start queue item {start_item_id} does not exist")
                 })?;
-            core_db::replace_playback_queue_v3(state.pool(), zone_id, &items, Some(start_item_id))
-                .await?;
+            let source = if let Some(source) = source {
+                Some(
+                    core_db::validate_collection_queue(
+                        state.pool(),
+                        &source,
+                        &items.iter().map(|i| i.track_id).collect::<Vec<_>>(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            if source.is_some() {
+                let detail = core_db::track_detail(state.pool(), track_id).await?;
+                anyhow::ensure!(
+                    detail.track.is_available,
+                    "选定歌曲当前不可用，原队列已保留"
+                );
+                if is_core_zone(zone_id) {
+                    readable_track_source(state, track_id).await?;
+                }
+            }
+            core_db::replace_playback_queue_v3(
+                state.pool(),
+                zone_id,
+                &items,
+                Some(start_item_id),
+                source.as_ref(),
+            )
+            .await?;
             emit_legacy_queue_changed(state, zone_id).await?;
             play_track_on_zone_preserving_queue(state, zone_id, track_id, position_ms, context)
                 .await?;
@@ -292,6 +341,7 @@ async fn apply_session_action_v3(
                 zone_id,
                 &merged,
                 current.current_item_id,
+                current.source.as_ref(),
             )
             .await?;
             emit_legacy_queue_changed(state, zone_id).await?;
@@ -316,6 +366,7 @@ async fn apply_session_action_v3(
                 zone_id,
                 &items,
                 current.current_item_id,
+                current.source.as_ref(),
             )
             .await?;
             emit_legacy_queue_changed(state, zone_id).await?;
@@ -336,8 +387,28 @@ async fn apply_session_action_v3(
             } else {
                 current.current_item_id
             };
-            core_db::replace_playback_queue_v3(state.pool(), zone_id, &items, next_current).await?;
+            core_db::replace_playback_queue_v3(
+                state.pool(),
+                zone_id,
+                &items,
+                next_current,
+                current.source.as_ref(),
+            )
+            .await?;
             emit_legacy_queue_changed(state, zone_id).await?;
+            if current.current_item_id == Some(item_id) {
+                if let Some(next) = next_current.filter(|_| {
+                    matches!(
+                        snapshot.transport,
+                        PlaybackTransportState::Playing | PlaybackTransportState::Loading
+                    )
+                }) {
+                    apply_queue_advance_v3(state, zone_id, context, QueueAdvanceV3::Select(next))
+                        .await?;
+                } else {
+                    stop_zone_internal(state, zone_id, context).await?;
+                }
+            }
         }
         PlaybackSessionActionV3::SetMode { mode } => {
             core_db::update_playback_session_mode_v3(state.pool(), zone_id, mode).await?;
@@ -346,6 +417,26 @@ async fn apply_session_action_v3(
             state.emit("playback.queue_changed", &queue);
         }
     }
+    Ok(())
+}
+
+pub(crate) async fn complete_core_session(state: &AppState, zone_id: &str) -> Result<()> {
+    let snapshot = playback_session_snapshot_v3(state, zone_id).await?;
+    apply_queue_advance_v3(
+        state,
+        zone_id,
+        &PlaybackCommandContext::default(),
+        next_item(&snapshot, true),
+    )
+    .await?;
+    let meta = core_db::advance_playback_session_v3(
+        state.pool(),
+        zone_id,
+        Uuid::now_v7(),
+        state.inner.event_cursor.load(Ordering::SeqCst),
+    )
+    .await?;
+    state.emit("playback.session_v3.changed", json!({"zone_id":zone_id,"session_id":meta.session_id,"epoch":meta.epoch,"revision":meta.revision}));
     Ok(())
 }
 
@@ -479,3 +570,7 @@ fn event_envelope_to_session_v3(event: EventEnvelope) -> Result<Option<PlaybackS
         created_at: event.time,
     }))
 }
+
+#[cfg(test)]
+#[path = "tests/playback_lifecycle.rs"]
+pub(crate) mod lifecycle_tests;

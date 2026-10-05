@@ -78,20 +78,38 @@ pub(crate) async fn update_metadata_settings(
     State(state): State<AppState>,
     Json(payload): Json<MetadataSettingsUpdate>,
 ) -> ApiResult<core_config::MetadataConfig> {
-    let mut config = state
-        .inner
-        .config
-        .write()
-        .map_err(|_| anyhow::anyhow!("config lock is poisoned"))?;
-    if let Some(values) = payload.artist_separators {
-        config.metadata.artist_separators = normalize_separators(values);
-    }
-    if let Some(values) = payload.genre_separators {
-        config.metadata.genre_separators = normalize_separators(values);
-    }
-    config.save(&state.inner.paths)?;
-    let metadata = config.metadata.clone();
-    drop(config);
+    let _guard = state.inner.metadata_rules_gate.lock().await;
+    let mappings = payload
+        .tag_mappings
+        .map(core_db::validate_tag_mappings)
+        .transpose()?;
+    let metadata = {
+        let mut config = state
+            .inner
+            .config
+            .write()
+            .map_err(|_| anyhow::anyhow!("config lock is poisoned"))?;
+        if let Some(rules) = mappings {
+            config.metadata.tag_mappings = rules;
+        }
+        if let Some(values) = payload.artist_separators {
+            config.metadata.artist_separators = normalize_separators(values);
+        }
+        if let Some(values) = payload.genre_separators {
+            config.metadata.genre_separators = normalize_separators(values);
+        }
+        config.save(&state.inner.paths)?;
+        config.metadata.clone()
+    };
+    core_db::configure_tag_settings(
+        state.pool(),
+        &core_db::TagSettings {
+            artist_separators: metadata.artist_separators.clone(),
+            genre_separators: metadata.genre_separators.clone(),
+            tag_mappings: metadata.tag_mappings.clone(),
+        },
+    )
+    .await?;
     state.emit("core.settings_changed", json!({ "section": "metadata" }));
     Ok(Json(metadata))
 }
@@ -166,4 +184,37 @@ pub(crate) async fn playback_stats(
         )
         .await?,
     ))
+}
+
+pub(crate) async fn update_song_display_settings(
+    State(state): State<AppState>,
+    Json(settings): Json<core_config::SongDisplayConfig>,
+) -> ApiResult<core_config::SongDisplayConfig> {
+    {
+        let mut config = state
+            .inner
+            .config
+            .write()
+            .map_err(|_| anyhow::anyhow!("config lock is poisoned"))?;
+        config.song_display = settings.clone();
+        config.save(&state.inner.paths)?;
+    }
+    state
+        .bump_library_revision("song display settings updated")
+        .await;
+    state.emit("core.settings_changed", json!({"section": "song_display"}));
+    Ok(Json(settings))
+}
+
+pub(crate) async fn apply_library_tag_mappings(
+    State(state): State<AppState>,
+) -> ApiResult<serde_json::Value> {
+    let _guard = state.inner.metadata_rules_gate.lock().await;
+    let result = core_db::apply_existing_tag_mappings(state.pool()).await;
+    // Also refresh after an interrupted operation: completed tracks may have changed.
+    state
+        .bump_library_revision("metadata tag mappings applied")
+        .await;
+    let count = result?;
+    Ok(Json(json!({"updated_tracks": count})))
 }

@@ -36,7 +36,10 @@ class _AlbumInfoPage extends StatelessWidget {
         .map((value) => value.cast<String, dynamic>())
         .toList(growable: false);
     final showMetadata = _albumMetadataHasContent(profile, credits);
-    final tracks = (detail['tracks'] as List?) ?? const [];
+    final tracks = _displayTracks(
+      context,
+      (detail['tracks'] as List?) ?? const [],
+    );
     final discNumbers = tracks
         .map((item) => _intValue((item as Map)['disc_number']) ?? 1)
         .toSet();
@@ -121,7 +124,14 @@ class _AlbumInfoPage extends StatelessWidget {
                           : () => unawaited(onOpenTrack(id)),
                       onPlay: id == null
                           ? null
-                          : () => unawaited(onPlayTrack(id)),
+                          : () => unawaited(
+                              _playDisplayedSong(
+                                context,
+                                id,
+                                tracks,
+                                onPlayTrack,
+                              ),
+                            ),
                       onToggleFavorite: onToggleFavorite,
                       onAddToPlaylist: id == null
                           ? null
@@ -202,7 +212,10 @@ class _ArtistInfoPage extends StatelessWidget {
         ? <String, dynamic>{}
         : _asMap(detail['profile']);
     final albums = (detail['albums'] as List?) ?? const [];
-    final tracks = (detail['tracks'] as List?) ?? const [];
+    final tracks = _displayTracks(
+      context,
+      (detail['tracks'] as List?) ?? const [],
+    );
     final trackMaps = tracks
         .map((track) => (track as Map).cast<String, dynamic>())
         .toList(growable: false);
@@ -640,7 +653,11 @@ class _ArtistTrackSection extends StatelessWidget {
                     _ratingLabel(track),
                   ]),
                   onOpen: id == null ? null : () => unawaited(onOpenTrack(id)),
-                  onPlay: id == null ? null : () => unawaited(onPlayTrack(id)),
+                  onPlay: id == null
+                      ? null
+                      : () => unawaited(
+                          _playDisplayedSong(context, id, tracks, onPlayTrack),
+                        ),
                   onToggleFavorite: onToggleFavorite,
                   onAddToPlaylist: id == null
                       ? null

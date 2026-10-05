@@ -35,6 +35,8 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
   bool _loading = true;
   String? _error;
   Timer? _searchDebounce;
+  Timer? _presenceTimer;
+  bool _presenceRefreshing = false;
   final Set<int> _selectedFileIds = <int>{};
   int _loadGeneration = 0;
 
@@ -44,6 +46,16 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
   void initState() {
     super.initState();
     unawaited(_refreshAll());
+    _presenceTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (_loading || _presenceRefreshing) return;
+      _presenceRefreshing = true;
+      try {
+        await _refreshOverview();
+        if (_tab == _LibraryInventoryTab.files) await _refreshFiles();
+      } finally {
+        _presenceRefreshing = false;
+      }
+    });
   }
 
   @override
@@ -59,6 +71,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
     _loadGeneration += 1;
     _api.cancelBulkRequests();
     _searchDebounce?.cancel();
+    _presenceTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -93,20 +106,45 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
   }
 
   Future<void> _refreshOverview() async {
+    final generation = _loadGeneration;
     try {
       final values = await Future.wait<dynamic>([
         _api.getJson('/library-management/summary'),
         _api.getJson('/library-management/devices'),
       ]);
-      if (!mounted) return;
+      if (!mounted || generation != _loadGeneration) return;
       setState(() {
+        _error = null;
         _summary = _asMap(values[0]);
         _devices = values[1] as List<dynamic>;
       });
     } catch (error) {
-      if (mounted && _summary.isEmpty && _devices.isEmpty) {
-        setState(() => _error = error.toString());
-      }
+      if (!mounted || generation != _loadGeneration) return;
+      setState(() {
+        _error = error.toString();
+        _summary = {..._summary, 'available_files': 0};
+        _devices = _devices
+            .whereType<Map>()
+            .map(
+              (device) => <String, dynamic>{
+                ...device.cast<String, dynamic>(),
+                'state': device['state'] == 'retired' ? 'retired' : 'offline',
+                'sources': [
+                  for (final source
+                      in (device['sources'] as List? ?? const [])
+                          .whereType<Map>())
+                    {
+                      ...source.cast<String, dynamic>(),
+                      'state': source['state'] == 'retired'
+                          ? 'retired'
+                          : 'offline',
+                      'available_file_count': 0,
+                    },
+                ],
+              },
+            )
+            .toList();
+      });
     }
   }
 

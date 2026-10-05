@@ -247,7 +247,7 @@ async fn exact_identity_candidates(pool: &DbPool) -> Result<Vec<ExactIdentity>> 
             ) AS canonical_score
         FROM tracks track
         JOIN files file ON file.id = track.file_id
-        JOIN legacy_track_catalog_links link ON link.track_id = track.id
+        JOIN track_catalog_links link ON link.track_id = track.id
         JOIN release_tracks release_track ON release_track.id = link.release_track_id
         JOIN catalog_recordings recording ON recording.id = release_track.recording_id
         JOIN albums album ON album.id = track.album_id

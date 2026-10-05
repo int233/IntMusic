@@ -1,10 +1,258 @@
 openapi: 3.1.0
 info:
   title: IntMusic Local Music Core API
-  version: 0.1.0
+  version: 1.6.0
+  description: >-
+    Clients may fence API requests with both X-IntMusic-Server-Id and
+    X-IntMusic-Catalog-Epoch headers. A mismatching identity returns 409 before
+    the handler runs; partial or duplicate identity headers return 400.
+    Collection and home-layout writes require both headers. Other API domains retain their own request requirements. This is a consistency
+    guard, not authentication. GET /status advertises catalog_identity_guard.
 servers:
   - url: http://127.0.0.1:49330/api/v1
 paths:
+  /collections:
+    get:
+      summary: List typed collection summaries including protected system collections
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+    post:
+      summary: Create a collection and publish its first result atomically
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionWrite"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /collections/rule-schema:
+    get:
+      summary: Return typed fields, operators, nesting limits and UTC refresh boundary
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+  /collections/preview:
+    post:
+      summary: Preview a definition without saving or changing playback
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionDefinition"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /collections/entities/{kind}:
+    parameters:
+      - name: kind
+        in: path
+        required: true
+        schema: {"type": "string", "enum": ["track", "album", "artist", "genre"]}
+    get:
+      summary: Find selectable entities by text or explicit IDs
+      parameters:
+        - {"in": "query", "name": "q", "schema": {"type": "string"}}
+        - {"in": "query", "name": "ids", "schema": {"type": "string", "description": "Comma-separated positive entity IDs; maximum 200"}}
+        - {"in": "query", "name": "offset", "schema": {"type": "integer", "minimum": 0}}
+        - {"in": "query", "name": "limit", "schema": {"type": "integer", "minimum": 1, "maximum": 200}}
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+  /collections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {"type": "integer", "minimum": 1}
+    get:
+      summary: Read a fixed result batch; subsequent pages require result_version
+      parameters:
+        - {"in": "query", "name": "result_version", "schema": {"type": "string"}}
+        - {"in": "query", "name": "offset", "schema": {"type": "integer", "minimum": 0}}
+        - {"in": "query", "name": "limit", "schema": {"type": "integer", "minimum": 1, "maximum": 200}}
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+    patch:
+      summary: Save rules and publish results with revision conflict detection
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionWrite"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+    delete:
+      summary: Delete a user collection and remove its home references
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+        - {"in": "query", "name": "expected_revision", "required": true, "schema": {"type": "integer", "minimum": 1}}
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /collections/{id}/refresh:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {"type": "integer", "minimum": 1}
+    post:
+      summary: Generate a new batch with an idempotency key
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionRefreshRequest"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /collections/{id}/reset:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {"type": "integer", "minimum": 1}
+    post:
+      summary: Restore protected system defaults while management is enabled
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionRevision"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /collections/{id}/play:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {"type": "integer", "minimum": 1}
+    post:
+      summary: Resolve a complete frozen result batch into a validated playback plan
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionPlayRequest"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /settings/collections:
+    get:
+      summary: Read the shared system collection management switch
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+    patch:
+      summary: Change management with revision conflict detection
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionSettingsUpdate"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /home-layout:
+    get:
+      summary: Read ordered home sections
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+    patch:
+      summary: Replace home sections with revision conflict detection
+      parameters:
+        - {"in": "header", "name": "x-intmusic-server-id", "required": true, "schema": {"type": "string"}}
+        - {"in": "header", "name": "x-intmusic-catalog-epoch", "required": true, "schema": {"type": "string"}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HomeLayoutUpdate"
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+        "409":
+          description: Catalog, definition, result or layout changed; refresh before retrying
+        "422":
+          description: Invalid typed input or empty playback result
+  /genres/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {"type": "integer", "minimum": 1}
+    get:
+      summary: Read a genre and its current logical songs
+      responses:
+        "200":
+          description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
   /status:
     get:
       summary: Return Core identity, catalog epoch, and library counts.
@@ -481,45 +729,6 @@ paths:
       responses:
         "200":
           description: Updated track summary.
-  /playlists:
-    get:
-      summary: List manual, smart, and favorite playlists.
-      responses:
-        "200":
-          description: Playlists.
-    post:
-      summary: Create a playlist.
-      responses:
-        "200":
-          description: Created playlist.
-  /playlists/{playlist_id}:
-    get:
-      summary: Return playlist detail and ordered tracks.
-      responses:
-        "200":
-          description: Playlist detail.
-    post:
-      summary: Update playlist metadata or rules.
-      responses:
-        "200":
-          description: Updated playlist.
-    delete:
-      summary: Delete a playlist.
-      responses:
-        "200":
-          description: Playlist deleted.
-  /playlists/{playlist_id}/tracks:
-    post:
-      summary: Add a track at an optional playlist position.
-      responses:
-        "200":
-          description: Updated playlist.
-  /playlists/{playlist_id}/tracks/{track_id}:
-    delete:
-      summary: Remove a track from a playlist.
-      responses:
-        "200":
-          description: Updated playlist.
   /zones/{zone_id}/play-collection:
     post:
       summary: Atomically replace a queue and start one selected collection item.
@@ -613,10 +822,10 @@ paths:
       summary: Return the durable v3 playback session snapshot for one output.
       responses:
         "200":
-          description: Playback session snapshot with epoch and revision.
+          description: Playback session snapshot with epoch, revision and optional queue_source (system_key, result_version, name).
   /playback-v3/zones/{zone_id}/commands:
     post:
-      summary: Apply one idempotent revision-checked playback command.
+      summary: Apply one idempotent revision-checked playback command. replace_queue_and_play may carry source (system_key, result_version, name); referenced batch membership and availability are checked before replacing the queue.
       responses:
         "200":
           description: Applied, duplicate, rejected, or conflict ACK.
@@ -638,6 +847,24 @@ paths:
       responses:
         "200":
           description: Playback statistics.
+  /tracks/{track_id}/display:
+    post:
+      summary: Set the album edition's display attribute (inherit, merged, independent). Copies share the choice; album identity and files are unchanged.
+      responses:
+        "200":
+          description: cursor identifying the saved change. Snapshots at or beyond this cursor replace optimistic client state.
+  /settings/song-display:
+    post:
+      summary: "Set global song list presentation: merge_same_name, attribute_filter (all, inherit, merged, independent), and sort_by_mode. Per-edition choices override grouping. Playback queues retain every item and actual order."
+      responses:
+        "200":
+          description: Saved song display settings, also returned by GET /settings and sync snapshots.
+  /library/tag-mappings/apply:
+    post:
+      summary: Recompute multi-value catalog tags from original metadata and manual overrides using saved delimiters and user-defined tag_mappings. Each rule defines source, 1-5 literal targets and selected fields (genres, track_artists, album_artists, composers, lyricists). Music files remain unchanged.
+      responses:
+        "200":
+          description: Number of updated_tracks. Repeating the operation is idempotent.
   /settings:
     get:
       summary: Return the complete server settings projection.
@@ -677,3 +904,24 @@ paths:
       responses:
         "200":
           description: Metadata settings.
+
+components:
+  schemas:
+    CollectionPredicate:
+      {"oneOf": [{"type": "object", "additionalProperties": false, "properties": {"kind": {"enum": ["all", "any"]}, "conditions": {"type": "array", "items": {"$ref": "#/components/schemas/CollectionPredicate"}, "maxItems": 100}}, "required": ["kind", "conditions"]}, {"type": "object", "additionalProperties": false, "properties": {"kind": {"const": "field"}, "field": {"type": "string"}, "op": {"type": "string"}, "value": {}}, "required": ["kind", "field", "op", "value"]}, {"type": "object", "additionalProperties": false, "properties": {"kind": {"const": "tracks"}, "quantifier": {"enum": ["any", "all", "at_least", "percent"]}, "value": {"type": "integer", "minimum": 0}, "role": {"type": "string", "enum": ["performer", "album_artist", "composer", "lyricist"]}, "condition": {"$ref": "#/components/schemas/CollectionPredicate"}}, "required": ["kind", "quantifier", "value", "role", "condition"]}]}
+    CollectionDefinition:
+      {"type": "object", "additionalProperties": false, "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 300}, "description": {"type": "string", "maxLength": 4000}, "entity_type": {"enum": ["track", "album", "artist", "genre"]}, "cover_album_id": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "included": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true, "maxItems": 10000}, "excluded": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true, "maxItems": 10000}, "automatic": {"anyOf": [{"$ref": "#/components/schemas/CollectionPredicate"}, {"type": "null"}]}, "sort": {"type": "array", "maxItems": 5, "items": {"type": "object", "additionalProperties": false, "properties": {"field": {"type": "string"}, "descending": {"type": "boolean"}}, "required": ["field", "descending"]}}, "limit": {"anyOf": [{"type": "integer", "minimum": 1, "maximum": 10000}, {"type": "null"}]}, "refresh": {"enum": ["live", "daily", "manual"]}, "max_per_artist": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "max_per_album": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "playback": {"type": "object", "additionalProperties": false, "properties": {"filter": {"anyOf": [{"$ref": "#/components/schemas/CollectionPredicate"}, {"type": "null"}]}, "artist_role": {"type": "string", "enum": ["performer", "album_artist", "composer", "lyricist"]}, "order": {"enum": ["album", "name", "random"]}}, "required": ["artist_role", "order"]}}, "required": ["name", "description", "entity_type", "included", "excluded", "sort", "refresh", "playback"]}
+    CollectionWrite:
+      {"type": "object", "additionalProperties": false, "properties": {"expected_revision": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "definition": {"$ref": "#/components/schemas/CollectionDefinition"}}, "required": ["definition"]}
+    CollectionRevision:
+      {"type": "object", "additionalProperties": false, "properties": {"expected_revision": {"type": "integer", "minimum": 1}}, "required": ["expected_revision"]}
+    CollectionRefreshRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"expected_result_version": {"anyOf": [{"type": "string"}, {"type": "null"}]}, "request_id": {"type": "string", "minLength": 1, "maxLength": 200}}, "required": ["request_id"]}
+    CollectionPlayRequest:
+      {"type": "object", "additionalProperties": false, "properties": {"result_version": {"type": "string"}, "entity_ids": {"anyOf": [{"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true, "maxItems": 10000}, {"type": "null"}]}}, "required": ["result_version"]}
+    CollectionSettingsUpdate:
+      {"type": "object", "additionalProperties": false, "properties": {"expected_revision": {"type": "integer", "minimum": 1}, "management_enabled": {"type": "boolean"}}, "required": ["expected_revision", "management_enabled"]}
+    HomeSection:
+      {"type": "object", "additionalProperties": false, "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 100}, "collection_id": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}, "builtin": {"anyOf": [{"enum": ["now_playing", "library", "history", "devices", "stats", "core"]}, {"type": "null"}]}, "title": {"anyOf": [{"type": "string", "maxLength": 300}, {"type": "null"}]}, "layout": {"enum": ["card", "list", "grid", "carousel", "chips"]}, "preview_count": {"type": "integer", "minimum": 1, "maximum": 100}, "width": {"enum": ["wide", "narrow"]}, "hidden": {"type": "boolean"}, "track_columns": {"type": "array", "items": {"enum": ["artist", "album", "year", "genres", "duration", "availability"]}}}, "required": ["id", "layout", "preview_count", "width", "hidden", "track_columns"]}
+    HomeLayoutUpdate:
+      {"type": "object", "additionalProperties": false, "properties": {"expected_revision": {"type": "integer", "minimum": 1}, "sections": {"type": "array", "maxItems": 40, "items": {"$ref": "#/components/schemas/HomeSection"}}}, "required": ["expected_revision", "sections"]}

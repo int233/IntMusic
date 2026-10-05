@@ -3,6 +3,31 @@ use super::*;
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(status))
+        .route(
+            "/collections",
+            get(list_collections).post(create_collection),
+        )
+        .route("/collections/rule-schema", get(collection_schema))
+        .route("/collections/preview", post(preview_collection))
+        .route("/collections/entities/{kind}", get(collection_entities))
+        .route(
+            "/collections/{id}",
+            get(get_collection)
+                .patch(update_collection)
+                .delete(delete_collection),
+        )
+        .route("/collections/{id}/refresh", post(refresh_collection))
+        .route("/collections/{id}/reset", post(reset_collection))
+        .route("/collections/{id}/play", post(collection_play))
+        .route(
+            "/settings/collections",
+            get(collection_settings).patch(update_collection_settings),
+        )
+        .route("/genres/{id}", get(get_genre))
+        .route(
+            "/home-layout",
+            get(get_home_layout).patch(update_home_layout),
+        )
         .route("/library/roots", get(list_roots).post(add_root))
         .route("/library/roots/{id}", delete(remove_root))
         .route(
@@ -155,24 +180,18 @@ pub fn build_router(state: AppState) -> Router {
             post(detach_track_recording),
         )
         .route("/tracks/{track_id}/favorite", post(update_track_favorite))
+        .route("/tracks/{track_id}/display", post(update_track_display))
+        .route("/settings/song-display", post(update_song_display_settings))
+        .route(
+            "/library/tag-mappings/apply",
+            post(apply_library_tag_mappings),
+        )
         .route("/tracks/{track_id}/lyrics", get(track_lyrics))
         .route("/tracks/{track_id}/stream", get(track_stream))
         .route("/artwork/albums/{album_id}", get(album_artwork))
         .route("/artwork/tracks/{track_id}", get(track_artwork))
         .route("/artwork/artists/{artist_id}/{slot}", get(artist_artwork))
         .route("/search", get(search))
-        .route("/playlists", get(list_playlists).post(create_playlist))
-        .route(
-            "/playlists/{playlist_id}",
-            get(get_playlist)
-                .post(update_playlist)
-                .delete(delete_playlist),
-        )
-        .route("/playlists/{playlist_id}/tracks", post(add_playlist_track))
-        .route(
-            "/playlists/{playlist_id}/tracks/{track_id}",
-            delete(remove_playlist_track),
-        )
         .route("/outputs", get(list_outputs))
         .route("/renderers", get(list_renderers))
         .route("/renderers/register", post(register_renderer))
@@ -238,7 +257,11 @@ pub fn build_router(state: AppState) -> Router {
             "/settings/metadata",
             get(metadata_settings).post(update_metadata_settings),
         )
-        .route("/diagnostics", get(diagnostics));
+        .route("/diagnostics", get(diagnostics))
+        .layer(axum::middleware::from_fn_with_state(
+            catalog_guard::CatalogGuard::for_state(&state),
+            catalog_guard::guard_catalog_request,
+        ));
 
     Router::new()
         .nest(API_PREFIX, api)

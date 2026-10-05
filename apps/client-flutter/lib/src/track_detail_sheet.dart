@@ -34,7 +34,10 @@ class _TrackInfoPage extends StatelessWidget {
         child: const Center(child: CircularProgressIndicator()),
       );
     }
-    final track = _asMap(detail['track']);
+    final summary = _asMap(detail['track']);
+    final track =
+        _TrackActionScope.maybeOf(context)?.displayState?.project(summary) ??
+        summary;
     final lyrics = detail['lyrics'] == null ? null : _asMap(detail['lyrics']);
     final genres = (detail['genres'] as List?) ?? const [];
     final composers = (detail['composers'] as List?) ?? const [];
@@ -61,6 +64,7 @@ class _TrackInfoPage extends StatelessWidget {
     Widget details() => Column(
       children: [
         _TrackMediaOverview(
+          coreBaseUrl: coreBaseUrl,
           detail: detail,
           media: media,
           onManage: onManageVersions,
@@ -440,6 +444,12 @@ class _TrackSummaryCard extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 12),
+          ActionChip(
+            label: Text(songDisplayModeLabel(track['display_mode'])),
+            avatar: const Icon(Icons.layers_outlined, size: 18),
+            onPressed: () => unawaited(_showSongDisplay(context, track)),
+          ),
           if (genres.isNotEmpty) ...[
             const SizedBox(height: 14),
             Text(
@@ -633,223 +643,105 @@ class _CreditEntry extends StatelessWidget {
   }
 }
 
-class _TrackMediaOverview extends StatelessWidget {
+class _TrackMediaOverview extends StatefulWidget {
   const _TrackMediaOverview({
+    required this.coreBaseUrl,
     required this.detail,
     required this.media,
     required this.onManage,
   });
-
+  final String coreBaseUrl;
   final Map<String, dynamic> detail;
   final Map<String, dynamic>? media;
   final Future<void> Function() onManage;
+  @override
+  State<_TrackMediaOverview> createState() => _TrackMediaOverviewState();
+}
+
+class _TrackMediaOverviewState extends State<_TrackMediaOverview> {
+  Timer? _timer;
+  Map<String, dynamic>? _media;
+  bool _connected = false;
+  bool _refreshing = false;
+  int _generation = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _media = widget.media;
+    unawaited(_refresh());
+    _timer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => unawaited(_refresh()),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _TrackMediaOverview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.detail != widget.detail ||
+        oldWidget.coreBaseUrl != widget.coreBaseUrl) {
+      _generation++;
+      _media = widget.media;
+      _connected = false;
+      unawaited(_refresh());
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refresh() async {
+    final id = _intValue(_asMap(widget.detail['track'])['id']);
+    if (_refreshing || id == null) return;
+    _refreshing = true;
+    final generation = _generation;
+    try {
+      final media = _asMap(
+        await CoreApiClient(widget.coreBaseUrl).getJson('/tracks/$id/media'),
+      );
+      if (mounted && generation == _generation) {
+        setState(() {
+          _media = media;
+          _connected = true;
+        });
+      }
+    } catch (_) {
+      if (mounted && generation == _generation) {
+        setState(() => _connected = false);
+      }
+    } finally {
+      _refreshing = false;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    final media = this.media ?? const <String, dynamic>{};
-    final work = media['work'] is Map
-        ? _asMap(media['work'])
-        : <String, dynamic>{};
-    final recording = media['recording'] is Map
-        ? _asMap(media['recording'])
-        : <String, dynamic>{};
-    final release = media['release'] == null
-        ? <String, dynamic>{}
-        : _asMap(media['release']);
-    final variants = (media['variants'] as List? ?? const [])
-        .map((item) => (item as Map).cast<String, dynamic>())
-        .toList(growable: false);
-    final allRelated = (media['related_release_tracks'] as List? ?? const [])
-        .map((item) => (item as Map).cast<String, dynamic>())
-        .toList(growable: false);
-    final related = allRelated
-        .where((item) => item['is_current'] != true)
-        .toList(growable: false);
-    List<String> releaseLabelsFor(Map<String, dynamic> variant) {
-      final ids = (variant['release_track_ids'] as List? ?? const [])
-          .map(_intValue)
-          .whereType<int>()
-          .toSet();
-      return allRelated
-          .where((item) => ids.contains(_intValue(item['release_track_id'])))
-          .map((item) {
-            final itemRelease = item['release'] == null
-                ? <String, dynamic>{}
-                : _asMap(item['release']);
-            final title =
-                itemRelease['title']?.toString() ??
-                item['title']?.toString() ??
-                '';
-            return _joinParts([
-              title,
-              itemRelease['year'],
-              if (_intValue(item['disc_number']) case final disc?)
-                '${_tr(context, 'Disc')} $disc',
-              if (_intValue(item['track_number']) case final track?) '#$track',
-            ]);
-          })
-          .where((label) => label.isNotEmpty)
-          .toList(growable: false);
-    }
-
-    final localCopy = detail['_client_local_copy'] == null
-        ? null
-        : _asMap(detail['_client_local_copy']);
-    final hasLegacyFile =
-        (detail['file_path']?.toString().trim() ?? '').isNotEmpty;
-    final legacyReplica = hasLegacyFile
-        ? <String, dynamic>{
-            'file_id': _intValue(_asMap(detail['track'])['file_id']),
-            'device_name': _tr(context, 'Core local'),
-            'source_kind': 'core',
-            'availability_state': detail['scan_status'] == 'missing'
-                ? 'missing'
-                : 'ready',
-            'is_primary': true,
-            'relative_path': detail['relative_path'],
-            'file_path': detail['file_path'],
-            'extension': detail['extension'],
-            'size_bytes': detail['size_bytes'],
-            'modified_at': detail['modified_at'],
-          }
-        : null;
-    int attachmentIndex(Map<String, dynamic>? replica) {
-      if (replica == null || variants.isEmpty) return -1;
-      final mediaVariantId = _intValue(replica['media_variant_id']);
-      if (mediaVariantId != null) {
-        final match = variants.indexWhere(
-          (variant) => _intValue(variant['id']) == mediaVariantId,
-        );
-        if (match >= 0) return match;
-      }
-      final fileId = _intValue(replica['file_id']);
-      if (fileId != null) {
-        final match = variants.indexWhere(
-          (variant) => (variant['replicas'] as List? ?? const []).any(
-            (candidate) =>
-                candidate is Map && _intValue(candidate['file_id']) == fileId,
-          ),
-        );
-        if (match >= 0) return match;
-      }
-      final preferred = variants.indexWhere(
-        (variant) => variant['is_preferred'] == true,
-      );
-      return preferred >= 0 ? preferred : 0;
-    }
-
-    final legacyVariantIndex = attachmentIndex(legacyReplica);
-    final localVariantIndex = attachmentIndex(localCopy);
-
+    final localCopy = widget.detail['_client_local_copy'];
+    final groups = groupReleaseMedia(
+      _media ?? const {},
+      localCopy: localCopy is Map ? _asMap(localCopy) : null,
+    );
     return _HomePanel(
-      title: _tr(context, 'Versions and availability'),
+      title: _tr(context, 'Album editions'),
       trailing: TextButton.icon(
-        onPressed: () => unawaited(onManage()),
-        icon: const Icon(Icons.account_tree_outlined, size: 18),
+        onPressed: () async {
+          await widget.onManage();
+          await _refresh();
+        },
+        icon: const Icon(Icons.link, size: 18),
         label: Text(_tr(context, 'Manage versions')),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (work.isNotEmpty || recording.isNotEmpty) ...[
-            _MediaCatalogHierarchy(
-              work: work,
-              recording: recording,
-              releaseCount: allRelated.length,
-            ),
-            const SizedBox(height: 14),
-          ],
-          if (_recordingKindLabel(
-                    context,
-                    recording['recording_kind']?.toString(),
-                  ) !=
-                  null ||
-              release.isNotEmpty) ...[
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                if (_recordingKindLabel(
-                      context,
-                      recording['recording_kind']?.toString(),
-                    )
-                    case final recordingKind?)
-                  _MediaIdentityChip(
-                    icon: recording['recording_kind'] == 'live'
-                        ? Icons.mic_external_on_outlined
-                        : Icons.graphic_eq,
-                    label: recordingKind,
-                  ),
-                if ((release['title']?.toString() ?? '').isNotEmpty)
-                  _MediaIdentityChip(
-                    icon: Icons.album_outlined,
-                    label: release['title'].toString(),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 14),
-          ],
-          if (variants.isNotEmpty)
-            for (var index = 0; index < variants.length; index++) ...[
-              _MediaVariantRow(
-                variant: variants[index],
-                releaseLabels: releaseLabelsFor(variants[index]),
-                legacyReplica: index == legacyVariantIndex
-                    ? legacyReplica
-                    : null,
-                localCopy: index == localVariantIndex ? localCopy : null,
-              ),
-              if (index != variants.length - 1)
-                Divider(height: 22, color: tokens.stroke),
-            ]
-          else ...[
-            _MediaVariantRow(
-              variant: const <String, dynamic>{},
-              releaseLabels: const [],
-              legacyReplica: legacyReplica,
-              localCopy: localCopy,
-            ),
-          ],
-          if (related.isNotEmpty) ...[
-            const SizedBox(height: 16),
-            Divider(height: 1, color: tokens.stroke),
-            const SizedBox(height: 12),
-            Text(
-              _tr(context, 'Also appears on'),
-              style: Theme.of(
-                context,
-              ).textTheme.labelLarge?.copyWith(color: tokens.textSecondary),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: related
-                  .map((item) {
-                    final relatedRelease = item['release'] == null
-                        ? <String, dynamic>{}
-                        : _asMap(item['release']);
-                    final title =
-                        relatedRelease['title']?.toString() ??
-                        item['title']?.toString() ??
-                        '-';
-                    final position = _joinParts([
-                      relatedRelease['year'],
-                      if (_intValue(item['disc_number']) != null)
-                        '${_tr(context, 'Disc')} ${item['disc_number']}',
-                      if (_intValue(item['track_number']) != null)
-                        '#${item['track_number']}',
-                    ]);
-                    return Chip(
-                      avatar: const Icon(Icons.album_outlined, size: 16),
-                      label: Text(
-                        position.isEmpty ? title : '$title · $position',
-                      ),
-                    );
-                  })
-                  .toList(growable: false),
-            ),
+          if (groups.isEmpty) Text(_tr(context, 'No linked release tracks')),
+          for (var i = 0; i < groups.length; i++) ...[
+            if (i > 0) const SizedBox(height: 12),
+            _ReleaseMediaCard(group: groups[i], coreConnected: _connected),
           ],
         ],
       ),

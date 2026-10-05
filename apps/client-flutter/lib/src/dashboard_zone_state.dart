@@ -126,7 +126,6 @@ extension _DashboardZoneState on _CoreDashboardState {
           () => player.setVolume(effectiveMuted ? 0 : normalized),
         );
       }
-      _markPlaybackIntentAppliedLocally(intentId);
       if (mounted) {
         _mutatePlayback(() {
           _zones = _zones
@@ -380,18 +379,6 @@ extension _DashboardZoneState on _CoreDashboardState {
     final trackId = _intValue(zone['track_id']);
     final state = zone['state']?.toString();
     var positionMs = _intValue(zone['position_ms']) ?? 0;
-    final currentZoneId = _playback?['zone_id']?.toString();
-    final currentTrackId = _intValue(_playback?['track_id']);
-    if (zoneId?.toString() == currentZoneId &&
-        trackId != null &&
-        trackId == currentTrackId &&
-        (state == 'playing' || state == 'paused')) {
-      final currentPosition = _estimatedPlaybackPositionMs(_playback);
-      if (positionMs + 1500 < currentPosition) {
-        positionMs = currentPosition;
-      }
-    }
-
     return <String, dynamic>{
       'zone_id': zoneId,
       'state': state,
@@ -432,38 +419,28 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   void _mergePlaybackEvent(Map<String, dynamic> playback) {
-    final stablePlayback = _stabilizeIncomingPlayback(playback);
     final zoneId = playback['zone_id']?.toString();
-    final activeZoneId = _activeZoneId();
-    if (zoneId == _selectedZoneId || zoneId == activeZoneId) {
-      _applyPlayback(stablePlayback);
+    final snapshot = _rendererSnapshotsByOutput[zoneId];
+    final command = _rendererActiveCommandByOutput[zoneId];
+    final observed =
+        snapshot != null &&
+        command != null &&
+        playback['command_sequence'] == command['sequence'] &&
+        playback['track_id'] == command['track_id'];
+    final current = observed
+        ? <String, dynamic>{
+            ...playback,
+            'state': snapshot.phase == RendererPhase.completed
+                ? 'loading'
+                : snapshot.transport,
+            'position_ms': snapshot.positionMs,
+          }
+        : playback;
+    if (zoneId == _selectedZoneId || zoneId == _activeZoneId()) {
+      _applyPlayback(current);
     } else {
-      _upsertZoneFromPlayback(stablePlayback);
+      _upsertZoneFromPlayback(current);
     }
-  }
-
-  Map<String, dynamic> _stabilizeIncomingPlayback(
-    Map<String, dynamic> playback,
-  ) {
-    final zoneId = playback['zone_id']?.toString();
-    final trackId = _intValue(playback['track_id']);
-    final state = playback['state']?.toString();
-    final currentZoneId = _playback?['zone_id']?.toString();
-    final currentTrackId = _intValue(_playback?['track_id']);
-    if (zoneId == null ||
-        zoneId != currentZoneId ||
-        trackId == null ||
-        trackId != currentTrackId ||
-        (state != 'playing' && state != 'paused')) {
-      return playback;
-    }
-
-    final incomingPosition = _intValue(playback['position_ms']) ?? 0;
-    final currentPosition = _estimatedPlaybackPositionMs(_playback);
-    if (incomingPosition + 1500 >= currentPosition) {
-      return playback;
-    }
-    return <String, dynamic>{...playback, 'position_ms': currentPosition};
   }
 
   Map<String, dynamic> _withPlaybackTimestamp(Map<String, dynamic> playback) {

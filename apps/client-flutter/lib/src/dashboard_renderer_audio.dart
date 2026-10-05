@@ -1,7 +1,7 @@
 part of '../intmusic_client.dart';
 
 extension _DashboardRendererAudio on _CoreDashboardState {
-  Future<_RendererAudioPlayer> _playerForOutput(String outputId) async {
+  Future<RendererSession> _playerForOutput(String outputId) async {
     final existing = _audioPlayers[outputId];
     if (existing != null) {
       return existing;
@@ -18,77 +18,111 @@ extension _DashboardRendererAudio on _CoreDashboardState {
     }
   }
 
-  Future<_RendererAudioPlayer> _createRendererPlayer(String outputId) async {
+  Future<RendererSession> _createRendererPlayer(String outputId) async {
     final device = _rendererAudioDevicesByOutput[outputId];
     if (device == null) {
       throw StateError('audio output is no longer available: $outputId');
     }
-    _RendererAudioPlayer? player;
-    try {
-      if (_usesDesktopRendererBackend) {
-        final mediaKitPlayer = Player(
-          configuration: const PlayerConfiguration(title: 'IntMusic'),
-        );
-        player = _MediaKitRendererAudioPlayer(mediaKitPlayer);
-        await mediaKitPlayer.setAudioDevice(device);
-        await _configureDesktopRendererAudio(mediaKitPlayer, outputId);
-        _audioParamsSubscriptions[outputId] = mediaKitPlayer.stream.audioParams
-            .distinct()
-            .listen((params) {
-              ClientLog.event(
-                'renderer.player.audio_params',
-                data: <String, Object?>{
-                  'output_id': outputId,
-                  'track_id': _rendererLoadedTrackByOutput[outputId],
-                  'format': params.format,
-                  'sample_rate': params.sampleRate,
-                  'channels': params.channels,
-                  'channel_count': params.channelCount,
-                  'human_readable_channels': params.hrChannels,
-                },
-              );
-            });
-      } else {
-        final mobilePlayer = ap.AudioPlayer();
-        await mobilePlayer.setReleaseMode(ap.ReleaseMode.stop);
-        player = _MobileRendererAudioPlayer(mobilePlayer);
-      }
-      _audioCompleteSubscriptions[outputId] = player.completed
-          .where((completed) => completed)
-          .listen((_) {
-            _rendererFailoverTimers.remove(outputId)?.cancel();
-            unawaited(_handleOutputComplete(outputId).catchError((_) {}));
-          });
-      _audioPlayingSubscriptions[outputId] = player.playing.distinct().listen((
-        playing,
-      ) {
-        _rendererPlayingByOutput[outputId] = playing;
-        if (playing) {
-          _rendererFailoverTimers.remove(outputId)?.cancel();
-        } else {
-          _scheduleRendererSourceFailover(
-            outputId,
-            reason: 'core_stream_inactive',
+    final session = RendererSession(
+      createEngine: () async {
+        if (_usesDesktopRendererBackend) {
+          final player = Player(
+            configuration: const PlayerConfiguration(title: 'IntMusic'),
+          );
+          try {
+            await player.setAudioDevice(device);
+            await _configureDesktopRendererAudio(player, outputId);
+            return _MediaKitRendererAudioPlayer(player);
+          } catch (_) {
+            await player.dispose();
+            rethrow;
+          }
+        }
+        final player = ap.AudioPlayer();
+        await player.setReleaseMode(ap.ReleaseMode.stop);
+        return _MobileRendererAudioPlayer(player);
+      },
+    );
+    String? reportedTransport;
+    _rendererSessionSubscriptions[outputId] = session.states.listen((snapshot) {
+      _rendererSnapshotsByOutput[outputId] = snapshot;
+      final command = _rendererActiveCommandByOutput[outputId];
+      _rendererPlayingByOutput[outputId] =
+          snapshot.phase == RendererPhase.playing;
+      if (snapshot.phase == RendererPhase.completed) {
+        if (command != null) {
+          _applyRendererCommandStateLocally(
+            'loading',
+            outputId: outputId,
+            command: command,
+            positionMs: snapshot.positionMs,
           );
         }
+        unawaited(
+          _handleOutputComplete(outputId, command).catchError((
+            Object error,
+            StackTrace stack,
+          ) {
+            ClientLog.error(
+              'renderer.completion.failed',
+              error,
+              stackTrace: stack,
+            );
+            if (mounted) {
+              _mutate(() => _error = 'Could not advance playback: $error');
+            }
+          }),
+        );
+        return;
+      }
+      if (snapshot.phase == RendererPhase.failed) {
+        _desiredTransportStateByZone[outputId] = 'stopped';
+        if (mounted) {
+          _mutate(() => _error = 'Playback failed: ${snapshot.error}');
+        }
         ClientLog.event(
-          playing
-              ? 'renderer.player.audio_started'
-              : 'renderer.player.audio_inactive',
-          data: <String, Object?>{
+          'renderer.decoder.failed',
+          level: 'error',
+          data: {
             'output_id': outputId,
-            'track_id': _rendererLoadedTrackByOutput[outputId],
+            'track_id': command?['track_id'],
+            'error': snapshot.error,
           },
         );
-      });
-      return player;
-    } catch (_) {
-      await _audioCompleteSubscriptions.remove(outputId)?.cancel();
-      await _audioPlayingSubscriptions.remove(outputId)?.cancel();
-      await _audioParamsSubscriptions.remove(outputId)?.cancel();
-      await player?.dispose();
-      rethrow;
-    }
+      }
+      // Positions come exclusively from this decoder, including after seeking.
+      if (command != null) {
+        _applyRendererCommandStateLocally(
+          snapshot.transport,
+          outputId: outputId,
+          command: command,
+          positionMs: snapshot.positionMs,
+        );
+      } else if (_localPlaybackFallbackActive) {
+        final previous = _rendererPlaybackByOutput[outputId];
+        if (previous != null && mounted) {
+          final playback = _withPlaybackTimestamp({
+            ...previous,
+            'state': snapshot.transport,
+            'position_ms': snapshot.positionMs,
+          });
+          _rendererPlaybackByOutput[outputId] = playback;
+          _mutatePlayback(() => _mergePlaybackEvent(playback));
+        }
+      }
+      if (snapshot.transport != reportedTransport) {
+        reportedTransport = snapshot.transport;
+        if (command != null && !_localPlaybackFallbackActive) {
+          _reportRendererStateInBackground(
+            snapshot.transport,
+            outputId: outputId,
+            command: command,
+            positionMs: snapshot.positionMs,
+          );
+        }
+      }
+    });
+    return session;
   }
 
   Future<void> _configureDesktopRendererAudio(
@@ -118,13 +152,11 @@ extension _DashboardRendererAudio on _CoreDashboardState {
   }
 
   Future<void> _disposeRendererPlayer(String outputId) async {
-    final subscription = _audioCompleteSubscriptions.remove(outputId);
-    await subscription?.cancel();
-    final playingSubscription = _audioPlayingSubscriptions.remove(outputId);
-    await playingSubscription?.cancel();
+    await _rendererSessionSubscriptions.remove(outputId)?.cancel();
+    _rendererActiveCommandByOutput.remove(outputId);
+    _rendererSnapshotsByOutput.remove(outputId);
     final paramsSubscription = _audioParamsSubscriptions.remove(outputId);
     await paramsSubscription?.cancel();
-    _rendererFailoverTimers.remove(outputId)?.cancel();
     _rendererPlayingByOutput.remove(outputId);
     _rendererAudioOperationDepthByOutput.remove(outputId);
     _rendererFailoverBusy.remove(outputId);
@@ -141,40 +173,24 @@ extension _DashboardRendererAudio on _CoreDashboardState {
     }
   }
 
-  Future<void> _handleOutputComplete(String outputId) async {
-    final ownsActivePlayback =
-        outputId == _offlineOutputForZone(_playback?['zone_id']?.toString());
-    if (ownsActivePlayback) {
-      if (_localPlaybackFallbackActive &&
-          _rendererLocalFileByOutput[outputId] == true) {
-        await _finishOfflinePlayback('completed');
-      }
+  Future<void> _handleOutputComplete(
+    String outputId,
+    Map<String, dynamic>? command,
+  ) async {
+    if (_localPlaybackFallbackActive) {
+      await _finishOfflinePlayback('completed');
       await _playNextTrack(automatic: true);
       return;
     }
-    await _reportRendererState('stopped', outputId: outputId);
-  }
-
-  void _scheduleRendererSourceFailover(
-    String outputId, {
-    required String reason,
-    Duration delay = const Duration(milliseconds: 800),
-  }) {
-    if (_rendererLocalFileByOutput[outputId] == true ||
-        _rendererLoadedTrackByOutput[outputId] == null) {
-      return;
-    }
-    _rendererFailoverTimers.remove(outputId)?.cancel();
-    _rendererFailoverTimers[outputId] = Timer(delay, () {
-      _rendererFailoverTimers.remove(outputId);
-      unawaited(
-        _failoverRendererSource(
-          outputId,
-          reason: reason,
-          requireInactive: true,
-        ),
-      );
+    final sequence = _intValue(command?['sequence']);
+    if (sequence == null) throw StateError('Decoder has no command identity');
+    final playback = await _postPlaybackSessionActionV3(outputId, {
+      'type': 'complete',
+      'command_sequence': sequence,
     });
+    if (mounted && playback != null) {
+      _mutatePlayback(() => _mergePlaybackEvent(playback));
+    }
   }
 
   Future<void> _failoverActiveCoreStreams(
@@ -254,12 +270,11 @@ extension _DashboardRendererAudio on _CoreDashboardState {
       },
     );
     try {
-      await _runRendererAudioOperation(outputId, 'failover_stop', player.stop);
       await _runRendererAudioOperation(
         outputId,
         'failover_open_local',
         () => player.open(path, localFile: true),
-        timeout: const Duration(seconds: 6),
+        timeout: const Duration(seconds: 15),
       );
       if (positionMs > 0) {
         await _runRendererAudioOperation(

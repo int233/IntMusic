@@ -3,25 +3,16 @@ part of '../intmusic_client.dart';
 extension _DashboardRendererCommands on _CoreDashboardState {
   Future<void> _refreshSettingsCache() async {
     try {
-      final values = await Future.wait<dynamic>([
-        _api.getJson('/settings/server'),
-        _api.getJson('/settings/favorites'),
-        _api.getJson('/settings/metadata'),
-      ]);
+      final settings = _asMap(await _api.getJson('/settings'));
       if (mounted) {
         _mutate(() {
-          _serverSettings = _asMap(values[0]);
-          _favoriteSettings = _asMap(values[1]);
-          _metadataSettings = _asMap(values[2]);
+          _serverSettings = _asMap(settings['server']);
+          _favoriteSettings = _asMap(settings['favorites']);
+          _metadataSettings = _asMap(settings['metadata']);
+          _songDisplaySettings = _asMap(settings['song_display']);
         });
       }
-      await _persistOverviewValues(<String, dynamic>{
-        'settings': <String, dynamic>{
-          'server': values[0],
-          'favorites': values[1],
-          'metadata': values[2],
-        },
-      });
+      await _persistOverviewValues({'settings': settings});
     } catch (error) {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
     }
@@ -41,11 +32,6 @@ extension _DashboardRendererCommands on _CoreDashboardState {
       _desiredTransportStateByZone[outputId] = 'stopped';
     }
     try {
-      final intentId = command['intent_id']?.toString();
-      if (intentId != null && _locallyAppliedPlaybackIntents.remove(intentId)) {
-        _acknowledgeLocallyAppliedRendererCommand(command, outputId);
-        return;
-      }
       if (action == 'volume' &&
           command['volume_mode']?.toString() == 'system') {
         final volume =
@@ -78,6 +64,9 @@ extension _DashboardRendererCommands on _CoreDashboardState {
           () => player.setVolume(playerMuted ? 0.0 : playerVolume),
         );
       }
+      if (action != 'volume') {
+        _rendererActiveCommandByOutput[outputId] = Map.of(command);
+      }
       switch (action) {
         case 'play':
           final streamPath = command['stream_path']?.toString();
@@ -86,37 +75,6 @@ extension _DashboardRendererCommands on _CoreDashboardState {
           }
           final positionMs = _intValue(command['position_ms']) ?? 0;
           final trackId = _intValue(command['track_id']);
-          final optimisticTrack = _optimisticLocalTrackByOutput[outputId];
-          final optimisticStarted = _optimisticLocalStartedAtByOutput[outputId];
-          final reuseOptimisticLocal =
-              trackId != null &&
-              optimisticTrack == trackId &&
-              optimisticStarted != null &&
-              DateTime.now().difference(optimisticStarted) <
-                  const Duration(seconds: 30) &&
-              _rendererLocalFileByOutput[outputId] == true &&
-              _desiredTransportStateByZone[outputId] == 'playing' &&
-              _rendererCommandStillExecutable(command);
-          if (reuseOptimisticLocal) {
-            _optimisticLocalTrackByOutput.remove(outputId);
-            _optimisticLocalStartedAtByOutput.remove(outputId);
-            ClientLog.event(
-              'renderer.command.reused_local_fast_start',
-              data: <String, Object?>{
-                'track_id': trackId,
-                'output_id': outputId,
-                'command_delay_ms': DateTime.now()
-                    .difference(optimisticStarted)
-                    .inMilliseconds,
-              },
-            );
-            _reportRendererStateInBackground(
-              'playing',
-              outputId: outputId,
-              command: command,
-            );
-            break;
-          }
           final source = await _rendererSource(trackId, streamPath);
           final openWatch = Stopwatch()..start();
           ClientLog.event(
@@ -127,11 +85,6 @@ extension _DashboardRendererCommands on _CoreDashboardState {
               'source': source.localFile ? 'local' : 'core_stream',
             },
           );
-          await _runRendererAudioOperation(
-            outputId,
-            'stop_before_open',
-            player.stop,
-          );
           if (trackId != null) {
             _rendererLoadedTrackByOutput[outputId] = trackId;
           }
@@ -139,9 +92,7 @@ extension _DashboardRendererCommands on _CoreDashboardState {
             outputId,
             'open',
             () => player.open(source.uri, localFile: source.localFile),
-            timeout: source.localFile
-                ? const Duration(seconds: 6)
-                : const Duration(seconds: 10),
+            timeout: const Duration(seconds: 15),
           );
           _rendererLocalFileByOutput[outputId] = source.localFile;
           ClientLog.event(
@@ -166,8 +117,9 @@ extension _DashboardRendererCommands on _CoreDashboardState {
             _dropRendererCommand(command, 'superseded_during_open');
             break;
           }
+          if (player.snapshot.phase == RendererPhase.completed) break;
           _reportRendererStateInBackground(
-            'playing',
+            player.snapshot.transport,
             outputId: outputId,
             command: command,
             positionMs: positionMs,
@@ -190,8 +142,9 @@ extension _DashboardRendererCommands on _CoreDashboardState {
             _dropRendererCommand(command, 'superseded_during_resume');
             break;
           }
+          if (player.snapshot.phase == RendererPhase.completed) break;
           _reportRendererStateInBackground(
-            'playing',
+            player.snapshot.transport,
             outputId: outputId,
             command: command,
             positionMs: loaded ? positionMs : null,
@@ -209,8 +162,6 @@ extension _DashboardRendererCommands on _CoreDashboardState {
           await _runRendererAudioOperation(outputId, 'stop', player.stop);
           _rendererLoadedTrackByOutput.remove(outputId);
           _rendererLocalFileByOutput.remove(outputId);
-          _optimisticLocalTrackByOutput.remove(outputId);
-          _optimisticLocalStartedAtByOutput.remove(outputId);
           _reportRendererStateInBackground(
             'stopped',
             outputId: outputId,
@@ -232,8 +183,9 @@ extension _DashboardRendererCommands on _CoreDashboardState {
               () => player.seek(Duration(milliseconds: positionMs)),
             );
           }
+          if (player.snapshot.phase == RendererPhase.completed) break;
           _reportRendererStateInBackground(
-            'playing',
+            player.snapshot.transport,
             outputId: outputId,
             command: command,
             positionMs: positionMs,
@@ -269,7 +221,12 @@ extension _DashboardRendererCommands on _CoreDashboardState {
       if (error is TimeoutException) {
         await _disposeRendererPlayer(outputId);
       }
-      _reportRendererStateInBackground('stopped', outputId: outputId);
+      _desiredTransportStateByZone[outputId] = 'stopped';
+      _reportRendererStateInBackground(
+        'stopped',
+        outputId: outputId,
+        command: command,
+      );
     }
   }
 }

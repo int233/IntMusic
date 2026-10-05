@@ -24,9 +24,15 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'core/navigation_history.dart';
 import 'core/artwork_cache_coordinator.dart';
 import 'core/json_values.dart';
+import 'core/library_sync.dart';
+import 'core/release_media.dart';
+import 'core/song_display.dart';
+import 'core/collections.dart';
+import 'core/serial_task_queue.dart';
 import 'core/logging/client_log.dart';
 import 'core/network/core_api_client.dart';
 import 'core/playback_agent.dart';
+import 'core/playback/renderer_session.dart';
 import 'core/renderer_audio_output_policy.dart';
 import 'core/renderer_command_sequences.dart';
 import 'core/storage/client_cache_database.dart';
@@ -43,6 +49,10 @@ part 'src/app_shell.dart';
 part 'src/app_top_bar.dart';
 part 'src/app_sidebar.dart';
 part 'src/home_page.dart';
+part 'src/collection_pages.dart';
+part 'src/collection_editor.dart';
+part 'src/collection_rule_editor.dart';
+part 'src/home_layout_editor.dart';
 part 'src/library_pages.dart';
 part 'src/track_library_page.dart';
 part 'src/playback_page.dart';
@@ -57,13 +67,12 @@ part 'src/library_management_merge.dart';
 part 'src/library_management_auto_merge.dart';
 part 'src/library_management_devices.dart';
 part 'src/library_management_formatting.dart';
-part 'src/playlist_pages.dart';
-part 'src/playlist_detail_page.dart';
 part 'src/settings_page.dart';
 part 'src/settings_distribution.dart';
 part 'src/settings_library.dart';
 part 'src/settings_pending_files.dart';
 part 'src/settings_preferences.dart';
+part 'src/song_display.dart';
 part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
 part 'src/track_detail_sheet.dart';
@@ -116,7 +125,6 @@ const _prefsClientAliasKey = 'intmusic.client_alias';
 const _prefsAlbumViewModeKey = 'intmusic.view.albums';
 const _prefsArtistViewModeKey = 'intmusic.view.artists';
 const _prefsTrackViewModeKey = 'intmusic.view.tracks';
-const _prefsPlaylistViewModeKey = 'intmusic.view.playlists';
 const _prefsRecentSearchesKey = 'intmusic.search.recent';
 const _prefsPinCurrentClientRegionKey =
     'intmusic.playback_regions.pin_current_client';
@@ -130,12 +138,6 @@ final CacheManager _artworkCacheManager = CacheManager(
     maxNrOfCacheObjects: Platform.isAndroid ? 4000 : 8000,
   ),
 );
-
-class _SupersededPlaybackIntent implements Exception {
-  const _SupersededPlaybackIntent(this.intentId);
-
-  final String intentId;
-}
 
 void runIntMusicClient() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -194,17 +196,20 @@ class _CoreDashboardState extends State<CoreDashboard>
     text: 'http://127.0.0.1:49330',
   );
   final _searchController = TextEditingController();
+  final _collections = CollectionStore();
   final _serverAliasController = TextEditingController();
   final _clientAliasController = TextEditingController();
   final _libraryRootController = TextEditingController();
-  final Map<String, Future<_RendererAudioPlayer>> _audioPlayers = {};
-  final Map<String, StreamSubscription<bool>> _audioCompleteSubscriptions = {};
-  final Map<String, StreamSubscription<bool>> _audioPlayingSubscriptions = {};
+  final Map<String, Future<RendererSession>> _audioPlayers = {};
+  final Map<String, StreamSubscription<RendererSnapshot>>
+  _rendererSessionSubscriptions = {};
+  final Map<String, Map<String, dynamic>> _rendererActiveCommandByOutput = {};
   final Map<String, StreamSubscription<AudioParams>> _audioParamsSubscriptions =
       {};
   final Map<String, AudioDevice> _rendererAudioDevicesByOutput = {};
   final Map<String, _SystemVolumeState> _rendererSystemVolumeByOutput = {};
   final Map<String, Map<String, dynamic>> _rendererPlaybackByOutput = {};
+  final Map<String, RendererSnapshot> _rendererSnapshotsByOutput = {};
   final Map<String, int> _rendererLoadedTrackByOutput = {};
   Player? _rendererDeviceProbe;
   StreamSubscription<List<AudioDevice>>? _rendererDeviceSubscription;
@@ -232,16 +237,12 @@ class _CoreDashboardState extends State<CoreDashboard>
   bool _rendererRegistrationNeedsPlaybackSync = false;
   final RendererCommandSequences _rendererCommandSequences =
       RendererCommandSequences();
-  final Map<String, DateTime> _latestRendererCommandIssuedAtByOutput = {};
   final Map<String, int> _playbackStateSequenceByZone = {};
   final Map<String, int> _rendererOperationGenerationByOutput = {};
   final Map<String, Future<void>> _rendererCommandQueueByOutput = {};
-  final Map<String, Future<void>> _playbackRequestQueueByZone = {};
-  final Map<String, String> _latestPlaybackIntentByZone = {};
-  final Map<String, String> _latestVolumeIntentByZone = {};
-  final Map<String, DateTime> _latestPlaybackIntentAtByZone = {};
+  final Map<String, SerialTaskQueue> _playbackRequestsByZone = {};
+  final Map<String, SerialTaskQueue> _rendererReportsByOutput = {};
   final Map<String, String> _desiredTransportStateByZone = {};
-  final Set<String> _locallyAppliedPlaybackIntents = {};
   final Map<String, Map<String, dynamic>> _pendingPlaybackCommandsV3 = {};
   bool _reconcilingPendingPlaybackCommandsV3 = false;
   SharedPreferences? _preferences;
@@ -266,9 +267,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<int, Map<String, dynamic>> _trackDetailCache = {};
   final Map<int, Map<String, dynamic>> _albumDetailCache = {};
   final Map<int, Map<String, dynamic>> _artistDetailCache = {};
-  final Map<int, Map<String, dynamic>> _playlistDetailCache = {};
   final Map<int, Map<String, dynamic>> _trackAvailabilityById = {};
-  final Map<int, double> _playlistScrollOffsets = <int, double>{};
   String? _trackAvailabilityPresenceSignature;
   final Map<String, Map<String, dynamic>> _searchResultCache = {};
   Map<String, dynamic>? _playbackStats;
@@ -278,13 +277,14 @@ class _CoreDashboardState extends State<CoreDashboard>
   List<dynamic> _tracks = const [];
   List<dynamic> _outputs = const [];
   List<dynamic> _zones = const [];
-  List<dynamic> _playlists = const [];
   List<dynamic> _libraryRoots = const [];
   List<_ClientLibraryRoot> _clientLibraryRoots = const [];
   List<dynamic> _clientLibraryStatuses = const [];
   List<dynamic> _distributionJobs = const [];
   Map<String, dynamic>? _transcodingStatus;
-  Future<void> _clientLibrarySyncQueue = Future<void>.value();
+  final _clientLibrarySyncQueue = SerialTaskQueue();
+  final _catalogSyncQueue = SerialTaskQueue();
+  final _offlineMutationSyncQueue = SerialTaskQueue();
   final Set<String> _clientLibraryQueuedRootIds = <String>{};
   final Set<String> _clientLibrarySyncingRootIds = <String>{};
   final Set<String> _distributionDirtyRootIds = <String>{};
@@ -310,26 +310,25 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Set<int> _verifiedLocalTrackIds = <int>{};
   bool _diagnosticLoggingEnabled = true;
   String _diagnosticLogPath = '';
-  final Map<String, int> _optimisticLocalTrackByOutput = <String, int>{};
-  final Map<String, DateTime> _optimisticLocalStartedAtByOutput =
-      <String, DateTime>{};
+
   final Map<String, bool> _rendererLocalFileByOutput = <String, bool>{};
   final Map<String, bool> _rendererPlayingByOutput = <String, bool>{};
   final Map<String, int> _rendererAudioOperationDepthByOutput = <String, int>{};
-  final Map<String, Timer> _rendererFailoverTimers = <String, Timer>{};
   final Set<String> _rendererFailoverBusy = <String>{};
   DateTime? _offlinePlaybackStartedAt;
   int _offlinePlaybackStartPositionMs = 0;
   List<dynamic> _playbackHistory = const [];
   Map<String, dynamic>? _favoriteSettings;
   Map<String, dynamic>? _metadataSettings;
+  Map<String, dynamic> _songDisplaySettings = {};
+  final _songDisplayState = SongDisplayState();
+  final _songDisplaySettingsQueue = SerialTaskQueue();
   String _searchQuery = '';
   final Map<String, _SearchScope> _searchScopeByQuery = {};
   final Map<String, _SearchSort> _searchSortByQuery = {};
   _LibraryViewMode _albumViewMode = _LibraryViewMode.grid;
   _LibraryViewMode _artistViewMode = _LibraryViewMode.grid;
   _LibraryViewMode _trackViewMode = _LibraryViewMode.list;
-  _LibraryViewMode _playlistViewMode = _LibraryViewMode.grid;
   bool _pinCurrentClientRegion = true;
   _ZoneRegionSort _zoneRegionSort = _ZoneRegionSort.playingFirst;
   List<_SearchSuggestion> _searchSuggestions = const [];
@@ -387,15 +386,9 @@ class _CoreDashboardState extends State<CoreDashboard>
     _offlineReconnectTimer?.cancel();
     _playbackCheckpointTimer?.cancel();
     _searchDebounce?.cancel();
-    for (final timer in _rendererFailoverTimers.values) {
-      timer.cancel();
-    }
     unawaited(_reportRendererShutdown());
     unawaited(_eventSocket?.close() ?? Future<void>.value());
-    for (final subscription in _audioCompleteSubscriptions.values) {
-      unawaited(subscription.cancel());
-    }
-    for (final subscription in _audioPlayingSubscriptions.values) {
+    for (final subscription in _rendererSessionSubscriptions.values) {
       unawaited(subscription.cancel());
     }
     for (final subscription in _audioParamsSubscriptions.values) {
@@ -418,6 +411,8 @@ class _CoreDashboardState extends State<CoreDashboard>
     _serverAliasController.dispose();
     _clientAliasController.dispose();
     _libraryRootController.dispose();
+    _songDisplayState.dispose();
+    _collections.dispose();
     _playbackRevision.dispose();
     _playbackRevealController.dispose();
     super.dispose();
@@ -452,17 +447,31 @@ class _CoreDashboardState extends State<CoreDashboard>
     }
   }
 
+  Widget _withTrackActions({required Widget child}) => _TrackActionScope(
+    onPlayNext: (trackId) => _addTrackToQueue(trackId, playNext: true),
+    onAddToQueue: (trackId) => _addTrackToQueue(trackId),
+    onPlayCollection: _playCollection,
+    onQueueCollection: (trackIds, playNext) =>
+        _addTracksToQueue(trackIds, playNext: playNext),
+    onDistributeCollection: _distributeTracks,
+    songDisplaySettings: _songDisplaySettings,
+    displayState: _songDisplayState,
+    onSetSongDisplaySettings: _setSongDisplaySettings,
+    catalogTracks: _tracks,
+    onPlayListSong: _playTrackFromCollection,
+    onSetDisplayMode: _setSongDisplayMode,
+    onApplyTagMappings: _applyTagMappings,
+    onOpenTrack: _openTrackDetail,
+    onPlayTrack: _playTrack,
+    child: child,
+  );
+
   @override
   Widget build(BuildContext context) {
+    _collections.configure(_api, _status);
     return _LocaleScope(
       language: _language,
-      child: _TrackActionScope(
-        onPlayNext: (trackId) => _addTrackToQueue(trackId, playNext: true),
-        onAddToQueue: (trackId) => _addTrackToQueue(trackId),
-        onPlayCollection: _playCollection,
-        onQueueCollection: (trackIds, playNext) =>
-            _addTracksToQueue(trackIds, playNext: playNext),
-        onDistributeCollection: _distributeTracks,
+      child: _withTrackActions(
         child: CallbackShortcuts(
           bindings: <ShortcutActivator, VoidCallback>{
             const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true):

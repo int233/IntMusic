@@ -8,7 +8,7 @@ use protocol::{
 };
 use tokio::sync::RwLock;
 
-const ONLINE_WINDOW_SECONDS: i64 = 35;
+const ONLINE_WINDOW_SECONDS: i64 = protocol::DEVICE_ONLINE_SECONDS;
 
 #[derive(Clone, Default)]
 pub struct RendererRegistry {
@@ -308,19 +308,12 @@ impl RendererRegistry {
 
         let previous = node.states.get(&output_id);
         if let Some(previous) = previous {
-            if previous.command_sequence.is_some()
-                && report.command_sequence.is_none()
-                && (report.state != previous.state
-                    || report.track_id != previous.track_id
-                    || report.track_title != previous.track_title)
-            {
-                return Ok(previous.clone());
-            }
-        }
-        if let (Some(previous), Some(command_sequence)) = (previous, report.command_sequence) {
-            if previous
-                .command_sequence
-                .is_some_and(|previous_sequence| command_sequence < previous_sequence)
+            // A renderer can acknowledge only the active transport command.
+            // Equal sequence also prevents pre-restart decoders from reviving
+            // state in a new Core process or after a renderer reset.
+            if report.command_sequence != previous.command_sequence
+                || (report.state != PlaybackTransportState::Stopped
+                    && report.track_id != previous.track_id)
             {
                 return Ok(previous.clone());
             }
@@ -498,6 +491,10 @@ mod tests {
         assert_eq!(stale.command_sequence, Some(2));
         assert_eq!(stale.intent_id.as_deref(), Some("new-intent"));
 
+        // Core publishes sequence 3 before its decoder may acknowledge it.
+        let mut issued = registry.state_for_output(&output_id).await.unwrap();
+        issued.command_sequence = Some(3);
+        registry.update_state(issued).await.unwrap();
         let current = registry
             .report_state(
                 "client-a",

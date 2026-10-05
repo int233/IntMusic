@@ -1,6 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intmusic_client/core/playback_agent.dart';
-import 'package:intmusic_client/core/playback_queue_policy.dart';
 
 Map<String, dynamic> queue({
   String mode = 'sequential',
@@ -12,15 +11,15 @@ Map<String, dynamic> queue({
   'current_index': currentIndex,
   'items': <Map<String, dynamic>>[
     <String, dynamic>{
-      'id': 'a',
+      'id': '00000000-0000-4000-8000-000000000011',
       'track': <String, dynamic>{'id': 11},
     },
     <String, dynamic>{
-      'id': 'b',
+      'id': '00000000-0000-4000-8000-000000000012',
       'track': <String, dynamic>{'id': 12},
     },
     <String, dynamic>{
-      'id': 'c',
+      'id': '00000000-0000-4000-8000-000000000013',
       'track': <String, dynamic>{'id': 13},
     },
   ],
@@ -39,12 +38,12 @@ void main() {
     },
   );
 
-  test('manual next exposes wrapped candidates for local-copy selection', () {
+  test('manual next stops at the end unless repeat-all is enabled', () {
     final agent = PlaybackAgent('output')..restore(queue(currentIndex: 2));
 
     expect(
       agent.nextCandidates(automatic: false).map((item) => item.trackId),
-      <int>[11, 12, 13],
+      <int>[],
     );
   });
 
@@ -62,7 +61,7 @@ void main() {
   test('shuffle traversal is stable and covers every queue item once', () {
     List<int> traversal() {
       final agent = PlaybackAgent('output')
-        ..restore(queue(mode: 'shuffle', currentIndex: 0));
+        ..restore(queue(mode: 'shuffle', currentIndex: null));
       return agent
           .nextCandidates(automatic: true)
           .map((item) => item.trackId)
@@ -71,24 +70,6 @@ void main() {
 
     expect(traversal(), traversal());
     expect(traversal().toSet(), <int>{11, 12, 13});
-  });
-
-  test('numeric queue IDs preserve the legacy Core shuffle order', () {
-    final source = queue(mode: 'shuffle');
-    final items = source['items']! as List<Map<String, dynamic>>;
-    for (var index = 0; index < items.length; index += 1) {
-      items[index]['id'] = 11 + index;
-    }
-    final agent = PlaybackAgent('output')..restore(source);
-    final legacy = nextPlaybackQueueItem(
-      itemIds: const <int>[11, 12, 13],
-      currentIndex: 0,
-      mode: 'shuffle',
-      shuffleSeed: 41,
-      automatic: true,
-    );
-
-    expect(agent.nextCandidates(automatic: true).first.index, legacy.index);
   });
 
   test('checkpoint preserves the selected cursor', () {

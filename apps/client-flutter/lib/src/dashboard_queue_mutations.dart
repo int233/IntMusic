@@ -47,18 +47,6 @@ extension _DashboardQueueMutations on _CoreDashboardState {
       }
       return;
     }
-
-    final queue = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue/items',
-          <String, dynamic>{'track_ids': trackIds, 'position': ?position},
-        ),
-      ),
-    );
-    if (!mounted || queue == null) return;
-    _mutatePlayback(() => _applyPlaybackQueue(queue));
-    _showQueueAddedMessage(trackIds.length, playNext: playNext);
   }
 
   void _showQueueAddedMessage(int count, {required bool playNext}) {
@@ -123,21 +111,6 @@ extension _DashboardQueueMutations on _CoreDashboardState {
       return _playbackQueue ?? <String, dynamic>{'zone_id': _activeZoneId()};
     }
 
-    final queue = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson(
-          '/zones/${Uri.encodeComponent(_activeZoneId())}/queue',
-          <String, dynamic>{
-            'track_ids': trackIds,
-            'start_index': startIndex,
-            'mode': (mode ?? _playbackMode).nameForApi,
-          },
-        ),
-      ),
-    );
-    if (mounted && queue != null) {
-      _mutatePlayback(() => _applyPlaybackQueue(queue));
-    }
-    return queue;
+    return null;
   }
 }

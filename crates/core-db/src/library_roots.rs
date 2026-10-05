@@ -86,29 +86,7 @@ pub async fn library_counts(pool: &DbPool) -> Result<LibraryCounts> {
     Ok(LibraryCounts {
         library_roots: count(pool, "library_roots", "enabled = 1 AND root_kind = 'core'").await?,
         files: count(pool, "files", "deleted_at IS NULL").await?,
-        tracks: sqlx::query_scalar(
-            r#"
-            SELECT
-                (
-                    SELECT COUNT(DISTINCT release_track.recording_id)
-                    FROM legacy_track_catalog_links link
-                    JOIN release_tracks release_track
-                      ON release_track.id = link.release_track_id
-                    LEFT JOIN track_merge_members member
-                      ON member.track_id = link.track_id
-                    WHERE member.track_id IS NULL
-                ) + (
-                    SELECT COUNT(*)
-                    FROM tracks track
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM legacy_track_catalog_links link
-                        WHERE link.track_id = track.id
-                    )
-                )
-            "#,
-        )
-        .fetch_one(pool)
-        .await?,
+        tracks: count(pool, "visible_catalog_tracks", "1 = 1").await?,
         albums: sqlx::query_scalar(
             r#"
             SELECT COUNT(DISTINCT identity.canonical_album_id)

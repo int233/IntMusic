@@ -102,12 +102,16 @@ class _TrackVersionManagerDialogState
     });
   }
 
-  Future<void> _detach() async {
+  Future<void> _detach(ReleaseMediaGroup group) async {
+    final trackId = group.trackId;
+    if (trackId == null) return;
     final confirmed =
         await showDialog<bool>(
           context: context,
           builder: (context) => AlertDialog(
-            title: Text(_tr(context, 'Separate this recording?')),
+            title: Text(
+              '${_tr(context, 'Separate')} · ${group.release['title'] ?? ''}',
+            ),
             content: Text(
               _tr(
                 context,
@@ -131,7 +135,7 @@ class _TrackVersionManagerDialogState
       return;
     }
     await _mutate(
-      '/tracks/${widget.trackId}/recording/detach',
+      '/tracks/$trackId/recording/detach',
       const <String, dynamic>{},
     );
   }
@@ -142,7 +146,10 @@ class _TrackVersionManagerDialogState
       _error = null;
     });
     try {
-      final media = _asMap(await widget.api.postJson(path, payload));
+      await widget.api.postJson(path, payload);
+      final media = _asMap(
+        await widget.api.getJson('/tracks/${widget.trackId}/media'),
+      );
       if (!mounted) {
         return;
       }
@@ -166,12 +173,7 @@ class _TrackVersionManagerDialogState
   @override
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
-    final recording = _media['recording'] == null
-        ? <String, dynamic>{}
-        : _asMap(_media['recording']);
-    final related = (_media['related_release_tracks'] as List? ?? const [])
-        .map((item) => (item as Map).cast<String, dynamic>())
-        .toList(growable: false);
+    final groups = groupReleaseMedia(_media);
     final unlinked = _candidates
         .where((candidate) => candidate['already_linked'] != true)
         .toList(growable: false);
@@ -224,71 +226,21 @@ class _TrackVersionManagerDialogState
                 children: [
                   _VersionManagerNotice(),
                   const SizedBox(height: 18),
-                  _VersionManagerSection(
-                    title: _tr(context, 'Current recording'),
-                    child: Row(
-                      children: [
-                        Container(
-                          width: 46,
-                          height: 46,
-                          decoration: BoxDecoration(
-                            color: tokens.accent.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Icon(Icons.graphic_eq, color: tokens.accent),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                recording['title']?.toString() ?? '-',
-                                style: Theme.of(context).textTheme.titleMedium,
-                              ),
-                              Text(
-                                _joinParts([
-                                  _recordingKindLabel(
-                                    context,
-                                    recording['recording_kind']?.toString(),
-                                  ),
-                                  '${related.length} ${_tr(context, 'release tracks')}',
-                                ]),
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(color: tokens.textSecondary),
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (related.length > 1)
-                          OutlinedButton.icon(
-                            onPressed: _saving ? null : _detach,
-                            icon: const Icon(Icons.call_split_outlined),
-                            label: Text(_tr(context, 'Separate')),
-                          ),
-                      ],
+                  for (final group in groups) ...[
+                    _ReleaseMediaCard(
+                      group: group,
+                      coreConnected: true,
+                      action: groups.length <= 1
+                          ? null
+                          : IconButton(
+                              onPressed: _saving ? null : () => _detach(group),
+                              tooltip: _tr(context, 'Separate'),
+                              icon: const Icon(Icons.link_off),
+                            ),
                     ),
-                  ),
-                  const SizedBox(height: 18),
-                  _VersionManagerSection(
-                    title: _tr(context, 'Release tracks using this recording'),
-                    child: related.isEmpty
-                        ? Text(_tr(context, 'No linked release tracks'))
-                        : Column(
-                            children: [
-                              for (
-                                var index = 0;
-                                index < related.length;
-                                index++
-                              ) ...[
-                                _LinkedReleaseRow(item: related[index]),
-                                if (index != related.length - 1)
-                                  Divider(height: 18, color: tokens.stroke),
-                              ],
-                            ],
-                          ),
-                  ),
-                  const SizedBox(height: 18),
+                    const SizedBox(height: 12),
+                  ],
+                  const SizedBox(height: 6),
                   _VersionManagerSection(
                     title: _tr(context, 'Possible matches'),
                     trailing: _loading
@@ -423,60 +375,6 @@ class _VersionManagerSection extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _LinkedReleaseRow extends StatelessWidget {
-  const _LinkedReleaseRow({required this.item});
-
-  final Map<String, dynamic> item;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    final release = item['release'] == null
-        ? <String, dynamic>{}
-        : _asMap(item['release']);
-    return Row(
-      children: [
-        Icon(
-          item['is_current'] == true
-              ? Icons.radio_button_checked
-              : Icons.album_outlined,
-          color: item['is_current'] == true
-              ? tokens.accent
-              : tokens.textSecondary,
-          size: 20,
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                release['title']?.toString() ??
-                    item['title']?.toString() ??
-                    '-',
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
-              Text(
-                _joinParts([
-                  release['year'],
-                  if (_intValue(item['disc_number']) != null)
-                    '${_tr(context, 'Disc')} ${item['disc_number']}',
-                  if (_intValue(item['track_number']) != null)
-                    '#${item['track_number']}',
-                  if (item['is_current'] == true) _tr(context, 'Current'),
-                ]),
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
-              ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 }

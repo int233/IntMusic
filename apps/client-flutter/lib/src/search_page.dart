@@ -51,10 +51,13 @@ class _SearchPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final tracks = (search?['tracks'] as List?) ?? const [];
+    final tracks = _displayTracks(
+      context,
+      _sortedTracks((search?['tracks'] as List?) ?? const [], sort),
+    );
     final albums = (search?['albums'] as List?) ?? const [];
     final artists = (search?['artists'] as List?) ?? const [];
-    final playlists = (search?['playlists'] as List?) ?? const [];
+    final playlists = (search?['collections'] as List?) ?? const [];
 
     return _PageFrame(
       title: 'Search results',
@@ -118,13 +121,14 @@ class _SearchPage extends StatelessWidget {
               coreBaseUrl: coreBaseUrl,
               title: 'Tracks',
               icon: Icons.music_note_outlined,
-              items: _sortedTracks(tracks, sort),
+              items: tracks,
               itemKind: _ResultKind.track,
               onOpenAlbum: onOpenAlbum,
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
               onOpenPlaylist: onOpenPlaylist,
-              onPlayTrack: onPlayTrack,
+              onPlayTrack: (id) =>
+                  _playDisplayedSong(context, id, tracks, onPlayTrack),
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
             ),
@@ -139,7 +143,8 @@ class _SearchPage extends StatelessWidget {
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
               onOpenPlaylist: onOpenPlaylist,
-              onPlayTrack: onPlayTrack,
+              onPlayTrack: (id) =>
+                  _playDisplayedSong(context, id, tracks, onPlayTrack),
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
             ),
@@ -154,7 +159,8 @@ class _SearchPage extends StatelessWidget {
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
               onOpenPlaylist: onOpenPlaylist,
-              onPlayTrack: onPlayTrack,
+              onPlayTrack: (id) =>
+                  _playDisplayedSong(context, id, tracks, onPlayTrack),
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
             ),
@@ -169,7 +175,8 @@ class _SearchPage extends StatelessWidget {
               onOpenArtist: onOpenArtist,
               onOpenTrack: onOpenTrack,
               onOpenPlaylist: onOpenPlaylist,
-              onPlayTrack: onPlayTrack,
+              onPlayTrack: (id) =>
+                  _playDisplayedSong(context, id, tracks, onPlayTrack),
               onToggleFavorite: onToggleFavorite,
               onAddToPlaylist: onAddToPlaylist,
             ),
@@ -441,6 +448,7 @@ class _SheetTrackRow extends StatelessWidget {
     this.onPlay,
     this.onAddToPlaylist,
     this.onRemove,
+    this.showAvailability = true,
   });
 
   final Map<String, dynamic> track;
@@ -452,6 +460,7 @@ class _SheetTrackRow extends StatelessWidget {
   final VoidCallback? onPlay;
   final VoidCallback? onAddToPlaylist;
   final VoidCallback? onRemove;
+  final bool showAvailability;
 
   @override
   Widget build(BuildContext context) {
@@ -594,7 +603,8 @@ class _SheetTrackRow extends StatelessWidget {
                                         ),
                                   ),
                                 ),
-                                if (track['_availability'] is Map) ...[
+                                if (showAvailability &&
+                                    track['_availability'] is Map) ...[
                                   const SizedBox(width: 6),
                                   _TrackAvailabilityBadge(
                                     track: track,
@@ -624,7 +634,8 @@ class _SheetTrackRow extends StatelessWidget {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              _TrackAvailabilityBadge(track: track, compact: true),
+              if (showAvailability)
+                _TrackAvailabilityBadge(track: track, compact: true),
               const SizedBox(width: 4),
               _TrackActions(
                 track: track,

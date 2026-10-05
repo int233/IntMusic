@@ -460,3 +460,98 @@ async fn matching_a_legacy_catalogued_file_folds_its_placeholder_track() {
 
     close_test_pool(pool, path).await;
 }
+
+#[tokio::test]
+async fn presence_is_a_heartbeat_lease_not_an_inventory_timestamp() {
+    let (pool, path) = test_pool().await;
+    register_device_presence(&pool, "empty-mac", "Mac", "macos")
+        .await
+        .unwrap();
+    let devices = list_library_devices(&pool).await.unwrap();
+    let mac = devices.iter().find(|d| d.device_id == "empty-mac").unwrap();
+    assert_eq!(mac.state, "online");
+    assert!(mac.sources.is_empty());
+
+    let result = upsert_client_library_manifest(
+        &pool,
+        &client_manifest(
+            "phone",
+            "music",
+            "song.flac",
+            "ready",
+            ClientTrackManifest {
+                title: "A song".into(),
+                album: Some("Album".into()),
+                track_artists: vec!["Artist".into()],
+                track_number: Some(1),
+                duration_ms: Some(240000),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let track = result.bindings[0].track_id;
+    let pool_ref = &pool;
+    let check = |state: &'static str| async move {
+        let pool = pool_ref;
+        let profile = track_media_profile(pool, track).await.unwrap().unwrap();
+        let copy = profile
+            .variants
+            .iter()
+            .flat_map(|v| &v.replicas)
+            .find(|r| r.device_id.as_deref() == Some("phone"))
+            .unwrap();
+        assert_eq!(copy.availability_state, "ready");
+        assert_eq!(copy.presence_state, state);
+        let files = list_library_files(
+            pool,
+            &LibraryFileQuery {
+                device_id: Some("phone".into()),
+                status: Some(state.into()),
+                limit: 100,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(files.total, 1);
+        assert_eq!(files.items[0].presence_state, state);
+        let device = list_library_devices(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|d| d.device_id == "phone")
+            .unwrap();
+        assert_eq!(
+            device.state,
+            if state == "available" {
+                "online"
+            } else {
+                "offline"
+            }
+        );
+        assert_eq!(
+            device.sources[0].available_file_count,
+            if state == "available" { 1 } else { 0 }
+        );
+    };
+    check("offline").await; // A fresh manifest alone never grants online state.
+    register_device_presence(&pool, "phone", "Mate80", "android")
+        .await
+        .unwrap();
+    check("available").await;
+    sqlx::query("UPDATE devices SET online_until = '2000-01-01T00:00:00Z' WHERE id = 'phone'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    check("offline").await;
+    renew_device_presence(&pool, "phone").await.unwrap();
+    check("available").await;
+    sqlx::query("UPDATE devices SET online_until = NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    check("offline").await; // Core restart drops leases, not inventory.
+    close_test_pool(pool, path).await;
+}

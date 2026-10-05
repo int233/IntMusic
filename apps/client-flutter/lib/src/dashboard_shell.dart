@@ -288,6 +288,13 @@ extension _DashboardShell on _CoreDashboardState {
     switch (_currentRoute.kind) {
       case _AppRouteKind.home:
         return _HomePage(
+          store: _collections,
+          onEditCollection: _editCollection,
+          onOpenCollection: (id) => unawaited(_openPlaylistDetail(id)),
+          onOpenEntity: _openCollectionEntity,
+          onPlayCollection: (id, tracks, source) =>
+              _playTrackFromCollection(id, tracks, source: source),
+          onToggleFavorite: _toggleFavorite,
           coreBaseUrl: _coreUrlController.text,
           status: _status,
           playback: _playback,
@@ -340,18 +347,10 @@ extension _DashboardShell on _CoreDashboardState {
           ),
         );
       case _AppRouteKind.playlists:
-        return _PlaylistsPage(
-          playlists: _playlists,
-          onOpenPlaylist: _openPlaylistDetail,
-          onCreateManual: _createManualPlaylist,
-          onCreateSmart: _createSmartPlaylist,
-          onDeletePlaylist: _deletePlaylist,
-          viewMode: _playlistViewMode,
-          onViewModeChanged: (mode) => _setLibraryViewMode(
-            _prefsPlaylistViewModeKey,
-            mode,
-            (mode) => _playlistViewMode = mode,
-          ),
+        return _CollectionsPage(
+          store: _collections,
+          onOpen: (id) => unawaited(_openPlaylistDetail(id)),
+          onEdit: _editCollection,
         );
       case _AppRouteKind.playback:
         return _buildPlaybackPage();
@@ -372,6 +371,10 @@ extension _DashboardShell on _CoreDashboardState {
         );
       case _AppRouteKind.settings:
         return _SettingsPage(
+          collectionSettings: _CollectionSettingsPanel(
+            store: _collections,
+            onEdit: _editCollection,
+          ),
           coreUrlController: _coreUrlController,
           serverAliasController: _serverAliasController,
           clientAliasController: _clientAliasController,
@@ -423,24 +426,31 @@ extension _DashboardShell on _CoreDashboardState {
         );
       case _AppRouteKind.search:
         final query = _currentRoute.query ?? _searchQuery;
-        return _SearchPage(
-          coreBaseUrl: _coreUrlController.text,
-          query: query,
-          search: _searchResultCache[query],
-          scope: _searchScopeByQuery[query] ?? _SearchScope.all,
-          sort: _searchSortByQuery[query] ?? _SearchSort.relevance,
-          onScopeChanged: (scope) =>
-              _mutate(() => _searchScopeByQuery[query] = scope),
-          onSortChanged: (sort) =>
-              _mutate(() => _searchSortByQuery[query] = sort),
-          onOpenAlbum: _openAlbumDetail,
-          onOpenArtist: _openArtistDetail,
-          onOpenTrack: _openTrackDetail,
-          onOpenPlaylist: _openPlaylistDetail,
-          onPlayTrack: _playTrack,
-          onToggleFavorite: _toggleFavorite,
-          onAddToPlaylist: _addTrackToPlaylist,
+        return ListenableBuilder(
+          listenable: _collections,
+          builder: (context, _) => _SearchPage(
+            coreBaseUrl: _coreUrlController.text,
+            query: query,
+            search: {
+              ...?_searchResultCache[query],
+              'collections': _collections.search(query),
+            },
+            scope: _searchScopeByQuery[query] ?? _SearchScope.all,
+            sort: _searchSortByQuery[query] ?? _SearchSort.relevance,
+            onScopeChanged: (scope) =>
+                _mutate(() => _searchScopeByQuery[query] = scope),
+            onSortChanged: (sort) =>
+                _mutate(() => _searchSortByQuery[query] = sort),
+            onOpenAlbum: _openAlbumDetail,
+            onOpenArtist: _openArtistDetail,
+            onOpenTrack: _openTrackDetail,
+            onOpenPlaylist: _openPlaylistDetail,
+            onPlayTrack: _playTrack,
+            onToggleFavorite: _toggleFavorite,
+            onAddToPlaylist: _addTrackToPlaylist,
+          ),
         );
+
       case _AppRouteKind.track:
         final trackId = _currentRoute.entityId;
         return _TrackInfoPage(
@@ -495,34 +505,17 @@ extension _DashboardShell on _CoreDashboardState {
           onAddToPlaylist: _addTrackToPlaylist,
         );
       case _AppRouteKind.playlist:
-        final playlistId = _currentRoute.entityId;
-        final detail =
-            _playlistDetailCache[playlistId] ?? const <String, dynamic>{};
-        return _PlaylistDetailPage(
-          key: ValueKey('playlist-detail-$playlistId'),
+        return _CollectionBlock(
+          key: ValueKey('${_collections.identity}:${_currentRoute.entityId}'),
+          store: _collections,
+          id: _currentRoute.entityId!,
+          fullPage: true,
           coreBaseUrl: _coreUrlController.text,
-          detail: detail,
-          initialScrollOffset: playlistId == null
-              ? 0
-              : _playlistScrollOffsets[playlistId] ?? 0,
-          onScrollOffsetChanged: (offset) {
-            if (playlistId != null) _playlistScrollOffsets[playlistId] = offset;
-          },
-          onPlayTrack: (trackId) => _playTrackFromCollection(
-            trackId,
-            (detail['tracks'] as List?) ?? const [],
-          ),
-          onOpenTrack: _openTrackDetail,
+          onOpenEntity: _openCollectionEntity,
+          onPlay: (id, tracks, source) =>
+              _playTrackFromCollection(id, tracks, source: source),
           onToggleFavorite: _toggleFavorite,
-          onEditSmart: playlistId == null
-              ? () async {}
-              : () => _editSmartPlaylist(playlistId, detail),
-          onRemoveTrack: playlistId == null
-              ? (_) async {}
-              : (trackId) => _removeTrackFromPlaylist(
-                  playlistId: playlistId,
-                  trackId: trackId,
-                ),
+          onEdit: _editCollection,
         );
     }
   }

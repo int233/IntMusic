@@ -3,8 +3,6 @@ use super::*;
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct EventsWsQuery {
     renderer_id: Option<String>,
-    #[serde(default)]
-    after_cursor: u64,
 }
 
 pub(crate) async fn events_ws(
@@ -12,32 +10,17 @@ pub(crate) async fn events_ws(
     Query(query): Query<EventsWsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state, query.renderer_id, query.after_cursor))
+    ws.on_upgrade(move |socket| handle_ws(socket, state, query.renderer_id))
 }
 
-pub(crate) async fn handle_ws(
-    socket: WebSocket,
-    state: AppState,
-    _renderer_id: Option<String>,
-    after_cursor: u64,
-) {
+pub(crate) async fn handle_ws(socket: WebSocket, state: AppState, renderer_id: Option<String>) {
     let (mut sender, mut receiver) = socket.split();
     let mut event_rx = state.inner.events.subscribe();
-    let mut delivered_cursor = after_cursor;
-
-    match replay_missed_events(&mut sender, &state, delivered_cursor).await {
-        Ok(Some(cursor)) => delivered_cursor = cursor,
-        Ok(None) => return,
-        Err(error) => {
-            warn!(%error, after_cursor, "failed to replay Core events");
-            let event = EventEnvelope::new(
-                "connection.snapshot_required",
-                json!({ "reason": "event_replay_failed" }),
-            );
-            if !send_ws_event(&mut sender, &event).await {
-                return;
-            }
-        }
+    // Playback commands and transport reports are ephemeral. Reconnection
+    // restores the current snapshot; it never re-executes historical commands.
+    let mut delivered_cursor = state.inner.event_cursor.load(Ordering::SeqCst);
+    if !send_snapshot_required(&mut sender, delivered_cursor, "connected").await {
+        return;
     }
 
     loop {
@@ -76,6 +59,7 @@ pub(crate) async fn handle_ws(
             event = event_rx.recv() => {
                 match event {
                     Ok(event) => {
+                        if !event_is_for_renderer(&event, renderer_id.as_deref()) { continue; }
                         let event_cursor = event.cursor.unwrap_or(0);
                         if event_cursor > 0 && event_cursor <= delivered_cursor {
                             continue;
@@ -87,26 +71,9 @@ pub(crate) async fn handle_ws(
                             break;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(skipped, "event subscriber lagged");
-                        match replay_missed_events(
-                            &mut sender,
-                            &state,
-                            delivered_cursor,
-                        ).await {
-                            Ok(Some(cursor)) => delivered_cursor = cursor,
-                            Ok(None) => break,
-                            Err(error) => {
-                                warn!(%error, skipped, "failed to recover lagged event subscriber");
-                                let event = EventEnvelope::new(
-                                    "connection.snapshot_required",
-                                    json!({ "reason": "event_lag", "skipped": skipped }),
-                                );
-                                if !send_ws_event(&mut sender, &event).await {
-                                    break;
-                                }
-                            }
-                        }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        delivered_cursor = state.inner.event_cursor.load(Ordering::SeqCst);
+                        if !send_snapshot_required(&mut sender, delivered_cursor, "event_lag").await { break; }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -115,32 +82,24 @@ pub(crate) async fn handle_ws(
     }
 }
 
-async fn replay_missed_events(
+fn event_is_for_renderer(event: &EventEnvelope, renderer_id: Option<&str>) -> bool {
+    event.event_type != "renderer.command"
+        || event.payload.get("renderer_id").and_then(|v| v.as_str()) == renderer_id
+}
+
+async fn send_snapshot_required(
     sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    state: &AppState,
-    mut cursor: u64,
-) -> Result<Option<u64>> {
-    loop {
-        let page = core_db::replay_events(state.pool(), cursor, 500).await?;
-        if page.requires_snapshot {
-            let event = EventEnvelope::new(
-                "connection.snapshot_required",
-                json!({ "reason": "event_retention_gap", "after_cursor": cursor }),
-            );
-            if !send_ws_event(sender, &event).await {
-                return Ok(None);
-            }
-        }
-        for event in page.events {
-            if !send_ws_event(sender, &event).await {
-                return Ok(None);
-            }
-        }
-        cursor = page.scanned_cursor;
-        if !page.has_more {
-            return Ok(Some(cursor));
-        }
-    }
+    cursor: u64,
+    reason: &str,
+) -> bool {
+    send_ws_event(
+        sender,
+        &EventEnvelope::new(
+            "connection.snapshot_required",
+            json!({"reason": reason, "event_cursor": cursor}),
+        ),
+    )
+    .await
 }
 
 pub(crate) async fn send_ws_event(
@@ -169,5 +128,19 @@ pub(crate) async fn send_ws_event(
             error!(error = %error, "failed to serialize event");
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn renderer_commands_are_delivered_only_to_their_decoder_owner() {
+        let command = EventEnvelope::new("renderer.command", json!({"renderer_id": "mac"}));
+        assert!(event_is_for_renderer(&command, Some("mac")));
+        assert!(!event_is_for_renderer(&command, Some("phone")));
+        assert!(!event_is_for_renderer(&command, None));
+        let state = EventEnvelope::new("playback.state_changed", json!({}));
+        assert!(event_is_for_renderer(&state, Some("phone")));
     }
 }

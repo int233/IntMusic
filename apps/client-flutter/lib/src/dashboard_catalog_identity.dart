@@ -2,7 +2,8 @@ part of '../intmusic_client.dart';
 
 extension _DashboardCatalogIdentity on _CoreDashboardState {
   void _reconcileOfflineCopyBindings(List<dynamic> bindings) {
-    if (bindings.isEmpty || _offlineLibrary.copies.isEmpty) return;
+    if (_offlineLibrary.copies.isEmpty) return;
+    final boundKeys = <String>{};
     var changed = false;
     for (final value in bindings) {
       if (value is! Map) continue;
@@ -18,6 +19,7 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
         continue;
       }
       final key = '$rootExternalId\u0000$externalId';
+      boundKeys.add(key);
       final copy = _offlineLibrary.copies[key];
       if (copy == null ||
           (copy.trackId == trackId && copy.mediaVariantId == mediaVariantId)) {
@@ -29,6 +31,14 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
       );
       changed = true;
     }
+    _offlineLibrary.copies.removeWhere((key, copy) {
+      // A live scan may have uploaded new bindings after this snapshot began.
+      final removed =
+          !_clientLibrarySyncingRootIds.contains(copy.rootExternalId) &&
+          !boundKeys.contains(key);
+      changed |= removed;
+      return removed;
+    });
     if (changed) unawaited(_OfflineLibraryStore.save(_offlineLibrary));
   }
 
@@ -38,7 +48,9 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
   ) async {
     final serverId = status['server_id']?.toString().trim() ?? '';
     final catalogEpoch = status['catalog_epoch']?.toString().trim() ?? '';
-    if (serverId.isEmpty || catalogEpoch.isEmpty) return false;
+    if (serverId.isEmpty || catalogEpoch.isEmpty) {
+      throw StateError('Core must provide server_id and catalog_epoch');
+    }
 
     final knownServerId = _cacheServerId ?? _offlineLibrary.serverId;
     final knownCatalogEpoch =
@@ -47,7 +59,7 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
         _tracks.isNotEmpty ||
         _albums.isNotEmpty ||
         _artists.isNotEmpty ||
-        _playlists.isNotEmpty ||
+        _collections.items.isNotEmpty ||
         _offlineLibrary.copies.isNotEmpty ||
         _offlineLibrary.outbox.isNotEmpty;
     final serverChanged =
@@ -60,7 +72,12 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
             knownCatalogEpoch != catalogEpoch) ||
         (knownCatalogEpoch == null &&
             (hasLogicalState || _clientLibraryRoots.isNotEmpty));
-    if (!serverChanged && !epochChanged) {
+    final offlineIdentityChanged =
+        (_offlineLibrary.copies.isNotEmpty ||
+            _offlineLibrary.outbox.isNotEmpty) &&
+        (_offlineLibrary.serverId != serverId ||
+            _offlineLibrary.catalogEpoch != catalogEpoch);
+    if (!serverChanged && !epochChanged && !offlineIdentityChanged) {
       _cacheServerId = serverId;
       _cacheCatalogEpoch = catalogEpoch;
       _offlineLibrary.serverId = serverId;
@@ -88,6 +105,11 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
         stackTrace: stackTrace,
       );
     }
+    if (!mounted ||
+        CoreApiClient.normalizeBaseUrl(coreUrl) !=
+            CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
+      throw StateError('Core connection changed during catalog reset');
+    }
     _cacheServerId = serverId;
     _cacheCatalogEpoch = catalogEpoch;
     _cacheCursor = 0;
@@ -95,15 +117,22 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
     _albums = const <dynamic>[];
     _artists = const <dynamic>[];
     _tracks = const <dynamic>[];
-    _playlists = const <dynamic>[];
+    _songDisplayState.reset();
+    _collections.reset();
     _playbackHistory = const <dynamic>[];
     _playbackStats = null;
+    _playbackQueue = null;
+    _playbackAgentsByOutput.clear();
+    _pendingPlaybackCommandsV3.clear();
+    for (final output in _audioPlayers.keys.toList()) {
+      await _disposeRendererPlayer(output);
+    }
+    _playback = null;
     _activeTrackDetail = null;
     _activeTrackDetailId = null;
     _trackDetailCache.clear();
     _albumDetailCache.clear();
     _artistDetailCache.clear();
-    _playlistDetailCache.clear();
     _trackAvailabilityById.clear();
     _searchResultCache.clear();
     _detailRefreshScopes.clear();
@@ -129,37 +158,5 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
       'catalog.local_rebind_finished',
       data: <String, Object?>{'copy_count': _offlineLibrary.copies.length},
     );
-  }
-
-  Future<Map<String, dynamic>> _loadLegacySyncSnapshot(
-    Map<String, dynamic> status,
-  ) async {
-    final values = await Future.wait<dynamic>([
-      _loadPagedList('/albums'),
-      _loadPagedList('/artists'),
-      _loadPagedList('/tracks'),
-      _api.getJson('/playlists'),
-      _api.getJson('/playback/history?limit=250'),
-      _api.getJson('/playback/stats?top_limit=50'),
-      _api.getJson('/library/roots'),
-      _api.getJson('/client-library/manifests'),
-      _api.getJson('/settings'),
-    ]);
-    return <String, dynamic>{
-      'server_id': status['server_id']?.toString() ?? '',
-      'catalog_epoch': status['catalog_epoch']?.toString() ?? '',
-      'cursor': _intValue(status['library_revision']) ?? 0,
-      'generated_at': DateTime.now().toUtc().toIso8601String(),
-      'albums': values[0],
-      'artists': values[1],
-      'tracks': values[2],
-      'playlists': values[3],
-      'playback_history': values[4],
-      'playback_stats': values[5],
-      'library_roots': values[6],
-      'client_library_roots': values[7],
-      'client_file_bindings': const <dynamic>[],
-      'settings': values[8],
-    };
   }
 }

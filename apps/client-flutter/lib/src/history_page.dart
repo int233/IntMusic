@@ -17,8 +17,11 @@ class _HistoryPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final topTracks = (stats?['top_tracks'] as List?) ?? const [];
-    final eventMaps = events
+    final topTracks = _displayTrackStats(
+      context,
+      (stats?['top_tracks'] as List?) ?? const [],
+    );
+    final eventMaps = _displayHistoryEvents(context, events)
         .map((item) => (item as Map).cast<String, dynamic>())
         .take(100)
         .toList(growable: false);

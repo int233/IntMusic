@@ -21,35 +21,51 @@ class _DiscoveredCore {
 Future<List<_DiscoveredCore>> _discoverIntMusicCores({
   String? hintBaseUrl,
   bool includeLanScan = false,
+  String? requiredServerId,
 }) async {
   final hintUri = Uri.tryParse(hintBaseUrl?.trim() ?? '');
   if (hintUri != null &&
       (hintUri.scheme == 'http' || hintUri.scheme == 'https') &&
       hintUri.host.isNotEmpty &&
       hintUri.hasPort) {
-    final hinted = await _verifyCoreCandidates(<_DiscoveredCore>[
-      _DiscoveredCore(
-        baseUrl: Uri(
-          scheme: hintUri.scheme,
-          host: hintUri.host,
-          port: hintUri.port,
-        ).toString(),
-        source: 'saved Core',
-      ),
-    ], probeTimeout: const Duration(milliseconds: 2500));
+    final hinted = await _verifyCoreCandidates(
+      <_DiscoveredCore>[
+        _DiscoveredCore(
+          baseUrl: Uri(
+            scheme: hintUri.scheme,
+            host: hintUri.host,
+            port: hintUri.port,
+          ).toString(),
+          source: 'saved Core',
+        ),
+      ],
+      probeTimeout: const Duration(milliseconds: 2500),
+      requiredServerId: requiredServerId,
+    );
     if (hinted.isNotEmpty) {
       return hinted;
     }
+    // On a known host only the Core port may have changed. Check it before
+    // multicast discovery, whose replies can be delayed or blocked by VPNs.
+    final moved = await _verifyCoreCandidates(
+      _portRangeCandidates({hintUri.host}, 'saved Core host'),
+      requiredServerId: requiredServerId,
+    );
+    if (moved.isNotEmpty) return moved;
   }
 
   final installed = await _verifyCoreCandidates(
     await _installedCoreCandidates(),
+    requiredServerId: requiredServerId,
   );
   if (installed.isNotEmpty) {
     return installed;
   }
 
-  final mdns = await _verifyCoreCandidates(await _discoverMdnsCores());
+  final mdns = await _verifyCoreCandidates(
+    await _discoverMdnsCores(),
+    requiredServerId: requiredServerId,
+  );
   if (mdns.isNotEmpty) {
     return mdns;
   }
@@ -63,6 +79,7 @@ Future<List<_DiscoveredCore>> _discoverIntMusicCores({
 
   final direct = await _verifyCoreCandidates(
     _portRangeCandidates(directHosts, 'local scan'),
+    requiredServerId: requiredServerId,
   );
   if (direct.isNotEmpty) {
     return direct;
@@ -76,6 +93,7 @@ Future<List<_DiscoveredCore>> _discoverIntMusicCores({
   return _verifyCoreCandidates(
     _portRangeCandidates(lanHosts, 'LAN scan'),
     concurrency: 32,
+    requiredServerId: requiredServerId,
   );
 }
 
@@ -139,6 +157,7 @@ List<_DiscoveredCore> _portRangeCandidates(
 Future<List<_DiscoveredCore>> _verifyCoreCandidates(
   Iterable<_DiscoveredCore> candidates, {
   int concurrency = 12,
+  String? requiredServerId,
   Duration probeTimeout = const Duration(milliseconds: 420),
 }) async {
   final verified = <_DiscoveredCore>[];
@@ -149,7 +168,9 @@ Future<List<_DiscoveredCore>> _verifyCoreCandidates(
         candidate.baseUrl,
         timeout: probeTimeout,
       );
-      if (status == null) {
+      if (status == null ||
+          (requiredServerId != null &&
+              status['server_id'] != requiredServerId)) {
         return null;
       }
       return _DiscoveredCore(
@@ -218,51 +239,53 @@ Future<List<_DiscoveredCore>> _discoverMdnsCores() async {
   final client = MDnsClient();
   final discovered = <String, _DiscoveredCore>{};
   try {
-    await client.start();
-    await for (final ptr in client.lookup<PtrResourceRecord>(
-      ResourceRecordQuery.serverPointer(_intMusicServiceType),
-      timeout: const Duration(seconds: 3),
-    )) {
-      final serviceName = ptr.domainName;
-      final srv = await _firstRecord<SrvResourceRecord>(
-        client.lookup<SrvResourceRecord>(
-          ResourceRecordQuery.service(serviceName),
-          timeout: const Duration(seconds: 2),
-        ),
-      );
-      if (srv == null) {
-        continue;
-      }
-
-      final txt = await _firstRecord<TxtResourceRecord>(
-        client.lookup<TxtResourceRecord>(
-          ResourceRecordQuery.text(serviceName),
-          timeout: const Duration(seconds: 1),
-        ),
-      );
-      final properties = _parseTxtProperties(txt?.text);
-      final hosts = <String>{};
-      await for (final address in client.lookup<IPAddressResourceRecord>(
-        ResourceRecordQuery.addressIPv4(srv.target),
-        timeout: const Duration(seconds: 2),
+    await (() async {
+      await client.start();
+      await for (final ptr in client.lookup<PtrResourceRecord>(
+        ResourceRecordQuery.serverPointer(_intMusicServiceType),
+        timeout: const Duration(seconds: 3),
       )) {
-        final host = address.address.address;
-        hosts.add(host.contains(':') ? '[$host]' : host);
-      }
-      if (hosts.isEmpty) {
-        hosts.add(srv.target.replaceAll(RegExp(r'\.$'), ''));
-      }
-
-      for (final host in hosts) {
-        final url = 'http://$host:${srv.port}';
-        discovered[url] = _DiscoveredCore(
-          baseUrl: url,
-          source: 'mDNS',
-          name: properties['name'],
-          serverId: properties['server_id'],
+        final serviceName = ptr.domainName;
+        final srv = await _firstRecord<SrvResourceRecord>(
+          client.lookup<SrvResourceRecord>(
+            ResourceRecordQuery.service(serviceName),
+            timeout: const Duration(seconds: 2),
+          ),
         );
+        if (srv == null) {
+          continue;
+        }
+
+        final txt = await _firstRecord<TxtResourceRecord>(
+          client.lookup<TxtResourceRecord>(
+            ResourceRecordQuery.text(serviceName),
+            timeout: const Duration(seconds: 1),
+          ),
+        );
+        final properties = _parseTxtProperties(txt?.text);
+        final hosts = <String>{};
+        await for (final address in client.lookup<IPAddressResourceRecord>(
+          ResourceRecordQuery.addressIPv4(srv.target),
+          timeout: const Duration(seconds: 2),
+        )) {
+          final host = address.address.address;
+          hosts.add(host.contains(':') ? '[$host]' : host);
+        }
+        if (hosts.isEmpty) {
+          hosts.add(srv.target.replaceAll(RegExp(r'\.$'), ''));
+        }
+
+        for (final host in hosts) {
+          final url = 'http://$host:${srv.port}';
+          discovered[url] = _DiscoveredCore(
+            baseUrl: url,
+            source: 'mDNS',
+            name: properties['name'],
+            serverId: properties['server_id'],
+          );
+        }
       }
-    }
+    })().timeout(const Duration(seconds: 10));
   } catch (_) {
     // mDNS can be blocked by the OS firewall or mobile platform policies.
   } finally {

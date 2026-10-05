@@ -10,6 +10,7 @@ pub async fn track_edit_snapshot(pool: &DbPool, track_id: i64) -> Result<TrackEd
     let overrides = load_track_metadata_overrides(pool, track_id).await?;
     let mut effective = source.clone();
     apply_metadata_overrides(&mut effective, &overrides)?;
+    effective = mapped_track_tags(&effective, &catalog_tag_settings(pool).await?);
     let revision =
         sqlx::query_scalar("SELECT revision FROM track_metadata_state WHERE track_id = ?1")
             .bind(track_id)
@@ -192,7 +193,7 @@ pub async fn update_track_metadata(
             .execute(pool)
             .await?;
     }
-    let refreshed_track_id = upsert_track(pool, file_id, library_root_id, &effective).await?;
+    let refreshed_track_id = upsert_track(pool, file_id, library_root_id, &effective, true).await?;
     let stored_file = file_ingest_by_id(pool, file_id).await?;
     ensure_track_media_graph(pool, refreshed_track_id, file_id, &stored_file, &effective).await?;
 
@@ -274,6 +275,10 @@ pub async fn search_tracks(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
             WHERE (
                   t.title LIKE ?1
                OR al.title LIKE ?1
+               OR display_mode.mode LIKE ?1
+               OR (CASE display_mode.mode WHEN 'merged' THEN '合并展示' WHEN 'independent' THEN '独立展示' ELSE '跟随设置' END) LIKE ?1
+               OR EXISTS (SELECT 1 FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+                          WHERE tg.track_id = t.id AND g.name LIKE ?1)
                OR EXISTS (
                     SELECT 1
                     FROM track_artists ta2
@@ -286,36 +291,7 @@ pub async fn search_tracks(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
                     WHERE l.track_id = t.id AND l.text LIKE ?1
                )
               )
-              AND NOT EXISTS (
-                    SELECT 1 FROM track_merge_members member
-                    WHERE member.track_id = t.id
-              )
-              AND EXISTS (
-                    SELECT 1 FROM active_catalog_tracks active
-                    WHERE active.track_id = t.id
-              )
-              AND (
-                    NOT EXISTS (
-                      SELECT 1 FROM legacy_track_catalog_links missing_link
-                      WHERE missing_link.track_id = t.id
-                    )
-                    OR t.id = (
-                    SELECT MIN(candidate.track_id)
-                    FROM legacy_track_catalog_links candidate
-                    JOIN release_tracks candidate_release
-                      ON candidate_release.id = candidate.release_track_id
-                    LEFT JOIN track_merge_members member
-                      ON member.track_id = candidate.track_id
-                    WHERE member.track_id IS NULL
-                      AND candidate_release.recording_id = (
-                        SELECT current_release.recording_id
-                        FROM legacy_track_catalog_links current_link
-                        JOIN release_tracks current_release
-                          ON current_release.id = current_link.release_track_id
-                        WHERE current_link.track_id = t.id
-                      )
-                    )
-              )
+              AND t.id IN (SELECT track_id FROM visible_catalog_tracks)
             GROUP BY t.id
             ORDER BY t.id
             LIMIT ?2
@@ -354,7 +330,7 @@ pub async fn search_albums(pool: &DbPool, query: &str, limit: u32) -> Result<Vec
         JOIN albums member_album ON member_album.id = identity.album_id
         JOIN tracks t ON t.album_id = member_album.id
         JOIN active_catalog_tracks active ON active.track_id = t.id
-        LEFT JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        LEFT JOIN track_catalog_links links ON links.track_id = t.id
         LEFT JOIN track_merge_members member ON member.track_id = t.id
         WHERE COALESCE(NULLIF(profile.title, ''), member_album.title) LIKE ?1
            OR COALESCE(NULLIF(profile.album_artist_display, ''),

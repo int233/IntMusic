@@ -30,7 +30,6 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
     for (final cache in <Map<int, Map<String, dynamic>>>[
       _albumDetailCache,
       _artistDetailCache,
-      _playlistDetailCache,
     ]) {
       for (final entry in cache.entries.toList(growable: false)) {
         cache[entry.key] = <String, dynamic>{
@@ -83,7 +82,6 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
     for (final cache in <Map<int, Map<String, dynamic>>>[
       _albumDetailCache,
       _artistDetailCache,
-      _playlistDetailCache,
     ]) {
       for (final entry in cache.entries.toList(growable: false)) {
         final tracks = (entry.value['tracks'] as List?) ?? const <dynamic>[];
@@ -193,21 +191,8 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
         if (zone['is_online'] != false) 'z:${zone['id']}',
       for (final output in _outputs.whereType<Map>())
         if (output['is_online'] != false) 'o:${output['id']}',
-      for (final status in _clientLibraryStatuses.whereType<Map>())
-        'd:${status['device_id']}:${_statusIsRecentlyOnline(status)}',
     ]..sort();
     return values.join('|');
-  }
-
-  bool _statusIsRecentlyOnline(Map status) {
-    final lastSeen = DateTime.tryParse(
-      status['last_seen_at']?.toString() ?? '',
-    )?.toUtc();
-    return status['enabled'] == true &&
-        lastSeen != null &&
-        !lastSeen.isBefore(
-          DateTime.now().toUtc().subtract(const Duration(minutes: 5)),
-        );
   }
 
   Map<String, dynamic> _availabilityForTrack(int trackId) {
@@ -219,21 +204,19 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
     final replicas = <Map<String, dynamic>>[];
     final media = detail?['media'];
     if (media is Map) {
-      for (final variant in (media['variants'] as List?) ?? const <dynamic>[]) {
-        if (variant is! Map) continue;
-        for (final replica
-            in (variant['replicas'] as List?) ?? const <dynamic>[]) {
-          if (replica is Map) {
-            replicas.add(replica.cast<String, dynamic>());
-          }
-        }
+      for (final group in groupReleaseMedia(
+        _asMap(media),
+      ).where((g) => g.isCurrent)) {
+        replicas.addAll(group.copies);
       }
     }
     if (detail?['_client_local_copy'] case final Map localCopy) {
       replicas.add(localCopy.cast<String, dynamic>());
     }
     if (replicas.isEmpty &&
-        (detail?['file_path']?.toString().trim() ?? '').isNotEmpty) {
+        (detail?['file_path']?.toString().trim() ?? '').isNotEmpty &&
+        !(detail?['file_path']?.toString().startsWith('intmusic-client://') ??
+            false)) {
       replicas.add(<String, dynamic>{
         'source_kind': 'core',
         'device_name': 'Core local',
@@ -293,8 +276,9 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
     final rendererPrefix = 'renderer:$deviceId:';
     if (_outputs.whereType<Map>().any((output) {
       final outputId = output['id']?.toString() ?? '';
-      return output['device_id']?.toString() == deviceId ||
-          outputId.startsWith(rendererPrefix);
+      return output['is_online'] == true &&
+          (output['device_id']?.toString() == deviceId ||
+              outputId.startsWith(rendererPrefix));
     })) {
       return true;
     }
@@ -303,10 +287,6 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
       return zone['is_online'] != false && zoneId.startsWith(rendererPrefix);
     })) {
       return true;
-    }
-    for (final value in _clientLibraryStatuses.whereType<Map>()) {
-      if (value['device_id']?.toString() != deviceId) continue;
-      return _statusIsRecentlyOnline(value);
     }
     return false;
   }

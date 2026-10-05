@@ -5,7 +5,9 @@ pub(crate) async fn upsert_track(
     file_id: i64,
     _library_root_id: i64,
     track: &TrackIngest,
+    rebuild_search: bool,
 ) -> Result<i64> {
+    let track = mapped_track_tags(track, &catalog_tag_settings(pool).await?);
     let now = Utc::now().to_rfc3339();
     let album_id = if let Some(album_title) = &track.album {
         let album_artists = if track.album_artists.is_empty() {
@@ -199,7 +201,9 @@ pub(crate) async fn upsert_track(
             .await?;
     }
 
-    rebuild_track_search_row(pool, track_id).await?;
+    if rebuild_search {
+        rebuild_track_search_row(pool, track_id).await?;
+    }
     Ok(track_id)
 }
 
@@ -210,6 +214,7 @@ pub(crate) async fn ensure_track_media_graph(
     file: &FileIngest,
     track: &TrackIngest,
 ) -> Result<()> {
+    let track = mapped_track_tags(track, &catalog_tag_settings(pool).await?);
     let now = Utc::now().to_rfc3339();
     let release_id = ensure_release_edition_for_track(pool, track_id, &now).await?;
     let existing = sqlx::query(
@@ -234,7 +239,7 @@ pub(crate) async fn ensure_track_media_graph(
                 WHERE replica.file_id = ?2
                 LIMIT 1
             ) AS media_variant_id
-        FROM legacy_track_catalog_links links
+        FROM track_catalog_links links
         JOIN release_tracks rt ON rt.id = links.release_track_id
         JOIN catalog_recordings recording ON recording.id = rt.recording_id
         WHERE links.track_id = ?1
@@ -264,7 +269,7 @@ pub(crate) async fn ensure_track_media_graph(
         // A file-seeded recording belongs to this release track, so tag edits may
         // update it. Once several releases are explicitly linked to a confirmed
         // recording, rescanning one release must not rewrite their shared identity.
-        if match_kind != "confirmed_recording" {
+        if match_kind != "confirmed_recording" && match_kind != "catalog_identity" {
             sqlx::query(
                 "UPDATE catalog_works SET title = ?1, normalized_title = ?2, updated_at = ?3 WHERE id = ?4",
             )
@@ -399,7 +404,7 @@ pub(crate) async fn ensure_track_media_graph(
     .await?;
     sqlx::query(
         r#"
-        INSERT INTO legacy_track_catalog_links (
+        INSERT INTO track_catalog_links (
             track_id, release_track_id, match_kind, match_confidence,
             created_at, updated_at
         )

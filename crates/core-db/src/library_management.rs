@@ -28,7 +28,7 @@ linked_catalog AS (
     FROM media_replicas linked_replica
     JOIN release_track_media_variants relation
       ON relation.media_variant_id = linked_replica.media_variant_id
-    JOIN legacy_track_catalog_links link
+    JOIN track_catalog_links link
       ON link.release_track_id = relation.release_track_id
     LEFT JOIN track_merge_members member ON member.track_id = link.track_id
     WHERE linked_replica.file_id IS NOT NULL
@@ -47,7 +47,7 @@ inventory AS (
         COALESCE(root.owner_device_id, 'core') AS device_id,
         COALESCE(device.name, 'Core local') AS device_name,
         device.platform AS device_platform,
-        device.last_seen_at AS device_last_seen_at,
+        device.online_until AS device_online_until,
         device.retired_at AS device_retired_at,
         file.relative_path,
         file.extension,
@@ -115,8 +115,8 @@ WHERE (?1 IS NULL OR lower(
             AND inventory.root_retired_at IS NULL
             AND inventory.device_retired_at IS NULL
             AND (
-                inventory.device_last_seen_at IS NULL
-                OR datetime(inventory.device_last_seen_at) < datetime('now', '-5 minutes')
+                inventory.device_online_until IS NULL
+                OR datetime(inventory.device_online_until) < datetime('now')
             ))
        OR (?5 = 'available' AND inventory.deleted_at IS NULL
             AND inventory.availability_state = 'ready'
@@ -125,7 +125,7 @@ WHERE (?1 IS NULL OR lower(
             AND inventory.device_retired_at IS NULL
             AND (
                 inventory.root_kind = 'core'
-                OR datetime(inventory.device_last_seen_at) >= datetime('now', '-5 minutes')
+                OR datetime(inventory.device_online_until) >= datetime('now')
             )))
   AND (?6 IS NULL OR ',' || COALESCE(inventory.issue_kinds, '') || ','
         LIKE '%,' || ?6 || ',%')
@@ -147,7 +147,7 @@ pub async fn library_management_summary(pool: &DbPool) -> Result<LibraryManageme
                  AND device.retired_at IS NULL
                  AND (
                     root.root_kind = 'core'
-                    OR datetime(device.last_seen_at) >= datetime('now', '-5 minutes')
+                    OR datetime(device.online_until) >= datetime('now')
                  )
                 THEN 1 ELSE 0 END), 0) AS available_files,
             COALESCE(SUM(CASE
@@ -159,8 +159,8 @@ pub async fn library_management_summary(pool: &DbPool) -> Result<LibraryManageme
                     OR (
                         root.root_kind = 'client'
                         AND (
-                            device.last_seen_at IS NULL
-                            OR datetime(device.last_seen_at) < datetime('now', '-5 minutes')
+                            device.online_until IS NULL
+                            OR datetime(device.online_until) < datetime('now')
                         )
                     )
                 )
@@ -316,12 +316,12 @@ fn library_file_from_row(row: sqlx::sqlite::SqliteRow) -> Result<LibraryFileSumm
     let root_retired_at: Option<String> = row.try_get("root_retired_at")?;
     let device_retired_at: Option<String> = row.try_get("device_retired_at")?;
     let availability_state: String = row.try_get("availability_state")?;
-    let device_last_seen_at: Option<String> = row.try_get("device_last_seen_at")?;
+    let device_online_until: Option<String> = row.try_get("device_online_until")?;
     let device_online = root_kind == "core"
-        || device_last_seen_at
+        || device_online_until
             .as_deref()
             .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.with_timezone(&Utc) >= Utc::now() - chrono::Duration::minutes(5))
+            .map(|value| value.with_timezone(&Utc) >= Utc::now())
             .unwrap_or(false);
     let presence_state = if deleted_at.is_some() {
         "removed"
@@ -477,7 +477,7 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
         },
     );
     let device_rows = sqlx::query(
-        "SELECT id, name, platform, last_seen_at, retired_at FROM devices WHERE removed_at IS NULL ORDER BY name COLLATE NOCASE",
+        "SELECT id, name, platform, last_seen_at, online_until, retired_at FROM devices WHERE removed_at IS NULL ORDER BY name COLLATE NOCASE",
     )
     .fetch_all(pool)
     .await?;
@@ -491,7 +491,11 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
             .try_get::<Option<String>, _>("retired_at")?
             .map(parse_datetime)
             .transpose()?;
-        let state = device_state(last_seen_at.as_ref(), retired_at.as_ref());
+        let online_until = row
+            .try_get::<Option<String>, _>("online_until")?
+            .map(parse_datetime)
+            .transpose()?;
+        let state = device_state(online_until.as_ref(), retired_at.as_ref());
         devices.insert(
             device_id.clone(),
             LibraryDeviceSummary {
@@ -578,7 +582,11 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
             root_kind: row.try_get("root_kind")?,
             state: state.to_string(),
             file_count: row.try_get("file_count")?,
-            available_file_count: row.try_get("available_file_count")?,
+            available_file_count: if state == "available" {
+                row.try_get("available_file_count")?
+            } else {
+                0
+            },
             attention_file_count: row.try_get("attention_file_count")?,
             total_bytes: row.try_get("total_bytes")?,
             last_seen_at,
@@ -594,13 +602,13 @@ pub async fn list_library_devices(pool: &DbPool) -> Result<Vec<LibraryDeviceSumm
 }
 
 fn device_state(
-    last_seen_at: Option<&DateTime<Utc>>,
+    online_until: Option<&DateTime<Utc>>,
     retired_at: Option<&DateTime<Utc>>,
 ) -> &'static str {
     if retired_at.is_some() {
         "retired"
-    } else if last_seen_at
-        .map(|value| *value >= Utc::now() - chrono::Duration::minutes(5))
+    } else if online_until
+        .map(|value| *value >= Utc::now())
         .unwrap_or(false)
     {
         "online"

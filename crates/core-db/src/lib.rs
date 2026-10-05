@@ -18,13 +18,12 @@ use protocol::{
     DistributionContentSource, DistributionJobSummary, DistributionSourceTaskAssignment,
     DistributionTaskAssignment, DistributionTaskProgress, DistributionTranscodeTask, EventEnvelope,
     LibraryCounts, LibraryRoot, LyricPayload, MediaReplicaSummary, MediaVariantSummary,
-    NewPlaylist, PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession,
-    PlaybackStats, PlaylistDetail, PlaylistKind, PlaylistSummary, PlaylistTrackMutation,
+    PlaybackEvent, PlaybackMode, PlaybackQueue, PlaybackQueueItem, PlaybackSession, PlaybackStats,
     RecordingLinkCandidate, RelatedReleaseTrackSummary, ReleaseEditionSummary,
     ReplacePlaybackQueue, ResolveClientLibraryFileResult, ScanProblem, TrackDetail,
     TrackEditSnapshot, TrackFavoriteUpdate, TrackMediaProfile, TrackMetadataField,
     TrackMetadataUpdate, TrackPlaybackStat, TrackSummary, UpdateAlbumMetadata, UpdateArtistAsset,
-    UpdateArtistProfile, UpdateArtistVisual, UpdatePlaylist, VolumeControlMode, ZoneVolume,
+    UpdateArtistProfile, UpdateArtistVisual, VolumeControlMode, ZoneVolume,
 };
 use protocol::{
     AutoTrackMergeFailure, AutoTrackMergeGroup, AutoTrackMergePreview, AutoTrackMergeRequest,
@@ -52,11 +51,14 @@ mod album_detail;
 mod album_edit;
 mod artists;
 mod auto_track_merge;
+mod catalog_identity;
 mod client_file_resolution;
 mod client_library;
 mod client_manifest_batches;
 mod client_mutations;
+mod collections;
 mod connection;
+mod device_presence;
 mod distribution_jobs;
 mod distribution_sources;
 mod distribution_transcode;
@@ -71,11 +73,12 @@ mod metadata;
 mod playback_command_receipts;
 mod playback_queue;
 mod playback_session_v3;
-mod playlists;
-mod smart_playlist_sources;
+mod song_display;
+mod tag_mapping;
 mod track_edit;
 mod track_merge;
 mod track_snapshot;
+mod track_state;
 mod tracks;
 
 pub use album_detail::*;
@@ -83,6 +86,7 @@ pub use album_edit::*;
 pub(crate) use artists::trimmed_option;
 pub use artists::*;
 pub use auto_track_merge::*;
+pub use catalog_identity::*;
 pub use client_file_resolution::*;
 pub(crate) use client_file_resolution::{
     attach_client_file_to_track, canonical_track_id_for_media_variant, mark_client_replica_ready,
@@ -90,7 +94,9 @@ pub(crate) use client_file_resolution::{
 };
 pub use client_library::*;
 pub use client_mutations::*;
+pub use collections::*;
 pub use connection::*;
+pub use device_presence::*;
 pub use distribution_jobs::*;
 pub use distribution_sources::*;
 pub use distribution_transcode::*;
@@ -106,11 +112,12 @@ pub(crate) use metadata::*;
 pub use playback_command_receipts::*;
 pub use playback_queue::*;
 pub use playback_session_v3::*;
-pub use playlists::*;
-pub(crate) use smart_playlist_sources::*;
+pub use song_display::*;
+pub use tag_mapping::*;
 pub use track_edit::*;
 pub use track_merge::*;
 pub use track_snapshot::*;
+pub use track_state::*;
 pub use tracks::*;
 
 #[cfg(test)]

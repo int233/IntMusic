@@ -189,7 +189,7 @@ extension _DashboardDistribution on _CoreDashboardState {
         'quality': selection['quality'] ?? 'original',
         'track_ids': uniqueTrackIds,
         'album_ids': const <int>[],
-        'playlist_ids': const <int>[],
+        'collection_ids': const <int>[],
       });
       await _refreshDistributionJobs();
       unawaited(_pollDistributionTasks());

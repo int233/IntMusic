@@ -86,7 +86,6 @@ extension _DashboardConnection on _CoreDashboardState {
       ).timeout(const Duration(seconds: 8));
       final connectionGeneration = ++_eventConnectionGeneration;
       _rendererCommandSequences.clear();
-      _latestRendererCommandIssuedAtByOutput.clear();
       _playbackStateSequenceByZone.clear();
       _eventSocket = socket;
       _eventLastPongAt = DateTime.now();
@@ -257,11 +256,21 @@ extension _DashboardConnection on _CoreDashboardState {
         'failure_count': _eventReconnectFailures,
       },
     );
-    _eventReconnectTimer = Timer(effectiveDelay, () {
-      if (!_localPlaybackFallbackActive && mounted) {
-        unawaited(
-          _connectEventStream(requestPlaybackSync: requestPlaybackSync),
-        );
+    _eventReconnectTimer = Timer(effectiveDelay, () async {
+      if (_localPlaybackFallbackActive || !mounted) return;
+      try {
+        // Core may bind a new port after restarting. Recovery is needed even
+        // on streaming-only devices that have no local/offline music copies.
+        if (_eventReconnectFailures >= 2 && await _applyDiscoveredCoreUrl()) {
+          await _refreshFromCurrentCore();
+        } else {
+          await _connectEventStream(requestPlaybackSync: requestPlaybackSync);
+        }
+      } catch (error, stackTrace) {
+        ClientLog.error('core.reconnect.failed', error, stackTrace: stackTrace);
+        if (mounted && !_localPlaybackFallbackActive) {
+          _scheduleEventReconnect(requestPlaybackSync: requestPlaybackSync);
+        }
       }
     });
   }

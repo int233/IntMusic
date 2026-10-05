@@ -315,11 +315,13 @@ pub(crate) async fn canonical_track_id_for_media_variant(
 ) -> Result<Option<i64>> {
     Ok(sqlx::query_scalar(
         r#"
-        SELECT MIN(COALESCE(member.canonical_track_id, links.track_id))
+        SELECT MIN(links.track_id)
         FROM release_track_media_variants relation
-        JOIN legacy_track_catalog_links links
-          ON links.release_track_id = relation.release_track_id
-        LEFT JOIN track_merge_members member ON member.track_id = links.track_id
+        JOIN track_catalog_links source_link ON source_link.release_track_id = relation.release_track_id
+        JOIN track_catalog_links links
+          ON COALESCE(links.release_identity_id, links.release_track_id)
+           = COALESCE(source_link.release_identity_id, source_link.release_track_id)
+        JOIN visible_catalog_tracks visible ON visible.track_id = links.track_id
         WHERE relation.media_variant_id = ?1
         "#,
     )
@@ -344,8 +346,11 @@ async fn resolution_result(
         FROM media_replicas replica
         LEFT JOIN release_track_media_variants relation
           ON relation.media_variant_id = replica.media_variant_id
-        LEFT JOIN legacy_track_catalog_links links
-          ON links.release_track_id = relation.release_track_id
+        JOIN track_catalog_links source_link ON source_link.release_track_id = relation.release_track_id
+        JOIN track_catalog_links links
+          ON COALESCE(links.release_identity_id, links.release_track_id)
+           = COALESCE(source_link.release_identity_id, source_link.release_track_id)
+        JOIN visible_catalog_tracks visible ON visible.track_id = links.track_id
         WHERE replica.file_id = ?1
         GROUP BY replica.media_variant_id
         "#,
@@ -418,7 +423,7 @@ pub(crate) async fn attach_client_file_to_track(
         SELECT
             links.release_track_id,
             variant.audio_master_id
-        FROM legacy_track_catalog_links links
+        FROM track_catalog_links links
         JOIN release_track_media_variants relation
           ON relation.release_track_id = links.release_track_id
         JOIN media_variants variant ON variant.id = relation.media_variant_id
@@ -443,7 +448,7 @@ pub(crate) async fn attach_client_file_to_track(
     let exact_variant_id: Option<i64> = sqlx::query_scalar(
         r#"
         SELECT variant.id
-        FROM legacy_track_catalog_links links
+        FROM track_catalog_links links
         JOIN release_track_media_variants relation
           ON relation.release_track_id = links.release_track_id
         JOIN media_variants variant ON variant.id = relation.media_variant_id

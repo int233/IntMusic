@@ -3,6 +3,9 @@ part of '../intmusic_client.dart';
 class _QueueSheet extends StatefulWidget {
   const _QueueSheet({
     required this.coreBaseUrl,
+    this.mergeSameName = false,
+    this.displayState,
+    this.sourceName,
     required this.items,
     required this.currentIndex,
     required this.onPlayTrack,
@@ -12,12 +15,15 @@ class _QueueSheet extends StatefulWidget {
     required this.onClearAll,
   });
 
+  final String? sourceName;
   final String coreBaseUrl;
+  final bool mergeSameName;
+  final SongDisplayState? displayState;
   final List<Map<String, dynamic>> items;
   final int? currentIndex;
-  final Future<void> Function(int index, int trackId) onPlayTrack;
-  final Future<Map<String, dynamic>?> Function(int, int) onMove;
-  final Future<Map<String, dynamic>?> Function(int) onRemove;
+  final Future<void> Function(String itemId, int trackId) onPlayTrack;
+  final Future<Map<String, dynamic>?> Function(String, String?) onMove;
+  final Future<Map<String, dynamic>?> Function(String) onRemove;
   final Future<Map<String, dynamic>?> Function() onClearUpcoming;
   final Future<Map<String, dynamic>?> Function() onClearAll;
 
@@ -59,7 +65,11 @@ class _QueueSheetState extends State<_QueueSheet> {
       return;
     }
     setState(() => _mutating = true);
-    final queue = await widget.onMove(oldIndex, newIndex);
+    final beforeIndex = oldIndex < newIndex ? newIndex + 1 : newIndex;
+    final queue = await widget.onMove(
+      _items[oldIndex]['id'] as String,
+      beforeIndex < _items.length ? _items[beforeIndex]['id'] as String : null,
+    );
     if (!mounted) {
       return;
     }
@@ -71,7 +81,7 @@ class _QueueSheetState extends State<_QueueSheet> {
     });
   }
 
-  Future<void> _remove(int itemId) async {
+  Future<void> _remove(String itemId) async {
     if (_mutating) {
       return;
     }
@@ -105,9 +115,74 @@ class _QueueSheetState extends State<_QueueSheet> {
     });
   }
 
+  List<Map<String, dynamic>> _groups() => projectSongList([
+    for (var i = 0; i < _items.length; i++)
+      {
+        ...(widget.displayState?.project(_asMap(_items[i]['track'])) ??
+            _asMap(_items[i]['track'])),
+        '_queue_item_id': _items[i]['id'],
+        '_queue_index': i,
+      },
+  ], mergeSameName: widget.mergeSameName);
+
+  Widget _groupedQueue(
+    BuildContext context,
+    List<Map<String, dynamic>> groups,
+  ) {
+    Widget row(Map<String, dynamic> track) {
+      final index = _intValue(track['_queue_index'])!;
+      final itemId = track['_queue_item_id'].toString();
+      final id = _intValue(track['id']);
+      return ListTile(
+        leading: Text('${index + 1}'),
+        selected: index == _currentIndex,
+        title: Text(track['title']?.toString() ?? '', maxLines: 1),
+        subtitle: Text(
+          _joinParts([
+            track['album_title'],
+            index == _currentIndex ? '正在播放' : track['artist_display'],
+          ]),
+        ),
+        onTap: id == null
+            ? null
+            : () => unawaited(widget.onPlayTrack(itemId, id)),
+        trailing: IconButton(
+          icon: const Icon(Icons.close),
+          tooltip: '移除此项',
+          onPressed: _mutating ? null : () => unawaited(_remove(itemId)),
+        ),
+      );
+    }
+
+    return ListView(
+      children: [
+        for (final group in groups)
+          if (group['_display_members'] is List)
+            ExpansionTile(
+              key: ValueKey(group['display_group_key']),
+              initiallyExpanded: (group['_display_members'] as List).any(
+                (t) => t['_queue_index'] == _currentIndex,
+              ),
+              title: Text(group['title']?.toString() ?? ''),
+              subtitle: Text(
+                '${(group['_display_members'] as List).length} 个队列项 · 顺序保持不变',
+              ),
+              children: [
+                for (final member in group['_display_members'] as List)
+                  row(_asMap(member)),
+              ],
+            )
+          else
+            row(group),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final compact = MediaQuery.sizeOf(context).width < 560;
+    final groups = _groups();
+    final grouped = groups.any((track) => track['_display_members'] is List);
     return SizedBox(
       height: min(520, MediaQuery.sizeOf(context).height * 0.72),
       child: Padding(
@@ -124,7 +199,9 @@ class _QueueSheetState extends State<_QueueSheet> {
               children: [
                 Expanded(
                   child: Text(
-                    _tr(context, 'Queue'),
+                    widget.sourceName == null
+                        ? _tr(context, 'Queue')
+                        : '${_tr(context, 'Queue')} · ${widget.sourceName}',
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),
@@ -167,10 +244,13 @@ class _QueueSheetState extends State<_QueueSheet> {
               _tr(context, 'Drag to reorder. Queue is synced across devices.'),
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (grouped) const Text('展开查看队列项；可在设置中的“歌曲展示”关闭合并后拖动排序。'),
             const SizedBox(height: 12),
             Expanded(
               child: _items.isEmpty
                   ? Center(child: Text(_tr(context, 'No upcoming tracks')))
+                  : grouped
+                  ? _groupedQueue(context, groups)
                   : ReorderableListView.builder(
                       scrollController: _scrollController,
                       itemExtent: _rowExtent,
@@ -180,7 +260,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                       itemCount: _items.length,
                       itemBuilder: (context, index) {
                         final item = _items[index];
-                        final itemId = _intValue(item['id']);
+                        final itemId = item['id']?.toString();
                         final track = (item['track'] as Map)
                             .cast<String, dynamic>();
                         final id = _intValue(track['id']);
@@ -242,7 +322,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                                     onTap: id == null
                                         ? null
                                         : () => unawaited(
-                                            widget.onPlayTrack(index, id),
+                                            widget.onPlayTrack(itemId!, id),
                                           ),
                                     child: Padding(
                                       padding: const EdgeInsets.only(left: 6),
@@ -329,7 +409,7 @@ class _QueueSheetState extends State<_QueueSheet> {
                                   onTap: id == null
                                       ? null
                                       : () => unawaited(
-                                          widget.onPlayTrack(index, id),
+                                          widget.onPlayTrack(itemId!, id),
                                         ),
                                 ),
                         );

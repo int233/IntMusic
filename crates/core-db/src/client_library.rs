@@ -97,7 +97,7 @@ pub async fn upsert_scanned_file(
                 &load_track_metadata_overrides(pool, track_id).await?,
             )?;
         }
-        let track_id = upsert_track(pool, file_id, file.library_root_id, &effective).await?;
+        let track_id = upsert_track(pool, file_id, file.library_root_id, &effective, true).await?;
         ensure_track_media_graph(pool, track_id, file_id, file, &effective).await?;
     }
 
@@ -152,16 +152,18 @@ pub async fn client_library_copy_bindings(
         SELECT
             root.external_id AS root_external_id,
             file.client_file_id AS external_id,
-            MIN(COALESCE(merge.canonical_track_id, links.track_id)) AS track_id,
+            MIN(links.track_id) AS track_id,
             replica.media_variant_id
         FROM files file
         JOIN library_roots root ON root.id = file.library_root_id
         JOIN media_replicas replica ON replica.file_id = file.id
         JOIN release_track_media_variants relation
           ON relation.media_variant_id = replica.media_variant_id
-        JOIN legacy_track_catalog_links links
-          ON links.release_track_id = relation.release_track_id
-        LEFT JOIN track_merge_members merge ON merge.track_id = links.track_id
+        JOIN track_catalog_links source_link ON source_link.release_track_id = relation.release_track_id
+        JOIN track_catalog_links links
+          ON COALESCE(links.release_identity_id, links.release_track_id)
+           = COALESCE(source_link.release_identity_id, source_link.release_track_id)
+        JOIN visible_catalog_tracks visible ON visible.track_id = links.track_id
         WHERE root.root_kind = 'client'
           AND root.owner_device_id = ?1
           AND root.enabled = 1
@@ -368,14 +370,14 @@ pub async fn upsert_client_library_manifest(
                     EXISTS (
                         SELECT 1
                         FROM release_track_media_variants relation
-                        JOIN legacy_track_catalog_links links
+                        JOIN track_catalog_links links
                           ON links.release_track_id = relation.release_track_id
                         WHERE relation.media_variant_id = replica.media_variant_id
                     ) AS has_catalog_binding,
                     EXISTS (
                         SELECT 1
                         FROM tracks direct_track
-                        JOIN legacy_track_catalog_links direct_link
+                        JOIN track_catalog_links direct_link
                           ON direct_link.track_id = direct_track.id
                         JOIN release_track_media_variants direct_relation
                           ON direct_relation.release_track_id = direct_link.release_track_id
@@ -446,7 +448,7 @@ pub async fn upsert_client_library_manifest(
                     JOIN files existing_file ON existing_file.id = replica.file_id
                     JOIN release_track_media_variants relation
                       ON relation.media_variant_id = variant.id
-                    JOIN legacy_track_catalog_links links
+                    JOIN track_catalog_links links
                       ON links.release_track_id = relation.release_track_id
                     WHERE variant.content_hash = ?1
                       AND existing_file.size_bytes = ?2
@@ -475,7 +477,7 @@ pub async fn upsert_client_library_manifest(
                     JOIN files existing_file ON existing_file.id = replica.file_id
                     JOIN release_track_media_variants relation
                       ON relation.media_variant_id = variant.id
-                    JOIN legacy_track_catalog_links links
+                    JOIN track_catalog_links links
                       ON links.release_track_id = relation.release_track_id
                     WHERE variant.quick_hash = ?1
                       AND existing_file.size_bytes = ?2
@@ -662,7 +664,7 @@ pub async fn upsert_client_library_manifest(
             FROM media_replicas replica
             JOIN release_track_media_variants relation
               ON relation.media_variant_id = replica.media_variant_id
-            JOIN legacy_track_catalog_links links
+            JOIN track_catalog_links links
               ON links.release_track_id = relation.release_track_id
             LEFT JOIN track_merge_members merge
               ON merge.track_id = links.track_id
@@ -686,6 +688,7 @@ pub async fn upsert_client_library_manifest(
     let should_count_batch =
         record_client_manifest_batch(pool, manifest, accepted_files, &now).await?;
 
+    reconcile_catalog_identity(pool).await?;
     let mut missing_files = 0_i64;
     if manifest.complete {
         let result = sqlx::query(
@@ -739,6 +742,15 @@ pub async fn upsert_client_library_manifest(
         .await?;
     }
 
+    // Final binding IDs are calculated after reconciliation, never from an
+    // intermediate per-file identity returned earlier in the batch.
+    {
+        for binding in &mut bindings {
+            binding.track_id = canonical_track_id_for_media_variant(pool, binding.media_variant_id)
+                .await?
+                .context("reconciled media variant has no song identity")?;
+        }
+    }
     Ok(ClientLibraryManifestResult {
         root_id,
         accepted_files,

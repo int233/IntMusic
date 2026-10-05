@@ -85,6 +85,7 @@ pub async fn replace_playback_queue(
         r#"
         UPDATE playback_queues
         SET revision = revision + 1,
+            source_json = NULL,
             mode = COALESCE(?2, mode),
             current_index = ?3,
             shuffle_seed = CASE

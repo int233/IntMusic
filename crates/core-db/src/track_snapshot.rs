@@ -1,46 +1,12 @@
 use super::*;
 
 pub async fn track_stream_source(pool: &DbPool, track_id: i64) -> Result<(String, String)> {
-    let normalized = sqlx::query(
-        r#"
-        SELECT file.path, file.extension
-        FROM tracks target
-        JOIN legacy_track_catalog_links link ON link.track_id = target.id
-        JOIN release_track_media_variants relation
-          ON relation.release_track_id = link.release_track_id
-        JOIN media_replicas replica
-          ON replica.media_variant_id = relation.media_variant_id
-        JOIN files file ON file.id = replica.file_id
-        WHERE target.id = ?1
-          AND replica.source_kind = 'core'
-          AND replica.availability_state = 'ready'
-          AND file.deleted_at IS NULL
-        ORDER BY
-          CASE WHEN file.id = target.file_id THEN 0 ELSE 1 END,
-          relation.is_preferred DESC,
-          replica.is_primary DESC,
-          file.id
-        LIMIT 1
-        "#,
-    )
-    .bind(track_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some(row) = normalized {
-        return Ok((row.try_get("path")?, row.try_get("extension")?));
-    }
-    let fallback = sqlx::query(
-        r#"
-        SELECT file.path, file.extension
-        FROM tracks track
-        JOIN files file ON file.id = track.file_id
-        WHERE track.id = ?1
-        "#,
-    )
-    .bind(track_id)
-    .fetch_one(pool)
-    .await?;
-    Ok((fallback.try_get("path")?, fallback.try_get("extension")?))
+    let source = track_source_candidates(pool, track_id)
+        .await?
+        .into_iter()
+        .next()
+        .with_context(|| format!("No Core audio source for track {track_id}"))?;
+    Ok((source.path, source.extension))
 }
 
 pub(crate) async fn current_track_ingest(pool: &DbPool, track_id: i64) -> Result<TrackIngest> {

@@ -237,3 +237,9 @@ docs/                产品、架构和用户文档
 ## 网络边界
 
 默认 Core 监听 `0.0.0.0:49330`，并可在 `49330–49360` 中自动选择端口。mDNS 服务为 `_intmusic-core._tcp.local.`。默认设计面向可信局域网；将 Core 直接暴露到公网并不是推荐部署方式。跨网络访问应使用受控 VPN 或未来的认证与 TLS 入口，不应仅依赖端口映射。
+
+## 统一集合（1.6.0）
+
+Core 以 `collections` 保存类型化定义，以 `collection_results` / `collection_result_items` 保存不可变结果批次，以 `home_layout` 保存独立的首页引用和展示设置。歌曲成员使用发行身份，设备副本仍由媒体图解析。队列接收经过验证的完整播放计划，集合刷新不修改队列。
+
+Flutter 的 `CollectionStore` 按 Core 与 catalog epoch 隔离缓存，统一编辑器和结果组件服务首页、用户集合和系统集合。旧普通/智能/隐藏歌单运行时代码与接口删除。完整语义及迁移影响见[统一集合与可配置首页](collections.md)。

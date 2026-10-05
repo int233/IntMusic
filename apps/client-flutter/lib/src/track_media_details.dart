@@ -129,591 +129,157 @@ class _LyricTextSection extends StatelessWidget {
   }
 }
 
-class _MediaIdentityChip extends StatelessWidget {
-  const _MediaIdentityChip({required this.icon, required this.label});
-
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Chip(
-      avatar: Icon(icon, size: 16),
-      label: Text(label),
-      visualDensity: VisualDensity.compact,
-    );
-  }
-}
-
-class _MediaCatalogHierarchy extends StatelessWidget {
-  const _MediaCatalogHierarchy({
-    required this.work,
-    required this.recording,
-    required this.releaseCount,
+class _ReleaseMediaCard extends StatelessWidget {
+  const _ReleaseMediaCard({
+    required this.group,
+    required this.coreConnected,
+    this.action,
   });
-
-  final Map<String, dynamic> work;
-  final Map<String, dynamic> recording;
-  final int releaseCount;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    final recordingKind = _recordingKindLabel(
-      context,
-      recording['recording_kind']?.toString(),
-    );
-    final nodes = <(IconData, String, String)>[
-      (
-        Icons.music_note_outlined,
-        _tr(context, 'Composition'),
-        work['title']?.toString() ?? '-',
-      ),
-      (
-        recording['recording_kind'] == 'live'
-            ? Icons.mic_external_on_outlined
-            : Icons.graphic_eq,
-        _tr(context, 'Recording'),
-        _joinParts([recording['version_title'], recordingKind]).isEmpty
-            ? recording['title']?.toString() ?? '-'
-            : _joinParts([recording['version_title'], recordingKind]),
-      ),
-      (
-        Icons.album_outlined,
-        _tr(context, 'Release appearances'),
-        '$releaseCount',
-      ),
-    ];
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 620;
-        return Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: tokens.surfaceRaised.withValues(alpha: 0.55),
-            borderRadius: BorderRadius.circular(15),
-            border: Border.all(color: tokens.stroke),
-          ),
-          child: Flex(
-            direction: compact ? Axis.vertical : Axis.horizontal,
-            crossAxisAlignment: compact
-                ? CrossAxisAlignment.start
-                : CrossAxisAlignment.center,
-            children: [
-              for (var index = 0; index < nodes.length; index++) ...[
-                if (compact)
-                  Padding(
-                    padding: EdgeInsets.only(
-                      bottom: index == nodes.length - 1 ? 0 : 10,
-                    ),
-                    child: _MediaHierarchyNode(node: nodes[index]),
-                  )
-                else
-                  Expanded(child: _MediaHierarchyNode(node: nodes[index])),
-                if (!compact && index != nodes.length - 1)
-                  Icon(
-                    Icons.chevron_right,
-                    size: 18,
-                    color: tokens.textSecondary,
-                  ),
-              ],
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _MediaHierarchyNode extends StatelessWidget {
-  const _MediaHierarchyNode({required this.node});
-
-  final (IconData, String, String) node;
+  final ReleaseMediaGroup group;
+  final bool coreConnected;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
-    return Row(
-      children: [
-        Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: tokens.accent.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Icon(node.$1, size: 17, color: tokens.accent),
-        ),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                node.$2,
-                style: Theme.of(
-                  context,
-                ).textTheme.labelSmall?.copyWith(color: tokens.textSecondary),
-              ),
-              Text(
-                node.$3,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _MediaVariantRow extends StatelessWidget {
-  const _MediaVariantRow({
-    required this.variant,
-    required this.releaseLabels,
-    required this.legacyReplica,
-    required this.localCopy,
-  });
-
-  final Map<String, dynamic> variant;
-  final List<String> releaseLabels;
-  final Map<String, dynamic>? legacyReplica;
-  final Map<String, dynamic>? localCopy;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    final master = variant['master'] is Map
-        ? _asMap(variant['master'])
-        : <String, dynamic>{};
-    final replicas = (variant['replicas'] as List? ?? const [])
-        .map((item) => (item as Map).cast<String, dynamic>())
-        .toList();
-    final variantId = _intValue(variant['id']);
-    final localVariantId = _intValue(localCopy?['media_variant_id']);
-    if (legacyReplica != null) {
-      final legacyFileId = _intValue(legacyReplica!['file_id']);
-      final match = replicas.indexWhere(
-        (replica) => _intValue(replica['file_id']) == legacyFileId,
-      );
-      if (match >= 0) {
-        replicas[match] = <String, dynamic>{
-          ...legacyReplica!,
-          ...replicas[match],
-        };
-      }
-    }
-    if (localCopy != null &&
-        (variantId == null ||
-            localVariantId == null ||
-            variantId == localVariantId) &&
-        !replicas.any(
-          (replica) =>
-              replica['client_file_id']?.toString() ==
-              localCopy!['client_file_id']?.toString(),
-        )) {
-      replicas.add(localCopy!);
-    }
-    if (legacyReplica != null &&
-        !replicas.any(
-          (replica) =>
-              _intValue(replica['file_id']) ==
-              _intValue(legacyReplica!['file_id']),
-        )) {
-      replicas.insert(0, legacyReplica!);
-    }
-    final format = _joinParts([
-      variant['codec']?.toString().toUpperCase(),
-      _audioResolutionLabel(variant),
-      _audioBitrateLabel(variant),
+    final title = group.release['title']?.toString() ?? '-';
+    final edition = group.release['edition_title']?.toString();
+    final subtitle = _joinParts([
+      group.release['year'],
+      if (edition != title) edition,
+      if (group.tracks.first['track_number'] != null)
+        '#${group.tracks.first['track_number']}',
     ]);
-    final masterLabel = _joinParts([
-      master['label'] == 'Library source' ? null : master['label'],
-      master['mastering_kind'] == 'unknown' ? null : master['mastering_kind'],
-    ]);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                color: tokens.accent.withValues(alpha: 0.12),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(
-                variant['is_preferred'] == true
-                    ? Icons.high_quality_outlined
-                    : Icons.audio_file_outlined,
-                color: tokens.accent,
-                size: 21,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    format.isEmpty ? _tr(context, 'Available files') : format,
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  if (masterLabel.isNotEmpty)
-                    Text(
-                      masterLabel,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: tokens.textSecondary,
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            if (variant['is_preferred'] == true)
-              _TrackMetaPill(
-                icon: Icons.check_circle_outline,
-                label: _tr(context, 'Preferred'),
-              ),
-          ],
-        ),
-        if (releaseLabels.isNotEmpty) ...[
-          const SizedBox(height: 9),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: releaseLabels
-                .map(
-                  (label) =>
-                      _TrackMetaPill(icon: Icons.album_outlined, label: label),
-                )
-                .toList(growable: false),
-          ),
-        ],
-        const SizedBox(height: 12),
-        if (replicas.isEmpty)
-          DecoratedBox(
-            decoration: BoxDecoration(
-              color: tokens.surfaceRaised.withValues(alpha: 0.55),
-              borderRadius: BorderRadius.circular(13),
-              border: Border.all(color: tokens.stroke),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(14),
-              child: Row(
-                children: [
-                  Icon(Icons.cloud_off_outlined, color: tokens.textSecondary),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Text(
-                      _tr(context, 'No physical copies are available'),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          )
-        else
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final width = constraints.maxWidth >= 720
-                  ? (constraints.maxWidth - 10) / 2
-                  : constraints.maxWidth;
-              return Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: replicas
-                    .map(
-                      (replica) => SizedBox(
-                        width: width,
-                        child: _MediaReplicaCard(
-                          replica: replica,
-                          variant: variant,
-                        ),
-                      ),
-                    )
-                    .toList(growable: false),
-              );
-            },
-          ),
-      ],
-    );
-  }
-}
-
-class _MediaReplicaCard extends StatelessWidget {
-  const _MediaReplicaCard({required this.replica, required this.variant});
-
-  final Map<String, dynamic> replica;
-  final Map<String, dynamic> variant;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    final available = replica['availability_state']?.toString() == 'ready';
-    Object? value(String key) => replica[key] ?? variant[key];
-    final codec = <String>{
-      for (final candidate in [
-        value('container'),
-        value('extension'),
-        value('codec'),
-      ])
-        if ((candidate?.toString().trim() ?? '').isNotEmpty)
-          candidate!.toString().trim().toUpperCase(),
-    }.join(' · ');
-    final resolution = _audioResolutionLabel(<String, dynamic>{
-      'bit_depth': value('bit_depth'),
-      'sample_rate': value('sample_rate'),
-    });
-    final bitrate = _audioBitrateLabel(<String, dynamic>{
-      'bitrate': value('bitrate'),
-    });
-    final channels = _intValue(value('channels'));
-    final modified = _compactMediaDate(replica['modified_at']);
-    final verified = _compactMediaDate(replica['last_verified_at']);
-    final path =
-        replica['relative_path']?.toString() ??
-        replica['file_path']?.toString() ??
-        '';
-    final facts = <(IconData, String)>[
-      if (codec.isNotEmpty) (Icons.audio_file_outlined, codec),
-      if (resolution != null) (Icons.graphic_eq, resolution),
-      if (bitrate != null) (Icons.speed_outlined, bitrate),
-      if (channels != null)
-        (
-          Icons.surround_sound_outlined,
-          channels == 1
-              ? _tr(context, 'Mono')
-              : channels == 2
-              ? _tr(context, 'Stereo')
-              : '$channels ch',
-        ),
-      if (_formatBytes(replica['size_bytes']).isNotEmpty)
-        (Icons.data_usage_outlined, _formatBytes(replica['size_bytes'])),
-      if (modified.isNotEmpty) (Icons.update_outlined, modified),
-    ];
-    return DecoratedBox(
+    return Container(
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: tokens.surfaceRaised.withValues(alpha: 0.66),
+        color: tokens.surfaceRaised,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: available
-              ? tokens.playing.withValues(alpha: 0.34)
-              : tokens.stroke,
-        ),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(13),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Container(
-                  width: 34,
-                  height: 34,
-                  decoration: BoxDecoration(
-                    color: (available ? tokens.playing : tokens.textSecondary)
-                        .withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(
-                    replica['source_kind']?.toString() == 'core'
-                        ? Icons.dns_outlined
-                        : Icons.devices_outlined,
-                    size: 18,
-                    color: available ? tokens.playing : tokens.textSecondary,
-                  ),
-                ),
-                const SizedBox(width: 9),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        replica['device_name']?.toString() ??
-                            _tr(
-                              context,
-                              replica['source_kind']?.toString() == 'core'
-                                  ? 'Core local'
-                                  : 'Unknown device',
-                            ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      Text(
-                        _tr(
-                          context,
-                          replica['source_kind']?.toString() == 'core'
-                              ? 'Core library'
-                              : 'Device library',
-                        ),
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: tokens.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                _AvailabilityBadge(available: available),
-              ],
-            ),
-            if (facts.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 7,
-                runSpacing: 7,
-                children: facts
-                    .map((fact) => _ReplicaFact(icon: fact.$1, label: fact.$2))
-                    .toList(growable: false),
-              ),
-            ],
-            if (path.isNotEmpty) ...[
-              const SizedBox(height: 11),
-              Row(
-                children: [
-                  Icon(
-                    Icons.folder_outlined,
-                    size: 15,
-                    color: tokens.textSecondary,
-                  ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Tooltip(
-                      message: path,
-                      child: Text(
-                        path,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: tokens.textSecondary,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            if (verified.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                '${_tr(context, 'Verified')} $verified',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: tokens.textSecondary),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _AvailabilityBadge extends StatelessWidget {
-  const _AvailabilityBadge({required this.available});
-
-  final bool available;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    final color = available ? tokens.playing : tokens.textSecondary;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.11),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              available ? Icons.check_circle : Icons.cloud_off_outlined,
-              size: 13,
-              color: color,
-            ),
-            const SizedBox(width: 4),
-            Text(
-              _tr(context, available ? 'Ready' : 'Unavailable'),
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: color,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ReplicaFact extends StatelessWidget {
-  const _ReplicaFact({required this.icon, required this.label});
-
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: tokens.surface.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: tokens.stroke),
       ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 13, color: tokens.textSecondary),
-            const SizedBox(width: 4),
-            Text(label, style: Theme.of(context).textTheme.labelSmall),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.album_outlined, color: tokens.accent, size: 28),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    if (subtitle.isNotEmpty)
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color: tokens.textSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (group.isCurrent)
+                _TrackMetaPill(
+                  icon: Icons.check_circle_outline,
+                  label: _tr(context, 'Current'),
+                ),
+              ?action,
+            ],
+          ),
+          const SizedBox(height: 14),
+          if (group.copies.isEmpty)
+            Text(
+              _tr(context, 'No physical copies are available'),
+              style: TextStyle(color: tokens.textSecondary),
+            ),
+          for (var i = 0; i < group.copies.length; i++) ...[
+            if (i > 0) const SizedBox(height: 9),
+            _ReleaseCopyRow(
+              copy: group.copies[i],
+              coreConnected: coreConnected,
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
 }
 
-String _compactMediaDate(Object? value) {
-  final raw = value?.toString() ?? '';
-  final date = DateTime.tryParse(raw)?.toLocal();
-  if (date == null) return '';
-  String two(int number) => number.toString().padLeft(2, '0');
-  return '${date.year}-${two(date.month)}-${two(date.day)} '
-      '${two(date.hour)}:${two(date.minute)}';
-}
+class _ReleaseCopyRow extends StatelessWidget {
+  const _ReleaseCopyRow({required this.copy, required this.coreConnected});
+  final Map<String, dynamic> copy;
+  final bool coreConnected;
 
-String? _recordingKindLabel(BuildContext context, String? kind) {
-  return switch (kind) {
-    'live' => _tr(context, 'Live recording'),
-    'acoustic' => _tr(context, 'Acoustic recording'),
-    'demo' => _tr(context, 'Demo recording'),
-    'cover' => _tr(context, 'Cover recording'),
-    'remix' => _tr(context, 'Remix recording'),
-    'edit' => _tr(context, 'Edited recording'),
-    'instrumental' => _tr(context, 'Instrumental recording'),
-    'karaoke' => _tr(context, 'Karaoke recording'),
-    'studio' => _tr(context, 'Studio recording'),
-    _ => null,
-  };
+  @override
+  Widget build(BuildContext context) {
+    final tokens = IntMusicTheme.of(context);
+    final presence = replicaPresence(copy, coreConnected: coreConnected);
+    final available = presence == 'available';
+    final color = available ? tokens.playing : tokens.textSecondary;
+    final format =
+        (copy['extension'] ?? copy['container'] ?? copy['codec'] ?? '')
+            .toString()
+            .toUpperCase();
+    final path = (copy['relative_path'] ?? copy['file_path'] ?? '').toString();
+    return Tooltip(
+      message: path,
+      child: Wrap(
+        spacing: 7,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  available
+                      ? Icons.check_circle_outline
+                      : Icons.cloud_off_outlined,
+                  size: 14,
+                  color: color,
+                ),
+                const SizedBox(width: 5),
+                Flexible(
+                  child: Text(
+                    '${copy['device_name'] ?? _tr(context, 'Unknown device')} · ${_tr(context, available
+                        ? 'Available'
+                        : presence == 'offline'
+                        ? 'Offline'
+                        : 'Missing')}',
+                    style: TextStyle(color: color, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (format.isNotEmpty)
+            _TrackMetaPill(icon: Icons.audio_file_outlined, label: format),
+          if (_audioResolutionLabel(copy) case final resolution?)
+            _TrackMetaPill(icon: Icons.graphic_eq, label: resolution),
+          if (_audioBitrateLabel(copy) case final bitrate?)
+            _TrackMetaPill(icon: Icons.speed_outlined, label: bitrate),
+          if (_formatBytes(copy['size_bytes']).isNotEmpty)
+            _TrackMetaPill(
+              icon: Icons.data_usage_outlined,
+              label: _formatBytes(copy['size_bytes']),
+            ),
+        ],
+      ),
+    );
+  }
 }
 
 String? _audioResolutionLabel(Map<String, dynamic> variant) {

@@ -56,10 +56,29 @@ pub struct CoreConfig {
     pub search: SearchConfig,
     pub playback: PlaybackConfig,
     pub favorites: FavoritesConfig,
+    pub song_display: SongDisplayConfig,
     pub cache: CacheConfig,
     pub transcoding: TranscodingConfig,
     pub logging: LoggingConfig,
     pub auth: AuthConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SongDisplayConfig {
+    pub merge_same_name: bool,
+    pub attribute_filter: SongDisplayFilter,
+    pub sort_by_mode: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SongDisplayFilter {
+    #[default]
+    All,
+    Inherit,
+    Merged,
+    Independent,
 }
 
 impl CoreConfig {
@@ -169,6 +188,8 @@ pub struct MetadataConfig {
     pub split_text_fields: bool,
     pub artist_separators: Vec<String>,
     pub genre_separators: Vec<String>,
+    #[serde(default)]
+    pub tag_mappings: Vec<protocol::TagMappingRule>,
     pub do_not_split_slash: bool,
     pub prefer_original_date: bool,
     pub write_back_tags: bool,
@@ -191,6 +212,7 @@ impl Default for MetadataConfig {
                 "\u{ff1b}".to_string(),
                 "\u{3001}".to_string(),
             ],
+            tag_mappings: Vec::new(),
             do_not_split_slash: true,
             prefer_original_date: true,
             write_back_tags: false,
@@ -344,4 +366,38 @@ pub fn ensure_runtime_dirs(paths: &CorePaths) -> Result<()> {
 
 pub fn normalize_config_path(path: impl AsRef<Path>) -> PathBuf {
     path.as_ref().to_path_buf()
+}
+
+#[cfg(test)]
+mod song_display_tests {
+    use super::*;
+
+    #[test]
+    fn display_settings_round_trip_and_reject_unknown_filters() {
+        let config = SongDisplayConfig {
+            merge_same_name: true,
+            attribute_filter: SongDisplayFilter::Independent,
+            sort_by_mode: true,
+        };
+        let saved = toml::to_string(&config).unwrap();
+        let restored: SongDisplayConfig = toml::from_str(&saved).unwrap();
+        assert!(restored.merge_same_name && restored.sort_by_mode);
+        assert_eq!(restored.attribute_filter, SongDisplayFilter::Independent);
+        assert!(toml::from_str::<SongDisplayConfig>("attribute_filter = 'typo'").is_err());
+    }
+
+    #[test]
+    fn tag_mapping_fields_and_literal_outputs_persist_without_built_in_rules() {
+        use protocol::{TagMappingField, TagMappingRule};
+        let mut config = MetadataConfig::default();
+        assert!(config.tag_mappings.is_empty());
+        config.tag_mappings.push(TagMappingRule {
+            source: "自定义原始标签".into(),
+            targets: vec!["R&B/Soul;Pop".into(), "任意标签".into()],
+            fields: vec![TagMappingField::Genres, TagMappingField::Composers],
+        });
+        let saved = toml::to_string(&config).unwrap();
+        let restored: MetadataConfig = toml::from_str(&saved).unwrap();
+        assert_eq!(restored.tag_mappings, config.tag_mappings);
+    }
 }

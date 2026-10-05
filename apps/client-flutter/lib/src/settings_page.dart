@@ -3,6 +3,7 @@ part of '../intmusic_client.dart';
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
     required this.coreUrlController,
+    this.collectionSettings,
     required this.serverAliasController,
     required this.clientAliasController,
     required this.loading,
@@ -46,6 +47,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onUpdateMetadataSettings,
   });
 
+  final Widget? collectionSettings;
   final TextEditingController coreUrlController;
   final TextEditingController serverAliasController;
   final TextEditingController clientAliasController;
@@ -87,7 +89,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<bool> onDiagnosticLoggingChanged;
   final VoidCallback onExportDiagnosticLog;
   final Future<void> Function(Map<String, dynamic>) onUpdateFavoriteSettings;
-  final Future<void> Function(Map<String, dynamic>) onUpdateMetadataSettings;
+  final Future<bool> Function(Map<String, dynamic>) onUpdateMetadataSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -320,7 +322,13 @@ class _SettingsPage extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 14),
-          _MetadataSeparatorsPanel(
+          const _SongDisplaySettings(),
+          const SizedBox(height: 14),
+          if (collectionSettings != null) ...[
+            collectionSettings!,
+            const SizedBox(height: 18),
+          ],
+          _MetadataTagRulesPanel(
             settings: metadataSettings,
             onUpdate: onUpdateMetadataSettings,
           ),

@@ -100,13 +100,6 @@ pub(crate) struct StatsQuery {
     pub(crate) top_limit: Option<u32>,
 }
 
-pub(crate) fn apply_favorite_settings_to_playlist(
-    settings: &FavoritesConfig,
-    playlist: &mut PlaylistDetail,
-) {
-    apply_favorite_settings_to_tracks(settings, &mut playlist.tracks);
-}
-
 pub(crate) fn apply_favorite_settings_to_tracks(
     settings: &FavoritesConfig,
     tracks: &mut [protocol::TrackSummary],
@@ -291,7 +284,7 @@ async fn play_track_on_zone_with_queue_selection(
                 output_id,
                 detail.track.id,
                 detail.track.title,
-                detail.file_path,
+                readable_track_source(state, track_id).await?.path,
                 position_ms,
             )
             .await?;
@@ -330,7 +323,7 @@ async fn play_track_on_zone_with_queue_selection(
             .renderers
             .update_state(PlaybackState {
                 zone_id: zone_id.to_string(),
-                state: PlaybackTransportState::Playing,
+                state: PlaybackTransportState::Loading,
                 track_id: Some(detail.track.id),
                 track_title: Some(track_title),
                 position_ms,
@@ -352,7 +345,9 @@ async fn play_track_on_zone_with_queue_selection(
             record_playback_finish(state, previous, "replaced", "cut_out", None).await;
         }
     }
-    record_playback_start(state, &playback).await;
+    if is_core_zone(zone_id) {
+        record_playback_start(state, &playback).await;
+    }
     state.emit("playback.state_changed", &playback);
     Ok(playback)
 }
@@ -374,7 +369,7 @@ pub(crate) async fn resume_zone_internal(
             .state_for_output(zone_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-        playback.state = PlaybackTransportState::Playing;
+        playback.state = PlaybackTransportState::Loading;
         let (renderer_id, command) = create_renderer_command(
             state,
             RendererCommandRequest {
@@ -525,7 +520,6 @@ pub(crate) async fn seek_zone_internal(
             .state_for_output(zone_id)
             .await
             .ok_or_else(|| anyhow::anyhow!("playback zone {zone_id} is not registered"))?;
-        playback.state = PlaybackTransportState::Playing;
         playback.position_ms = position_ms;
         let (renderer_id, command) = create_renderer_command(
             state,
@@ -563,13 +557,20 @@ pub(crate) async fn record_renderer_state_transition(
     match current.state {
         PlaybackTransportState::Stopped => {
             if let Some(previous) = previous.as_ref().filter(|state| state.track_id.is_some()) {
-                record_playback_finish(state, previous, "completed", "completed", None).await;
+                record_playback_finish(state, previous, "stopped", "stopped", None).await;
             }
         }
         PlaybackTransportState::Paused => {
             record_playback_update(state, current, "pause").await;
         }
+        PlaybackTransportState::Loading => {}
         PlaybackTransportState::Playing => {
+            if previous
+                .as_ref()
+                .is_none_or(|p| p.state == PlaybackTransportState::Loading && p.position_ms == 0)
+            {
+                record_playback_start(state, current).await;
+            }
             record_playback_update(state, current, "progress").await;
         }
     }

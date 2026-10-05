@@ -14,16 +14,6 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     return null;
   }
 
-  bool _zoneUsesThisClient(String zoneId) {
-    if (_isClientOutputId(zoneId) || zoneId.startsWith(_clientZonePrefix)) {
-      return true;
-    }
-    final zone = _zoneById(zoneId);
-    final outputId = zone?['output_id']?.toString();
-    return _isClientOutputId(outputId) ||
-        (outputId?.startsWith(_clientZonePrefix) ?? false);
-  }
-
   String? _clientOutputForZone(String zoneId) {
     if (_isClientOutputId(zoneId)) return zoneId;
     final outputId = _zoneById(zoneId)?['output_id']?.toString();
@@ -38,142 +28,6 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     return outputId != null &&
         _audioPlayers.containsKey(outputId) &&
         _rendererLoadedTrackByOutput[outputId] != null;
-  }
-
-  /// Starts an accessible local replica before waiting for Core.
-  ///
-  /// Core remains authoritative for the shared queue and history. The later
-  /// renderer command is reconciled without reopening the already-playing
-  /// source.
-  Future<bool> _tryStartLocalPlayback(
-    int trackId, {
-    required String zoneId,
-    List<int>? sourceTrackIds,
-    String? intentId,
-  }) async {
-    if (!_zoneUsesThisClient(zoneId)) return false;
-    final copy = await _availableOfflineCopy(trackId);
-    if (copy == null) {
-      ClientLog.event(
-        'playback.local_fast_start.unavailable',
-        data: <String, Object?>{'track_id': trackId, 'zone_id': zoneId},
-      );
-      return false;
-    }
-    final path = _offlineCopyPath(copy, _clientLibraryRoots);
-    if (path == null || !await File(path).exists()) {
-      ClientLog.event(
-        'playback.local_fast_start.missing_file',
-        level: 'warning',
-        data: <String, Object?>{'track_id': trackId, 'zone_id': zoneId},
-      );
-      return false;
-    }
-    final summary = _findEntity(_tracks, trackId);
-    final cachedDetail =
-        _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
-    if (summary == null || cachedDetail == null) {
-      ClientLog.event(
-        'playback.local_fast_start.projection_missing',
-        level: 'warning',
-        data: <String, Object?>{'track_id': trackId, 'zone_id': zoneId},
-      );
-      return false;
-    }
-
-    if (sourceTrackIds != null) {
-      _setOfflineQueue(
-        sourceTrackIds,
-        startIndex: sourceTrackIds.indexOf(trackId),
-      );
-    } else {
-      final items = _queueItems();
-      final existingIndex = items.indexWhere(
-        (item) => _intValue(_asMap(item['track'])['id']) == trackId,
-      );
-      if (existingIndex >= 0) {
-        _playbackQueue = <String, dynamic>{
-          ...?_playbackQueue,
-          'current_index': existingIndex,
-        };
-      }
-    }
-
-    final outputId = _isClientOutputId(zoneId)
-        ? zoneId
-        : (_zoneById(zoneId)?['output_id']?.toString() ?? _clientOutputId);
-    final player = await _playerForOutput(outputId);
-    final watch = Stopwatch()..start();
-    ClientLog.event(
-      'playback.local_fast_start.begin',
-      data: <String, Object?>{
-        'track_id': trackId,
-        'zone_id': zoneId,
-        'output_id': outputId,
-      },
-    );
-    try {
-      await player.stop();
-      _rendererLoadedTrackByOutput[outputId] = trackId;
-      await player.open(path, localFile: true);
-    } catch (error, stackTrace) {
-      if (_rendererLoadedTrackByOutput[outputId] == trackId) {
-        _rendererLoadedTrackByOutput.remove(outputId);
-      }
-      ClientLog.error(
-        'playback.local_fast_start.failed',
-        error,
-        stackTrace: stackTrace,
-        data: <String, Object?>{
-          'track_id': trackId,
-          'zone_id': zoneId,
-          'elapsed_ms': watch.elapsedMilliseconds,
-        },
-      );
-      return false;
-    }
-    _rendererLocalFileByOutput[outputId] = true;
-    _optimisticLocalTrackByOutput[outputId] = trackId;
-    _optimisticLocalStartedAtByOutput[outputId] = DateTime.now();
-    if (intentId != null) {
-      _markPlaybackIntentAppliedLocally(intentId);
-    }
-
-    final localDetail = _detailWithLocalCopy(cachedDetail, copy, path);
-    final playback = _withPlaybackTimestamp(<String, dynamic>{
-      'zone_id': zoneId,
-      'state': 'playing',
-      'track_id': trackId,
-      'track_title': summary['title'],
-      'position_ms': 0,
-      'queue_revision': _intValue(_playbackQueue?['revision']) ?? 0,
-      'origin_client_id': intentId == null ? null : _clientId,
-      'intent_id': intentId,
-    });
-    _rendererPlaybackByOutput[outputId] = playback;
-    if (mounted) {
-      _mutatePlayback(() {
-        _activeTrackDetailId = trackId;
-        _activeTrackDetail = localDetail;
-        _trackDetailCache[trackId] = localDetail;
-        _applyPlayback(playback);
-        _rendererStatus = _tr(
-          context,
-          'Playing local copy · syncing with Core',
-        );
-        _error = null;
-      });
-    }
-    ClientLog.event(
-      'playback.local_fast_start.ready',
-      data: <String, Object?>{
-        'track_id': trackId,
-        'zone_id': zoneId,
-        'output_id': outputId,
-        'elapsed_ms': watch.elapsedMilliseconds,
-      },
-    );
-    return true;
   }
 
   void _setOfflineQueue(List<int> trackIds, {int? startIndex, String? zoneId}) {
@@ -198,7 +52,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
       'items': <dynamic>[
         for (var index = 0; index < validIds.length; index += 1)
           <String, dynamic>{
-            'id': -(index + 1),
+            'id': _newPlaybackCommandId(),
             'position': index,
             'track': summaries[validIds[index]],
           },
@@ -210,6 +64,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
   Future<void> _playOfflineTrack(
     int trackId, {
     List<int>? sourceTrackIds,
+    Map<String, dynamic>? queueSource,
     String? zoneId,
   }) async {
     final outputId = _offlineOutputForZone(zoneId);
@@ -245,11 +100,20 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
         startIndex: sourceTrackIds.indexOf(trackId),
         zoneId: outputId,
       );
+      _playbackQueue = {...?_playbackQueue, 'queue_source': queueSource};
     } else {
       final items = _queueItems();
-      final existingIndex = items.indexWhere(
-        (item) => _intValue(_asMap(item['track'])['id']) == trackId,
-      );
+      final selected = _intValue(_playbackQueue?['current_index']);
+      final existingIndex =
+          selected != null &&
+              selected >= 0 &&
+              selected < items.length &&
+              _intValue(_asMap(items[selected]['track'])['id']) == trackId
+          ? selected
+          : items.indexWhere(
+              (item) => _intValue(_asMap(item['track'])['id']) == trackId,
+            );
+
       if (existingIndex < 0) {
         _setOfflineQueue(<int>[trackId], startIndex: 0, zoneId: outputId);
       } else {
@@ -272,6 +136,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     }
     final path = _offlineCopyPath(copy, _clientLibraryRoots);
     if (path == null) return;
+    _rendererActiveCommandByOutput.remove(outputId);
     final player = await _playerForOutput(outputId);
     await player.stop();
     _rendererLoadedTrackByOutput[outputId] = trackId;
@@ -314,6 +179,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
     final trackId = _intValue(_playback?['track_id']);
     if (trackId == null) return;
     final outputId = _offlineOutputForZone(_playback?['zone_id']?.toString());
+    _rendererActiveCommandByOutput.remove(outputId);
     final player = await _playerForOutput(outputId);
     final endPosition =
         await player.currentPositionMs() ??
@@ -358,6 +224,7 @@ extension _DashboardOfflinePlayback on _CoreDashboardState {
 
   Future<void> _setOfflineStopped({String? zoneId}) async {
     final outputId = _offlineOutputForZone(zoneId);
+    _rendererActiveCommandByOutput.remove(outputId);
     final player = await _playerForOutput(outputId);
     await player.stop();
     _rendererLoadedTrackByOutput.remove(outputId);

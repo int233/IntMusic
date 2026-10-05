@@ -1,12 +1,15 @@
 use super::*;
 
 mod album_identity;
+mod catalog_identity;
 mod client_library_resolution;
+mod collection_sources;
+mod collections;
 mod event_journal;
 mod library_management;
 mod playback_command_receipts;
 mod playback_session_v3;
-mod smart_playlists;
+mod song_display;
 mod track_merge;
 
 async fn test_pool() -> (DbPool, PathBuf) {

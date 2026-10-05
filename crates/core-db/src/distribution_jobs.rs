@@ -55,20 +55,13 @@ pub async fn create_distribution_job(
             .await?,
         );
     }
-    for playlist_id in request.playlist_ids.iter().copied().filter(|id| *id > 0) {
-        track_ids.extend(
-            sqlx::query_scalar::<_, i64>(
-                r#"
-                SELECT track_id
-                FROM playlist_items
-                WHERE playlist_id = ?1
-                ORDER BY position, id
-                "#,
-            )
-            .bind(playlist_id)
-            .fetch_all(&mut *tx)
-            .await?,
-        );
+    for collection_id in request.collection_ids.iter().copied().filter(|id| *id > 0) {
+        let raw: Vec<String> = sqlx::query_scalar("SELECT i.track_ids_json FROM collection_result_items i JOIN collections c ON c.result_version=i.version WHERE c.id=?1 ORDER BY i.position").bind(collection_id).fetch_all(&mut *tx).await?;
+        for value in raw {
+            for release_id in serde_json::from_str::<Vec<i64>>(&value)? {
+                if let Some(id) = sqlx::query_scalar::<_,i64>("SELECT v.track_id FROM visible_catalog_tracks v JOIN track_catalog_links l ON l.track_id=v.track_id WHERE COALESCE(l.release_identity_id,l.release_track_id)=?1").bind(release_id).fetch_optional(&mut *tx).await? { track_ids.push(id); }
+            }
+        }
     }
     track_ids.sort_unstable();
     track_ids.dedup();
@@ -129,7 +122,7 @@ pub async fn create_distribution_job(
                     ORDER BY track_artist.position
                 ) AS artist_display
             FROM tracks track
-            JOIN legacy_track_catalog_links link ON link.track_id = track.id
+            JOIN track_catalog_links link ON link.track_id = track.id
             JOIN release_track_media_variants relation
               ON relation.release_track_id = link.release_track_id
             JOIN media_variants variant ON variant.id = relation.media_variant_id

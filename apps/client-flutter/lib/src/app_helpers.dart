@@ -225,7 +225,7 @@ int _estimatedPlaybackPositionMs(
   final elapsedMs = state == 'playing' && receivedAtMs != null
       ? DateTime.now().millisecondsSinceEpoch - receivedAtMs
       : 0;
-  final estimate = basePosition + elapsedMs.clamp(0, 60 * 60 * 1000).toInt();
+  final estimate = basePosition + elapsedMs.clamp(0, 1500).toInt();
   final max = durationMs ?? 0;
   if (max > 0) {
     return estimate.clamp(0, max).toInt();
@@ -342,8 +342,8 @@ String _searchSubtitle(Map<String, dynamic> item, _ResultKind kind) {
     _ResultKind.artist =>
       '${item['album_count'] ?? 0} albums - ${item['track_count'] ?? 0} tracks',
     _ResultKind.playlist => _joinParts([
-      item['kind'],
-      '${item['track_count'] ?? 0} tracks',
+      _collectionTypeName(item['entity_type']?.toString()),
+      '${item['result_total'] ?? 0} 项',
       item['description'],
     ]),
   };
@@ -384,37 +384,6 @@ String _formatBytes(Object? value) {
   return '${size.toStringAsFixed(unit == 0 ? 0 : 1)} ${units[unit]}';
 }
 
-Object _ruleValue(String field, String rawValue) {
-  final value = rawValue.trim();
-  if (_numericSmartFields.contains(field)) {
-    return int.tryParse(value) ?? value;
-  }
-  if (field == 'favorite') {
-    return ['true', 'yes', '1'].contains(value.toLowerCase());
-  }
-  return value;
-}
-
-String _smartRulesLabel(Object? rules) {
-  if (rules is! Map) {
-    return 'All tracks';
-  }
-  final map = rules.cast<String, dynamic>();
-  final match = map['match']?.toString() == 'any' ? 'any' : 'all';
-  final ruleList = (map['rules'] as List?) ?? const [];
-  if (ruleList.isEmpty) {
-    return 'All tracks';
-  }
-  final parts = ruleList
-      .take(4)
-      .map((item) {
-        final rule = (item as Map).cast<String, dynamic>();
-        return '${rule['field']} ${rule['op']} ${rule['value']}';
-      })
-      .join(' / ');
-  return '$match: $parts';
-}
-
 String _ratingLabel(Map<String, dynamic> track) {
   final rating = _intValue(track['effective_rating']);
   if (rating == null) {
@@ -422,24 +391,6 @@ String _ratingLabel(Map<String, dynamic> track) {
   }
   return 'rating $rating';
 }
-
-const _smartFields = [
-  'title',
-  'artist',
-  'composer',
-  'lyricist',
-  'album',
-  'album_artist',
-  'genre',
-  'year',
-  'rating',
-  'favorite',
-  'extension',
-  'path',
-  'library_source',
-];
-
-const _numericSmartFields = {'year', 'rating', 'duration_ms', 'tag_rating'};
 
 const _destinations = [
   _Destination('Home', Icons.home_outlined, Icons.home),

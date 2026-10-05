@@ -267,6 +267,7 @@ extension _DashboardDetails on _CoreDashboardState {
         '_local_available': true,
       },
       '_client_local_copy': <String, dynamic>{
+        'local_verified': true,
         'media_variant_id': copy.mediaVariantId,
         'device_id': _clientId,
         'device_name': _clientAlias(),
@@ -332,10 +333,9 @@ extension _DashboardDetails on _CoreDashboardState {
     _trackDetailCache.clear();
     _albumDetailCache.clear();
     _artistDetailCache.clear();
-    _playlistDetailCache.clear();
     _activeTrackDetail = null;
     await Future.wait(
-      const <String>['track', 'album', 'artist', 'playlist'].map(
+      const <String>['track', 'album', 'artist'].map(
         (kind) =>
             _ClientCacheStore.invalidateDetails(_coreUrlController.text, kind),
       ),
@@ -424,45 +424,78 @@ extension _DashboardDetails on _CoreDashboardState {
 
   void _closeTrackDetail() => _closeDetailPage();
 
-  Future<void> _openPlaylistDetail(int playlistId) async {
-    final detail =
-        _playlistDetailCache[playlistId] ??
-        _playlistDetailFromOverview(playlistId);
-    if (detail == null || !mounted) return;
-    _mutate(() {
-      _playlistDetailCache[playlistId] = detail;
-      _navigateToInState(_AppRoute.playlist(playlistId));
-    });
-    if (!_localPlaybackFallbackActive) {
-      unawaited(_refreshPlaylistDetail(playlistId));
-    }
+  Future<void> _openPlaylistDetail(int id) async {
+    _navigateTo(_AppRoute.playlist(id));
   }
 
-  Map<String, dynamic>? _playlistDetailFromOverview(int playlistId) {
-    final playlist = _findEntity(_playlists, playlistId);
-    if (playlist == null) return null;
-    return <String, dynamic>{
-      'playlist': playlist,
-      'rules': null,
-      'tracks': const <dynamic>[],
-    };
-  }
-
-  Future<void> _refreshPlaylistDetail(int playlistId) async {
-    try {
-      final detail = _asMap(await _api.getJson('/playlists/$playlistId'));
-      _playlistDetailCache[playlistId] = detail;
-      await _persistDetail('playlist', playlistId, detail);
-      if (mounted) {
-        _mutate(
-          () => _decorateDetailTrackAvailability(
-            _playlistDetailCache,
-            playlistId,
+  Future<void> _openCollectionEntity(String type, int id) async {
+    switch (type) {
+      case 'track':
+        await _openTrackDetail(id);
+      case 'album':
+        await _openAlbumDetail(id);
+      case 'artist':
+        await _openArtistDetail(id);
+      case 'genre':
+        final detail = await _run<JsonMap>(
+          () async => _asMap(await _api.getJson('/genres/$id')),
+        );
+        if (detail == null || !mounted) return;
+        await _showPanelDialog<void>(
+          maxWidth: 1100,
+          child: _withTrackActions(
+            child: Builder(
+              builder: (context) {
+                final tracks = _displayTracks(
+                  context,
+                  detail['tracks'] as List,
+                );
+                return SizedBox(
+                  height: MediaQuery.sizeOf(context).height * 0.8,
+                  child: Column(
+                    children: [
+                      ListTile(
+                        title: Text(_asMap(detail['genre'])['name'].toString()),
+                        subtitle: Text('${tracks.length} 首歌曲'),
+                        trailing: IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ),
+                      _CollectionActions(tracks: tracks),
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: tracks.length,
+                          itemBuilder: (c, index) {
+                            final track = tracks[index];
+                            return _SheetTrackRow(
+                              coreBaseUrl: _coreUrlController.text,
+                              track: track,
+                              indexLabel: '${index + 1}',
+                              subtitle: _joinParts([
+                                track['artist_display'],
+                                track['album_title'],
+                              ]),
+                              onOpen: () async {
+                                Navigator.pop(context);
+                                await _openTrackDetail(track['id'] as int);
+                              },
+                              onPlay: () => _playTrackFromCollection(
+                                track['id'] as int,
+                                tracks,
+                              ),
+                              onToggleFavorite: _toggleFavorite,
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
           ),
         );
-      }
-    } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
     }
   }
 
@@ -491,68 +524,23 @@ extension _DashboardDetails on _CoreDashboardState {
     );
   }
 
-  Future<void> _createManualPlaylist() async {
-    final payload = await _showPanelDialog<Map<String, dynamic>>(
-      maxWidth: 640,
-      child: const _ManualPlaylistSheet(),
-    );
-    if (payload == null) {
-      return;
+  Future<void> _editCollection(int? id) async {
+    JsonMap? page;
+    if (id != null) {
+      page = await _run<JsonMap>(() => _collections.load(id, fresh: true));
+      if (page == null) return;
     }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.postJson('/playlists', payload)),
-    );
-    if (mounted && detail != null) {
-      await _reloadPlaylists();
-    }
-  }
-
-  Future<void> _createSmartPlaylist() async {
-    final sourceOptions = await _smartPlaylistSourceOptions();
     if (!mounted) return;
-    final payload = await _showPanelDialog<Map<String, dynamic>>(
-      maxWidth: 760,
-      child: _SmartPlaylistSheet(sourceOptions: sourceOptions),
+    await _showCollectionEditor(
+      context,
+      _collections,
+      page: page,
+      coreBaseUrl: _coreUrlController.text,
+      loadSources: _collectionSourceOptions,
     );
-    if (payload == null) {
-      return;
-    }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.postJson('/playlists', payload)),
-    );
-    if (mounted && detail != null) {
-      await _reloadPlaylists();
-    }
   }
 
-  Future<void> _editSmartPlaylist(
-    int playlistId,
-    Map<String, dynamic> detail,
-  ) async {
-    final sourceOptions = await _smartPlaylistSourceOptions();
-    if (!mounted) return;
-    final payload = await _showPanelDialog<Map<String, dynamic>>(
-      maxWidth: 760,
-      child: _SmartPlaylistSheet(detail: detail, sourceOptions: sourceOptions),
-    );
-    if (payload == null) {
-      return;
-    }
-    final updated = await _run<Map<String, dynamic>>(
-      () async =>
-          _asMap(await _api.postJson('/playlists/$playlistId', payload)),
-    );
-    if (!mounted || updated == null) {
-      return;
-    }
-    await _reloadPlaylists();
-    if (mounted) {
-      _mutate(() => _playlistDetailCache[playlistId] = updated);
-      unawaited(_persistDetail('playlist', playlistId, updated));
-    }
-  }
-
-  Future<List<Map<String, dynamic>>> _smartPlaylistSourceOptions() async {
+  Future<List<Map<String, dynamic>>> _collectionSourceOptions() async {
     if (_localPlaybackFallbackActive) return const <Map<String, dynamic>>[];
     final unknownDeviceLabel = _tr(context, 'Unknown device');
     final musicSourceLabel = _tr(context, 'Music source');
@@ -587,80 +575,61 @@ extension _DashboardDetails on _CoreDashboardState {
     }
   }
 
-  Future<void> _deletePlaylist(int playlistId) async {
-    final result = await _run<Map<String, dynamic>>(
-      () async => _asMap(await _api.deleteJson('/playlists/$playlistId')),
-    );
-    if (mounted && result != null) {
-      await _reloadPlaylists();
-    }
-  }
-
-  Future<void> _reloadPlaylists() async {
-    final playlists = await _api.getJson('/playlists') as List<dynamic>;
-    if (mounted) {
-      _mutate(() => _playlists = playlists);
-    }
-    await _persistOverviewValues(<String, dynamic>{'playlists': playlists});
-  }
-
   Future<void> _addTrackToPlaylist(int trackId) async {
-    final manualPlaylists = _playlists
-        .where((item) => _asMap(item)['kind']?.toString() == 'manual')
-        .toList(growable: false);
-    if (manualPlaylists.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Create a manual playlist first')),
-        );
+    final targets = _collections.items
+        .where((i) => i['entity_type'] == 'track' && i['system_key'] == null)
+        .toList();
+    final id = await showDialog<int>(
+      context: context,
+      builder: (c) => SimpleDialog(
+        title: const Text('加入歌曲集合'),
+        children: [
+          for (final target in targets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(c, target['id']),
+              child: Text(target['name'].toString()),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(c, -1),
+            child: const Text('新建歌曲集合…'),
+          ),
+        ],
+      ),
+    );
+    if (id == null || !mounted) return;
+    if (id == -1) {
+      final before = _collections.items.map((item) => item['id']).toSet();
+      await _editCollection(null);
+      if (mounted &&
+          _collections.items.any(
+            (item) =>
+                !before.contains(item['id']) && item['entity_type'] == 'track',
+          )) {
+        await _addTrackToPlaylist(trackId);
       }
       return;
     }
-    final playlistId = await _showPanelDialog<int>(
-      maxWidth: 560,
-      child: _AddToPlaylistSheet(playlists: manualPlaylists),
-    );
-    if (playlistId == null) {
-      return;
-    }
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.postJson('/playlists/$playlistId/tracks', <String, dynamic>{
-          'track_id': trackId,
-        }),
-      ),
-    );
-    if (mounted && detail != null) {
-      await _reloadPlaylists();
-      final playlistId = _intValue(_asMap(detail['playlist'])['id']);
-      if (playlistId != null) {
-        _playlistDetailCache[playlistId] = detail;
-        _decorateDetailTrackAvailability(_playlistDetailCache, playlistId);
-        unawaited(_persistDetail('playlist', playlistId, detail));
-      }
-    }
-  }
-
-  Future<void> _removeTrackFromPlaylist({
-    required int playlistId,
-    required int trackId,
-  }) async {
-    final detail = await _run<Map<String, dynamic>>(
-      () async => _asMap(
-        await _api.deleteJson('/playlists/$playlistId/tracks/$trackId'),
-      ),
-    );
-    if (mounted && detail != null) {
-      await _reloadPlaylists();
-      if (!mounted) {
-        return;
-      }
-      _mutate(() {
-        _playlistDetailCache[playlistId] = detail;
-        _decorateDetailTrackAvailability(_playlistDetailCache, playlistId);
-      });
-      unawaited(_persistDetail('playlist', playlistId, detail));
-    }
+    await _run<void>(() async {
+      final detail = await _collections.load(id, fresh: true);
+      final track =
+          _findEntity(_tracks, trackId) ??
+          _asMap((await _api.getJson('/tracks/$trackId') as Map)['track']);
+      final releaseId = _intValue(track['release_identity_id']);
+      if (releaseId == null) throw StateError('歌曲发行身份尚未建立，请刷新资料库');
+      final def = _asMap(jsonDecode(jsonEncode(detail['definition'])));
+      def['included'] = {
+        ...(def['included'] as List).cast<int>(),
+        releaseId,
+      }.toList();
+      def['excluded'] = (def['excluded'] as List)
+          .where((v) => v != releaseId)
+          .toList();
+      await _collections.save(
+        def,
+        id: id,
+        revision: _asMap(detail['collection'])['revision'] as int,
+      );
+    });
   }
 
   Future<void> _toggleFavorite(Map<String, dynamic> track) async {
@@ -668,6 +637,12 @@ extension _DashboardDetails on _CoreDashboardState {
     if (trackId == null) {
       return;
     }
+    final library = _offlineLibrary;
+    final api = _api;
+    bool isCurrent() =>
+        mounted &&
+        identical(library, _offlineLibrary) &&
+        api.baseUrl == CoreApiClient.normalizeBaseUrl(_coreUrlController.text);
     final favorite = track['is_favorite'] != true;
     final mutation = _OfflineMutation(
       id: _newClientMutationId(),
@@ -681,14 +656,12 @@ extension _DashboardDetails on _CoreDashboardState {
     final optimisticTrack = <String, dynamic>{
       ...track,
       'is_favorite': favorite,
-      if (favorite && track['user_rating'] == null) 'user_rating': 100,
     };
     if (mounted) {
       _mutate(() {
         _replaceTrackInCollections(optimisticTrack);
         _replaceTrackInDetailCache(_albumDetailCache, optimisticTrack);
         _replaceTrackInDetailCache(_artistDetailCache, optimisticTrack);
-        _replaceTrackInDetailCache(_playlistDetailCache, optimisticTrack);
         final detail = _trackDetailCache[trackId];
         if (detail != null) {
           _trackDetailCache[trackId] = <String, dynamic>{
@@ -709,13 +682,18 @@ extension _DashboardDetails on _CoreDashboardState {
     if (_localPlaybackFallbackActive) return;
     Map<String, dynamic> detail;
     try {
-      detail = _asMap(
-        await _api.postJson('/tracks/$trackId/favorite', <String, dynamic>{
-          'is_favorite': favorite,
-        }),
-      );
-      _offlineLibrary.outbox.removeWhere((value) => value.id == mutation.id);
-      unawaited(_OfflineLibraryStore.save(_offlineLibrary));
+      detail = await _offlineMutationSyncQueue.run(() async {
+        if (!isCurrent()) throw StateError('Core connection changed');
+        final result = _asMap(
+          await api.postJson('/tracks/$trackId/favorite', <String, dynamic>{
+            'is_favorite': favorite,
+          }),
+        );
+        if (!isCurrent()) throw StateError('Core connection changed');
+        library.outbox.removeWhere((value) => value.id == mutation.id);
+        await _OfflineLibraryStore.save(library);
+        return result;
+      });
     } catch (_) {
       if (mounted) {
         _mutate(() => _rendererStatus = 'Change queued for synchronization');
@@ -725,7 +703,11 @@ extension _DashboardDetails on _CoreDashboardState {
     if (!mounted) {
       return;
     }
-    final updatedTrack = _asMap(detail['track']);
+    if (!isCurrent()) return;
+    final updatedTrack = _asMap(
+      projectPendingFavorites([detail['track']], _pendingFavoriteStates).single,
+    );
+    detail = {...detail, 'track': updatedTrack};
     _offlineLibrary.setFavorite(trackId, updatedTrack['is_favorite'] == true);
     unawaited(_OfflineLibraryStore.save(_offlineLibrary));
     _mutate(() {
@@ -736,7 +718,6 @@ extension _DashboardDetails on _CoreDashboardState {
       _trackDetailCache[trackId] = detail;
       _replaceTrackInDetailCache(_albumDetailCache, updatedTrack);
       _replaceTrackInDetailCache(_artistDetailCache, updatedTrack);
-      _replaceTrackInDetailCache(_playlistDetailCache, updatedTrack);
     });
     unawaited(_persistDetail('track', trackId, detail));
     unawaited(_persistOverviewValues(<String, dynamic>{'tracks': _tracks}));
@@ -784,13 +765,15 @@ extension _DashboardDetails on _CoreDashboardState {
     }
   }
 
-  Future<void> _updateMetadataSettings(Map<String, dynamic> payload) async {
+  Future<bool> _updateMetadataSettings(Map<String, dynamic> payload) async {
     final settings = await _run<Map<String, dynamic>>(
       () async => _asMap(await _api.postJson('/settings/metadata', payload)),
     );
     if (mounted && settings != null) {
       _mutate(() => _metadataSettings = settings);
+      return true;
     }
+    return false;
   }
 
   void _replaceTrackInCollections(Map<String, dynamic> updatedTrack) {

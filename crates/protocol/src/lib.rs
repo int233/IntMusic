@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+mod collections;
 mod playback_session_v3;
+pub use collections::*;
 
 pub use playback_session_v3::*;
 
@@ -20,6 +22,10 @@ pub struct CoreStatus {
     /// Changes whenever Core discards and rebuilds logical catalog identity.
     /// Clients must invalidate every cached entity ID when this value changes.
     pub catalog_epoch: String,
+    /// Supports optional request identity headers, rejecting stale clients before handlers run.
+    #[serde(default)]
+    pub catalog_identity_guard: bool,
+    pub capabilities: Vec<String>,
     pub bind_address: String,
     pub discovery_service: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -524,6 +530,7 @@ pub struct ClientSyncChange {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientSyncChanges {
     pub server_id: String,
+    pub catalog_epoch: String,
     pub after: u64,
     pub cursor: u64,
     #[serde(default)]
@@ -540,7 +547,7 @@ pub struct ClientSyncSnapshot {
     pub albums: Vec<AlbumSummary>,
     pub artists: Vec<ArtistSummary>,
     pub tracks: Vec<TrackSummary>,
-    pub playlists: Vec<PlaylistSummary>,
+    pub collections: Vec<CollectionSummary>,
     pub playback_history: Vec<PlaybackEvent>,
     pub playback_stats: PlaybackStats,
     #[serde(default)]
@@ -564,7 +571,7 @@ pub struct CreateDistributionRequest {
     #[serde(default)]
     pub album_ids: Vec<i64>,
     #[serde(default)]
-    pub playlist_ids: Vec<i64>,
+    pub collection_ids: Vec<i64>,
 }
 
 fn default_distribution_quality() -> String {
@@ -943,6 +950,11 @@ pub struct ArtistDetail {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSummary {
+    pub display_group_key: Option<String>,
+    pub is_available: bool,
+    pub display_mode: String,
+    pub release_identity_id: Option<i64>,
+    pub genres: Vec<String>,
     pub id: i64,
     pub file_id: i64,
     pub album_id: Option<i64>,
@@ -1020,8 +1032,13 @@ pub struct AudioMasterSummary {
     pub release_year: Option<i64>,
 }
 
+/// A device must keep sending live heartbeats; inventory scans never renew this lease.
+pub const DEVICE_ONLINE_SECONDS: i64 = 35;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaReplicaSummary {
+    pub presence_state: String,
+    pub online_until: Option<DateTime<Utc>>,
     pub id: i64,
     pub file_id: Option<i64>,
     pub device_id: Option<String>,
@@ -1067,6 +1084,7 @@ pub struct MediaVariantSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelatedReleaseTrackSummary {
+    pub release_identity_id: i64,
     pub release_track_id: i64,
     pub legacy_track_id: Option<i64>,
     pub release: Option<ReleaseEditionSummary>,
@@ -1235,53 +1253,7 @@ pub struct SearchResponse {
     pub albums: Vec<AlbumSummary>,
     pub artists: Vec<ArtistSummary>,
     #[serde(default)]
-    pub playlists: Vec<PlaylistSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlaylistKind {
-    Manual,
-    Smart,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaylistSummary {
-    pub id: i64,
-    pub name: String,
-    pub kind: PlaylistKind,
-    pub description: Option<String>,
-    pub track_count: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaylistDetail {
-    pub playlist: PlaylistSummary,
-    pub rules: Option<Value>,
-    pub tracks: Vec<TrackSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewPlaylist {
-    pub name: String,
-    pub kind: PlaylistKind,
-    pub description: Option<String>,
-    pub rules: Option<Value>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct UpdatePlaylist {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub rules: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaylistTrackMutation {
-    pub track_id: i64,
-    pub position: Option<i64>,
+    pub collections: Vec<CollectionSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1296,8 +1268,26 @@ pub struct FavoriteSettingsUpdate {
     pub write_rating_on_favorite: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagMappingField {
+    Genres,
+    TrackArtists,
+    AlbumArtists,
+    Composers,
+    Lyricists,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TagMappingRule {
+    pub source: String,
+    pub targets: Vec<String>,
+    pub fields: Vec<TagMappingField>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MetadataSettingsUpdate {
+    pub tag_mappings: Option<Vec<TagMappingRule>>,
     pub artist_separators: Option<Vec<String>>,
     pub genre_separators: Option<Vec<String>>,
 }
@@ -1385,6 +1375,7 @@ pub struct ZoneSummary {
 #[serde(rename_all = "snake_case")]
 pub enum PlaybackTransportState {
     Stopped,
+    Loading,
     Playing,
     Paused,
 }

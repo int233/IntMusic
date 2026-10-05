@@ -138,45 +138,90 @@ class _AliasEditor extends StatelessWidget {
   }
 }
 
-class _MetadataSeparatorsPanel extends StatefulWidget {
-  const _MetadataSeparatorsPanel({
+class _MetadataTagRulesPanel extends StatefulWidget {
+  const _MetadataTagRulesPanel({
     required this.settings,
     required this.onUpdate,
   });
-
   final Map<String, dynamic>? settings;
-  final Future<void> Function(Map<String, dynamic>) onUpdate;
-
+  final Future<bool> Function(Map<String, dynamic>) onUpdate;
   @override
-  State<_MetadataSeparatorsPanel> createState() =>
-      _MetadataSeparatorsPanelState();
+  State<_MetadataTagRulesPanel> createState() => _MetadataTagRulesPanelState();
 }
 
-class _MetadataSeparatorsPanelState extends State<_MetadataSeparatorsPanel> {
+const _tagMappingFields = <String, String>{
+  'genres': '流派',
+  'track_artists': '艺术家',
+  'album_artists': '专辑艺术家',
+  'composers': '作曲',
+  'lyricists': '作词',
+};
+
+class _TagMappingDraft {
+  _TagMappingDraft([Map<String, dynamic> value = const {}])
+    : source = TextEditingController(text: value['source']?.toString() ?? ''),
+      targets = [
+        for (final text in (value['targets'] as List?) ?? [''])
+          TextEditingController(text: text.toString()),
+      ],
+      fields = ((value['fields'] as List?) ?? [])
+          .map((v) => v.toString())
+          .toSet();
+  final TextEditingController source;
+  final List<TextEditingController> targets;
+  final Set<String> fields;
+  Map<String, dynamic> toJson() => {
+    'source': source.text.trim(),
+    'targets': targets.map((t) => t.text.trim()).toList(),
+    'fields': _tagMappingFields.keys.where(fields.contains).toList(),
+  };
+  void dispose() {
+    source.dispose();
+    for (final target in targets) {
+      target.dispose();
+    }
+  }
+}
+
+class _MetadataTagRulesPanelState extends State<_MetadataTagRulesPanel> {
+  final _form = GlobalKey<FormState>();
   late final TextEditingController _artistController;
   late final TextEditingController _genreController;
+  List<_TagMappingDraft> _rules = [];
+  bool _dirty = false;
+  bool _saving = false;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _artistController = TextEditingController(
-      text: _separatorText(widget.settings?['artist_separators']),
+    _artistController = TextEditingController();
+    _genreController = TextEditingController();
+    _loadSettings();
+  }
+
+  void _loadSettings() {
+    _artistController.text = _separatorText(
+      widget.settings?['artist_separators'],
     );
-    _genreController = TextEditingController(
-      text: _separatorText(widget.settings?['genre_separators']),
+    _genreController.text = _separatorText(
+      widget.settings?['genre_separators'],
     );
+    for (final rule in _rules) {
+      rule.dispose();
+    }
+    _rules = [
+      for (final value in (widget.settings?['tag_mappings'] as List?) ?? [])
+        _TagMappingDraft(_asMap(value)),
+    ];
   }
 
   @override
-  void didUpdateWidget(covariant _MetadataSeparatorsPanel oldWidget) {
+  void didUpdateWidget(covariant _MetadataTagRulesPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.settings != widget.settings) {
-      _artistController.text = _separatorText(
-        widget.settings?['artist_separators'],
-      );
-      _genreController.text = _separatorText(
-        widget.settings?['genre_separators'],
-      );
+    // Background settings refreshes must not erase an unfinished rule.
+    if (!_dirty && !_saving && oldWidget.settings != widget.settings) {
+      _loadSettings();
     }
   }
 
@@ -184,53 +229,257 @@ class _MetadataSeparatorsPanelState extends State<_MetadataSeparatorsPanel> {
   void dispose() {
     _artistController.dispose();
     _genreController.dispose();
+    for (final rule in _rules) {
+      rule.dispose();
+    }
     super.dispose();
   }
 
+  void _changed() {
+    _dirty = true;
+  }
+
   @override
-  Widget build(BuildContext context) {
-    return _HomePanel(
-      title: _tr(context, 'Metadata separators'),
+  Widget build(BuildContext context) => _HomePanel(
+    title: '标签处理规则',
+    child: Form(
+      key: _form,
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           TextField(
             controller: _artistController,
+            onChanged: (_) => _changed(),
             decoration: InputDecoration(
               labelText: _tr(context, 'Artist / composer / lyricist'),
               helperText: _tr(context, 'Separate delimiter tokens with spaces'),
             ),
-            onSubmitted: (_) => _save(),
           ),
           const SizedBox(height: 10),
           TextField(
             controller: _genreController,
+            onChanged: (_) => _changed(),
             decoration: InputDecoration(
               labelText: _tr(context, 'Genre'),
               helperText: _tr(context, 'Default: comma and semicolon'),
             ),
-            onSubmitted: (_) => _save(),
+          ),
+          const SizedBox(height: 20),
+          Text('自定义标签映射', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 6),
+          const Text(
+            '先按分隔符拆分，再完整匹配原始标签。每条规则输出 1～5 个标签，仅应用于勾选的字段；输出不会继续拆分或触发其他规则。',
           ),
           const SizedBox(height: 12),
-          Align(
-            alignment: Alignment.centerRight,
-            child: FilledButton.icon(
-              onPressed: _save,
-              icon: const Icon(Icons.save_outlined),
-              label: Text(_tr(context, 'Save')),
+          if (_rules.isEmpty) const Text('暂无映射规则，不会自动拆分复合标签。'),
+          for (final (index, rule) in _rules.indexed)
+            Card(
+              key: ObjectKey(rule),
+              margin: const EdgeInsets.only(bottom: 12),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(child: Text('规则 ${index + 1}')),
+                        IconButton(
+                          tooltip: '删除规则',
+                          onPressed: _saving
+                              ? null
+                              : () => setState(() {
+                                  _rules.remove(rule);
+                                  rule.dispose();
+                                  _changed();
+                                }),
+                          icon: const Icon(Icons.delete_outline),
+                        ),
+                      ],
+                    ),
+                    TextFormField(
+                      key: ValueKey('mapping-source-$index'),
+                      controller: rule.source,
+                      enabled: !_saving,
+                      onChanged: (_) => _changed(),
+                      validator: (v) =>
+                          (v?.trim().isEmpty ?? true) ? '请输入原始标签' : null,
+                      decoration: const InputDecoration(
+                        labelText: '原始标签',
+                        hintText: '例如：国语流行',
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    for (final (targetIndex, target) in rule.targets.indexed)
+                      Padding(
+                        key: ObjectKey(target),
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: TextFormField(
+                                controller: target,
+                                enabled: !_saving,
+                                onChanged: (_) => _changed(),
+                                validator: (v) => (v?.trim().isEmpty ?? true)
+                                    ? '请输入输出标签'
+                                    : null,
+                                decoration: InputDecoration(
+                                  labelText: '输出标签 ${targetIndex + 1}',
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: '删除输出标签',
+                              onPressed: _saving || rule.targets.length == 1
+                                  ? null
+                                  : () => setState(() {
+                                      rule.targets.remove(target);
+                                      target.dispose();
+                                      _changed();
+                                    }),
+                              icon: const Icon(Icons.remove_circle_outline),
+                            ),
+                          ],
+                        ),
+                      ),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: _saving || rule.targets.length == 5
+                            ? null
+                            : () => setState(() {
+                                rule.targets.add(TextEditingController());
+                                _changed();
+                              }),
+                        icon: const Icon(Icons.add),
+                        label: Text('添加输出标签（${rule.targets.length}/5）'),
+                      ),
+                    ),
+                    const Text('应用字段（可多选）'),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      children: [
+                        for (final field in _tagMappingFields.entries)
+                          FilterChip(
+                            label: Text(field.value),
+                            selected: rule.fields.contains(field.key),
+                            onSelected: _saving
+                                ? null
+                                : (selected) => setState(() {
+                                    selected
+                                        ? rule.fields.add(field.key)
+                                        : rule.fields.remove(field.key);
+                                    _changed();
+                                  }),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: _saving
+                  ? null
+                  : () => setState(() {
+                      _rules.add(_TagMappingDraft());
+                      _changed();
+                    }),
+              icon: const Icon(Icons.add),
+              label: const Text('添加映射规则'),
+            ),
+          ),
+          const SizedBox(height: 12),
+          const Text('“应用到已有资料”会根据原始标签及手工编辑值重新计算，支持修改或删除规则后重新应用，不改写音乐文件。'),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                _error!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            alignment: WrapAlignment.end,
+            children: [
+              TextButton.icon(
+                onPressed: _saving ? null : () => unawaited(_save(apply: true)),
+                icon: const Icon(Icons.call_split),
+                label: const Text('保存并应用到已有资料'),
+              ),
+              FilledButton.icon(
+                onPressed: _saving ? null : () => unawaited(_save()),
+                icon: _saving
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.save_outlined),
+                label: const Text('保存规则'),
+              ),
+            ],
           ),
         ],
       ),
-    );
-  }
+    ),
+  );
 
-  void _save() {
-    unawaited(
-      widget.onUpdate(<String, dynamic>{
+  Future<void> _save({bool apply = false}) async {
+    if (!(_form.currentState?.validate() ?? false)) return;
+    String? error;
+    final occupied = <String>{};
+    for (final rule in _rules) {
+      if (rule.fields.isEmpty) {
+        error = '请为每条规则选择至少一个应用字段';
+        break;
+      }
+      final targets = rule.targets
+          .map((t) => t.text.trim().toLowerCase())
+          .toSet();
+      if (targets.length != rule.targets.length) {
+        error = '同一规则的输出标签不能重复';
+        break;
+      }
+      for (final field in rule.fields) {
+        if (!occupied.add('$field\u0000${rule.source.text.trim()}')) {
+          error = '同一原始标签在同一字段中只能有一条规则';
+        }
+      }
+    }
+    setState(() => _error = error);
+    if (error != null) return;
+    setState(() => _saving = true);
+    try {
+      final saved = await widget.onUpdate({
         'artist_separators': _parseSeparators(_artistController.text),
         'genre_separators': _parseSeparators(_genreController.text),
-      }),
-    );
+        'tag_mappings': _rules.map((r) => r.toJson()).toList(),
+      });
+      if (!mounted) return;
+      if (!saved) {
+        setState(() => _error = '保存失败，规则尚未应用，请重试。');
+        return;
+      }
+      _dirty = false;
+      if (apply) {
+        await _TrackActionScope.maybeOf(context)?.onApplyTagMappings?.call();
+      } else {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('规则已保存')));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
   }
 }
 

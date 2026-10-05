@@ -26,7 +26,7 @@ pub async fn track_media_profile(
             release.edition_kind AS release_edition_kind,
             album.date AS release_date,
             album.year AS release_year
-        FROM legacy_track_catalog_links links
+        FROM track_catalog_links links
         JOIN release_tracks rt ON rt.id = links.release_track_id
         JOIN catalog_recordings recording ON recording.id = rt.recording_id
         JOIN catalog_works work ON work.id = recording.work_id
@@ -88,7 +88,7 @@ pub async fn track_media_profile(
         WHERE related_track.recording_id = ?1
           AND EXISTS (
             SELECT 1
-            FROM legacy_track_catalog_links active_link
+            FROM track_catalog_links active_link
             LEFT JOIN track_merge_members member
               ON member.track_id = active_link.track_id
             WHERE active_link.release_track_id = related_track.id
@@ -122,6 +122,13 @@ pub async fn track_media_profile(
                 WHEN file.deleted_at IS NOT NULL THEN 'missing'
                 ELSE replica.availability_state
             END AS availability_state,
+            CASE
+                WHEN file.deleted_at IS NOT NULL OR replica.availability_state <> 'ready' THEN 'missing'
+                WHEN replica.source_kind = 'core' THEN 'available'
+                WHEN datetime(device.online_until) >= datetime('now') THEN 'available'
+                ELSE 'offline'
+            END AS presence_state,
+            device.online_until,
             replica.is_primary,
             file.relative_path,
             root.external_id AS root_external_id,
@@ -148,7 +155,7 @@ pub async fn track_media_profile(
             WHERE related_track.recording_id = ?1
               AND EXISTS (
                 SELECT 1
-                FROM legacy_track_catalog_links active_link
+                FROM track_catalog_links active_link
                 LEFT JOIN track_merge_members member
                   ON member.track_id = active_link.track_id
                 WHERE active_link.release_track_id = related_track.id
@@ -189,6 +196,11 @@ pub async fn track_media_profile(
             .entry(variant_id)
             .or_default()
             .push(MediaReplicaSummary {
+                presence_state: replica_row.try_get("presence_state")?,
+                online_until: replica_row
+                    .try_get::<Option<String>, _>("online_until")?
+                    .map(parse_datetime)
+                    .transpose()?,
                 id: replica_row.try_get("id")?,
                 file_id: replica_row.try_get("file_id")?,
                 device_id: replica_row.try_get("device_id")?,
@@ -249,6 +261,7 @@ pub async fn track_media_profile(
         r#"
         SELECT
             rt.id AS related_release_track_id,
+            COALESCE(MIN(links.release_identity_id), rt.id) AS release_identity_id,
             MIN(CASE WHEN member.track_id IS NULL THEN links.track_id END) AS legacy_track_id,
             rt.title,
             rt.disc_number,
@@ -262,14 +275,14 @@ pub async fn track_media_profile(
             album.date AS release_date,
             album.year AS release_year
         FROM release_tracks rt
-        LEFT JOIN legacy_track_catalog_links links ON links.release_track_id = rt.id
+        LEFT JOIN track_catalog_links links ON links.release_track_id = rt.id
         LEFT JOIN track_merge_members member ON member.track_id = links.track_id
         LEFT JOIN release_editions release ON release.id = rt.release_id
         LEFT JOIN albums album ON album.id = release.album_id
         WHERE rt.recording_id = ?1
           AND EXISTS (
             SELECT 1
-            FROM legacy_track_catalog_links active_link
+            FROM track_catalog_links active_link
             LEFT JOIN track_merge_members active_member
               ON active_member.track_id = active_link.track_id
             WHERE active_link.release_track_id = rt.id
@@ -287,6 +300,7 @@ pub async fn track_media_profile(
         .map(|related_row| {
             let related_release_track_id: i64 = related_row.try_get("related_release_track_id")?;
             Ok(RelatedReleaseTrackSummary {
+                release_identity_id: related_row.try_get("release_identity_id")?,
                 release_track_id: related_release_track_id,
                 legacy_track_id: related_row.try_get("legacy_track_id")?,
                 release: release_edition_from_row(&related_row)?,
@@ -322,7 +336,7 @@ pub async fn recording_link_candidates(
             recording.recording_kind,
             COALESCE(GROUP_CONCAT(artist.name, char(31)), '') AS artists
         FROM tracks t
-        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN track_catalog_links links ON links.track_id = t.id
         JOIN release_tracks rt ON rt.id = links.release_track_id
         JOIN catalog_recordings recording ON recording.id = rt.recording_id
         LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
@@ -357,13 +371,14 @@ pub async fn recording_link_candidates(
             COALESCE(GROUP_CONCAT(artist.name, char(31)), '') AS artists,
             COALESCE(GROUP_CONCAT(DISTINCT artist.name), NULL) AS artist_display
         FROM tracks t
-        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN track_catalog_links links ON links.track_id = t.id
         JOIN release_tracks rt ON rt.id = links.release_track_id
         JOIN catalog_recordings recording ON recording.id = rt.recording_id
         LEFT JOIN albums album ON album.id = t.album_id
         LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
         LEFT JOIN artists artist ON artist.id = ta.artist_id
         WHERE t.id <> ?1
+          AND t.id IN (SELECT track_id FROM visible_catalog_tracks)
           AND lower(trim(t.title)) = lower(trim(?2))
           AND (
               ?3 IS NULL
@@ -472,11 +487,12 @@ pub async fn link_track_to_recording(
     if track_id == source_track_id {
         bail!("a release track cannot be linked to itself");
     }
+    reconcile_catalog_identity(pool).await?;
     let mut transaction = pool.begin().await?;
     let source_recording_id: i64 = sqlx::query_scalar(
         r#"
         SELECT rt.recording_id
-        FROM legacy_track_catalog_links links
+        FROM track_catalog_links links
         JOIN release_tracks rt ON rt.id = links.release_track_id
         WHERE links.track_id = ?1
         "#,
@@ -484,46 +500,14 @@ pub async fn link_track_to_recording(
     .bind(source_track_id)
     .fetch_one(&mut *transaction)
     .await?;
-    let target_release_track_id: i64 = sqlx::query_scalar(
-        "SELECT release_track_id FROM legacy_track_catalog_links WHERE track_id = ?1",
-    )
-    .bind(track_id)
-    .fetch_one(&mut *transaction)
-    .await?;
     let now = Utc::now().to_rfc3339();
-    sqlx::query("UPDATE release_tracks SET recording_id = ?1, updated_at = ?2 WHERE id = ?3")
-        .bind(source_recording_id)
-        .bind(&now)
-        .bind(target_release_track_id)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(
-        r#"
-        UPDATE audio_masters
-        SET recording_id = ?1, updated_at = ?2
-        WHERE id IN (
-            SELECT variant.audio_master_id
-            FROM release_track_media_variants relation
-            JOIN media_variants variant ON variant.id = relation.media_variant_id
-            WHERE relation.release_track_id = ?3
-        )
-        "#,
+    set_release_recording(
+        &mut transaction,
+        track_id,
+        source_recording_id,
+        "confirmed_recording",
+        &now,
     )
-    .bind(source_recording_id)
-    .bind(&now)
-    .bind(target_release_track_id)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE legacy_track_catalog_links
-        SET match_kind = 'confirmed_recording', match_confidence = 1.0, updated_at = ?1
-        WHERE track_id = ?2
-        "#,
-    )
-    .bind(&now)
-    .bind(track_id)
-    .execute(&mut *transaction)
     .await?;
     preserve_recording_user_state(&mut transaction, source_recording_id, &now).await?;
     transaction.commit().await?;
@@ -533,23 +517,22 @@ pub async fn link_track_to_recording(
 }
 
 pub async fn detach_track_recording(pool: &DbPool, track_id: i64) -> Result<TrackMediaProfile> {
+    reconcile_catalog_identity(pool).await?;
     let mut transaction = pool.begin().await?;
     let identity = sqlx::query(
         r#"
         SELECT
-            links.release_track_id,
             t.title,
             t.subtitle,
             t.duration_ms
         FROM tracks t
-        JOIN legacy_track_catalog_links links ON links.track_id = t.id
+        JOIN track_catalog_links links ON links.track_id = t.id
         WHERE t.id = ?1
         "#,
     )
     .bind(track_id)
     .fetch_one(&mut *transaction)
     .await?;
-    let release_track_id: i64 = identity.try_get("release_track_id")?;
     let title: String = identity.try_get("title")?;
     let subtitle: Option<String> = identity.try_get("subtitle")?;
     let duration_ms: Option<i64> = identity.try_get("duration_ms")?;
@@ -588,44 +571,54 @@ pub async fn detach_track_recording(pool: &DbPool, track_id: i64) -> Result<Trac
     .bind(&now)
     .fetch_one(&mut *transaction)
     .await?;
-    sqlx::query("UPDATE release_tracks SET recording_id = ?1, updated_at = ?2 WHERE id = ?3")
-        .bind(recording_id)
-        .bind(&now)
-        .bind(release_track_id)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(
-        r#"
-        UPDATE audio_masters
-        SET recording_id = ?1, updated_at = ?2
-        WHERE id IN (
-            SELECT variant.audio_master_id
-            FROM release_track_media_variants relation
-            JOIN media_variants variant ON variant.id = relation.media_variant_id
-            WHERE relation.release_track_id = ?3
-        )
-        "#,
-    )
-    .bind(recording_id)
-    .bind(&now)
-    .bind(release_track_id)
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE legacy_track_catalog_links
-        SET match_kind = 'detached', match_confidence = 1.0, updated_at = ?1
-        WHERE track_id = ?2
-        "#,
-    )
-    .bind(&now)
-    .bind(track_id)
-    .execute(&mut *transaction)
-    .await?;
+    set_release_recording(&mut transaction, track_id, recording_id, "detached", &now).await?;
     transaction.commit().await?;
     track_media_profile(pool, track_id)
         .await?
         .context("track media profile is missing after recording detach")
+}
+
+async fn set_release_recording(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    track_id: i64,
+    recording_id: i64,
+    kind: &str,
+    now: &str,
+) -> Result<()> {
+    let identity: i64 = sqlx::query_scalar("SELECT COALESCE(release_identity_id, release_track_id) FROM track_catalog_links WHERE track_id = ?1")
+        .bind(track_id).fetch_one(&mut **tx).await?;
+    sqlx::query(
+        r#"UPDATE release_tracks SET recording_id = ?1, updated_at = ?2
+        WHERE id IN (SELECT release_track_id FROM track_catalog_links
+                     WHERE COALESCE(release_identity_id, release_track_id) = ?3)"#,
+    )
+    .bind(recording_id)
+    .bind(now)
+    .bind(identity)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"UPDATE audio_masters SET recording_id = ?1, updated_at = ?2
+        WHERE id IN (SELECT variant.audio_master_id FROM media_variants variant
+          JOIN release_track_media_variants relation ON relation.media_variant_id = variant.id
+          JOIN track_catalog_links link ON link.release_track_id = relation.release_track_id
+          WHERE COALESCE(link.release_identity_id, link.release_track_id) = ?3)"#,
+    )
+    .bind(recording_id)
+    .bind(now)
+    .bind(identity)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        r#"UPDATE track_catalog_links SET match_kind = ?1, match_confidence = 1.0, updated_at = ?2
+        WHERE COALESCE(release_identity_id, release_track_id) = ?3"#,
+    )
+    .bind(kind)
+    .bind(now)
+    .bind(identity)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn release_edition_from_row(

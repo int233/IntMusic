@@ -132,6 +132,8 @@ pub async fn scan_all_roots(
         }
     }
 
+    core_db::reconcile_catalog_identity(&pool).await?;
+
     if let Some(events) = &events {
         let _ = events.send(ScannerEvent::Finished(summary.clone()));
     }

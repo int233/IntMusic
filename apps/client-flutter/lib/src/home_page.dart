@@ -2,6 +2,12 @@ part of '../intmusic_client.dart';
 
 class _HomePage extends StatelessWidget {
   const _HomePage({
+    required this.store,
+    required this.onEditCollection,
+    required this.onOpenCollection,
+    required this.onOpenEntity,
+    required this.onPlayCollection,
+    required this.onToggleFavorite,
     required this.coreBaseUrl,
     required this.status,
     required this.playback,
@@ -13,99 +19,159 @@ class _HomePage extends StatelessWidget {
     required this.onOpenTrack,
     required this.onPlayTrack,
   });
-
+  final CollectionStore store;
+  final Future<void> Function(int?) onEditCollection;
+  final ValueChanged<int> onOpenCollection;
+  final _CollectionOpen onOpenEntity;
+  final _CollectionPlay onPlayCollection;
+  final Future<void> Function(JsonMap) onToggleFavorite;
   final String coreBaseUrl;
-  final Map<String, dynamic>? status;
-  final Map<String, dynamic>? playback;
-  final Map<String, dynamic>? trackDetail;
-  final List<dynamic> zones;
-  final Map<String, dynamic>? stats;
-  final List<dynamic> history;
+  final Map<String, dynamic>? status, playback, trackDetail, stats;
+  final List<dynamic> zones, history;
   final ValueChanged<int> onNavigate;
-  final Future<void> Function(int) onOpenTrack;
-  final Future<void> Function(int) onPlayTrack;
+  final Future<void> Function(int) onOpenTrack, onPlayTrack;
+  Widget _builtin(String name, String? title) {
+    final counts = _collectionMap(status?['counts']);
+    return switch (name) {
+      'now_playing' => _HomeNowPlayingCard(
+        title: title,
+        coreBaseUrl: coreBaseUrl,
+        playback: playback,
+        trackDetail: trackDetail,
+        onOpenPlayback: () => onNavigate(5),
+      ),
+      'library' => _HomeLibraryPanel(
+        title: title,
+        metrics: [
+          ('Albums', counts['albums'] ?? 0, Icons.album_outlined),
+          ('Artists', counts['artists'] ?? 0, Icons.person_outline),
+          ('Tracks', counts['tracks'] ?? 0, Icons.music_note_outlined),
+          ('Files', counts['files'] ?? 0, Icons.insert_drive_file_outlined),
+        ],
+        problems: _intValue(counts['scan_problems']) ?? 0,
+        onOpenAlbums: () => onNavigate(1),
+        onOpenTracks: () => onNavigate(3),
+      ),
+      'history' => _HomeRecentPanel(
+        title: title,
+        history: history,
+        onOpenHistory: () => onNavigate(6),
+        onOpenTrack: onOpenTrack,
+        onPlayTrack: onPlayTrack,
+      ),
+      'devices' => _HomeDevicesPanel(
+        title: title,
+        zones: zones,
+        onOpenPlayback: () => onNavigate(5),
+      ),
+      'stats' => _HomeStatsPanel(
+        title: title,
+        stats: stats,
+        onOpenHistory: () => onNavigate(6),
+      ),
+      'core' => _HomeCorePanel(
+        title: title,
+        status: status,
+        onOpenSettings: () => onNavigate(8),
+      ),
+      _ => const SizedBox.shrink(),
+    };
+  }
 
   @override
-  Widget build(BuildContext context) {
-    final counts =
-        (status?['counts'] as Map?)?.cast<String, dynamic>() ??
-        const <String, dynamic>{};
-    final metrics = <(String, Object, IconData)>[
-      ('Albums', counts['albums'] ?? 0, Icons.album_outlined),
-      ('Artists', counts['artists'] ?? 0, Icons.person_outline),
-      ('Tracks', counts['tracks'] ?? 0, Icons.music_note_outlined),
-      ('Files', counts['files'] ?? 0, Icons.insert_drive_file_outlined),
-    ];
-    final problems = _intValue(counts['scan_problems']) ?? 0;
-
-    return _PageFrame(
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: store,
+    builder: (context, _) => _PageFrame(
       title: 'Home',
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final wide = constraints.maxWidth >= 1040;
-          final mainColumn = Column(
-            children: [
-              _HomeNowPlayingCard(
-                coreBaseUrl: coreBaseUrl,
-                playback: playback,
-                trackDetail: trackDetail,
-                onOpenPlayback: () => onNavigate(5),
-              ),
-              const SizedBox(height: 14),
-              _HomeLibraryPanel(
-                metrics: metrics,
-                problems: problems,
-                onOpenAlbums: () => onNavigate(1),
-                onOpenTracks: () => onNavigate(3),
-              ),
-              const SizedBox(height: 14),
-              _HomeRecentPanel(
-                history: history,
-                onOpenHistory: () => onNavigate(6),
-                onOpenTrack: onOpenTrack,
-                onPlayTrack: onPlayTrack,
-              ),
-            ],
-          );
-          final sideColumn = Column(
-            children: [
-              _HomeDevicesPanel(
-                zones: zones,
-                onOpenPlayback: () => onNavigate(5),
-              ),
-              const SizedBox(height: 14),
-              _HomeStatsPanel(stats: stats, onOpenHistory: () => onNavigate(6)),
-              const SizedBox(height: 14),
-              _HomeCorePanel(
-                status: status,
-                onOpenSettings: () => onNavigate(7),
-              ),
-            ],
-          );
-
-          return SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(22, 12, 22, 28),
-            child: wide
-                ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: Row(
+              children: [
+                if (!store.online)
+                  const Expanded(child: Text('显示上次保存的首页内容'))
+                else
+                  const Spacer(),
+                TextButton.icon(
+                  onPressed: store.online
+                      ? () => showDialog<void>(
+                          context: context,
+                          barrierDismissible: false,
+                          builder: (c) => Dialog.fullscreen(
+                            child: _HomeLayoutEditor(
+                              store: store,
+                              onEditCollection: onEditCollection,
+                            ),
+                          ),
+                        )
+                      : null,
+                  icon: const Icon(Icons.dashboard_customize_outlined),
+                  label: const Text('编辑首页'),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final sections = ((store.layout['sections'] as List?) ?? [])
+                    .map(_asMap)
+                    .where((s) => s['hidden'] != true)
+                    .toList();
+                final width = max(0.0, constraints.maxWidth - 40);
+                return SingleChildScrollView(
+                  padding: const EdgeInsets.all(20),
+                  child: Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
                     children: [
-                      Expanded(flex: 7, child: mainColumn),
-                      const SizedBox(width: 18),
-                      Expanded(flex: 4, child: sideColumn),
-                    ],
-                  )
-                : Column(
-                    children: [
-                      mainColumn,
-                      const SizedBox(height: 14),
-                      sideColumn,
+                      if (sections.isEmpty)
+                        Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(
+                            store.loading ? '正在读取首页…' : '首页还没有区块，可通过“编辑首页”添加。',
+                          ),
+                        ),
+                      for (final section in sections)
+                        SizedBox(
+                          key: ValueKey(
+                            '${store.identity}:${section['id']}:${section['collection_id']}',
+                          ),
+                          width:
+                              constraints.maxWidth >= 1040 &&
+                                  section['width'] == 'narrow'
+                              ? (width - 16) / 2
+                              : width,
+                          child: section['builtin'] != null
+                              ? _builtin(
+                                  section['builtin'].toString(),
+                                  section['title']?.toString(),
+                                )
+                              : _CollectionBlock(
+                                  store: store,
+                                  id: section['collection_id'] as int,
+                                  section: section,
+                                  coreBaseUrl: coreBaseUrl,
+                                  onOpenEntity: onOpenEntity,
+                                  onPlay: onPlayCollection,
+                                  onToggleFavorite: onToggleFavorite,
+                                  onEdit: onEditCollection,
+                                  onOpenCollection: () => onOpenCollection(
+                                    section['collection_id'] as int,
+                                  ),
+                                ),
+                        ),
                     ],
                   ),
-          );
-        },
+                );
+              },
+            ),
+          ),
+        ],
       ),
-    );
-  }
+    ),
+  );
 }
 
 class _HomePanel extends StatelessWidget {
@@ -184,6 +250,7 @@ class _HomePanel extends StatelessWidget {
 
 class _HomeNowPlayingCard extends StatelessWidget {
   const _HomeNowPlayingCard({
+    this.title,
     required this.coreBaseUrl,
     required this.playback,
     required this.trackDetail,
@@ -194,6 +261,8 @@ class _HomeNowPlayingCard extends StatelessWidget {
   final Map<String, dynamic>? playback;
   final Map<String, dynamic>? trackDetail;
   final VoidCallback onOpenPlayback;
+
+  final String? title;
 
   @override
   Widget build(BuildContext context) {
@@ -208,7 +277,7 @@ class _HomeNowPlayingCard extends StatelessWidget {
     final durationMs = _intValue(track?['duration_ms']) ?? 0;
 
     return _HomePanel(
-      title: 'Now Playing',
+      title: this.title ?? 'Now Playing',
       trailing: TextButton.icon(
         onPressed: onOpenPlayback,
         icon: const Icon(Icons.graphic_eq),
@@ -271,6 +340,7 @@ class _HomeNowPlayingCard extends StatelessWidget {
 
 class _HomeLibraryPanel extends StatelessWidget {
   const _HomeLibraryPanel({
+    this.title,
     required this.metrics,
     required this.problems,
     required this.onOpenAlbums,
@@ -282,10 +352,12 @@ class _HomeLibraryPanel extends StatelessWidget {
   final VoidCallback onOpenAlbums;
   final VoidCallback onOpenTracks;
 
+  final String? title;
+
   @override
   Widget build(BuildContext context) {
     return _HomePanel(
-      title: 'Library',
+      title: title ?? 'Library',
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -323,10 +395,16 @@ class _HomeLibraryPanel extends StatelessWidget {
 }
 
 class _HomeDevicesPanel extends StatelessWidget {
-  const _HomeDevicesPanel({required this.zones, required this.onOpenPlayback});
+  const _HomeDevicesPanel({
+    this.title,
+    required this.zones,
+    required this.onOpenPlayback,
+  });
 
   final List<dynamic> zones;
   final VoidCallback onOpenPlayback;
+
+  final String? title;
 
   @override
   Widget build(BuildContext context) {
@@ -339,7 +417,7 @@ class _HomeDevicesPanel extends StatelessWidget {
         .length;
 
     return _HomePanel(
-      title: 'Devices',
+      title: title ?? 'Devices',
       trailing: TextButton(
         onPressed: onOpenPlayback,
         child: const Text('Manage'),
@@ -372,15 +450,21 @@ class _HomeDevicesPanel extends StatelessWidget {
 }
 
 class _HomeStatsPanel extends StatelessWidget {
-  const _HomeStatsPanel({required this.stats, required this.onOpenHistory});
+  const _HomeStatsPanel({
+    this.title,
+    required this.stats,
+    required this.onOpenHistory,
+  });
 
   final Map<String, dynamic>? stats;
   final VoidCallback onOpenHistory;
 
+  final String? title;
+
   @override
   Widget build(BuildContext context) {
     return _HomePanel(
-      title: 'Listening',
+      title: title ?? 'Listening',
       trailing: TextButton(
         onPressed: onOpenHistory,
         child: const Text('History'),
@@ -419,6 +503,7 @@ class _HomeStatsPanel extends StatelessWidget {
 
 class _HomeRecentPanel extends StatelessWidget {
   const _HomeRecentPanel({
+    this.title,
     required this.history,
     required this.onOpenHistory,
     required this.onOpenTrack,
@@ -430,15 +515,17 @@ class _HomeRecentPanel extends StatelessWidget {
   final Future<void> Function(int) onOpenTrack;
   final Future<void> Function(int) onPlayTrack;
 
+  final String? title;
+
   @override
   Widget build(BuildContext context) {
-    final events = history
+    final events = _displayHistoryEvents(context, history)
         .map((item) => (item as Map).cast<String, dynamic>())
         .take(6)
         .toList(growable: false);
 
     return _HomePanel(
-      title: 'Recent Activity',
+      title: title ?? 'Recent Activity',
       trailing: TextButton(onPressed: onOpenHistory, child: const Text('All')),
       padding: EdgeInsets.zero,
       child: events.isEmpty
@@ -463,15 +550,21 @@ class _HomeRecentPanel extends StatelessWidget {
 }
 
 class _HomeCorePanel extends StatelessWidget {
-  const _HomeCorePanel({required this.status, required this.onOpenSettings});
+  const _HomeCorePanel({
+    this.title,
+    required this.status,
+    required this.onOpenSettings,
+  });
 
   final Map<String, dynamic>? status;
   final VoidCallback onOpenSettings;
 
+  final String? title;
+
   @override
   Widget build(BuildContext context) {
     return _HomePanel(
-      title: 'Core',
+      title: title ?? 'Core',
       trailing: TextButton(
         onPressed: onOpenSettings,
         child: const Text('Settings'),
@@ -592,6 +685,25 @@ class _RecentEventRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final members = event['_display_members'];
+    if (members is List) {
+      return ExpansionTile(
+        title: Text(
+          event['track_title']?.toString() ??
+              event['title']?.toString() ??
+              '歌曲',
+        ),
+        subtitle: Text('${members.length} 条播放记录'),
+        children: [
+          for (final value in members)
+            _RecentEventRow(
+              event: Map<String, dynamic>.from(value as Map),
+              onOpenTrack: onOpenTrack,
+              onPlayTrack: onPlayTrack,
+            ),
+        ],
+      );
+    }
     final trackId = _intValue(event['track_id']);
     return _SimpleListRow(
       leading: Icon(_historyEventIcon(event['event_type']), size: 20),
@@ -660,6 +772,7 @@ class _TopTrackRow extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (track['_display_members'] is List) _SongGroupButton(track: track),
           _ArtworkTile(
             title: title,
             subtitle: artist,

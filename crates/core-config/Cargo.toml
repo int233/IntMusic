@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+protocol = { path = "../protocol" }
 anyhow.workspace = true
 directories.workspace = true
 serde.workspace = true

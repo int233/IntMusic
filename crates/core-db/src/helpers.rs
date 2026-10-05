@@ -59,7 +59,26 @@ pub(crate) fn row_to_artist(row: sqlx::sqlite::SqliteRow) -> Result<ArtistSummar
 }
 
 pub(crate) fn row_to_track(row: sqlx::sqlite::SqliteRow) -> Result<TrackSummary> {
+    let artists: Vec<String> = serde_json::from_str(&row.try_get::<String, _>("display_artists")?)?;
+    let mut artists = artists
+        .iter()
+        .map(|a| normalize_text(a))
+        .filter(|a| !a.is_empty())
+        .collect::<Vec<_>>();
+    artists.sort();
+    artists.dedup();
+    let title = normalize_text(&row.try_get::<String, _>("title")?);
+    let display_group_key = if title.is_empty() || artists.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&(title, artists))?)
+    };
     Ok(TrackSummary {
+        display_group_key,
+        is_available: row.try_get("is_available")?,
+        display_mode: row.try_get("display_mode")?,
+        release_identity_id: row.try_get("release_identity_id")?,
+        genres: serde_json::from_str(&row.try_get::<String, _>("genres")?)?,
         id: row.try_get("id")?,
         file_id: row.try_get("file_id")?,
         album_id: row.try_get("album_id")?,
@@ -82,170 +101,25 @@ pub(crate) fn row_to_track(row: sqlx::sqlite::SqliteRow) -> Result<TrackSummary>
     })
 }
 
-pub(crate) fn row_to_playlist_summary(
-    row: sqlx::sqlite::SqliteRow,
-    track_count: i64,
-) -> Result<PlaylistSummary> {
-    Ok(PlaylistSummary {
-        id: row.try_get("id")?,
-        name: row.try_get("name")?,
-        kind: parse_playlist_kind(&row.try_get::<String, _>("kind")?),
-        description: row.try_get("description")?,
-        track_count,
-        created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
-        updated_at: parse_datetime(row.try_get::<String, _>("updated_at")?)?,
-    })
-}
-
-pub(crate) async fn manual_playlist_tracks(
-    pool: &DbPool,
-    playlist_id: i64,
-) -> Result<Vec<TrackSummary>> {
-    let rows = sqlx::query(
-        track_select_sql(
-            r#"
-            JOIN playlist_items pi ON t.id = COALESCE(
-                (
-                    SELECT member.canonical_track_id
-                    FROM track_merge_members member
-                    WHERE member.track_id = pi.track_id
-                ),
-                pi.track_id
-            )
-            WHERE pi.playlist_id = ?1
-            GROUP BY t.id, pi.id
-            ORDER BY pi.position, pi.id
-            "#,
-        )
-        .as_str(),
-    )
-    .bind(playlist_id)
-    .fetch_all(pool)
-    .await?;
-
-    rows.into_iter().map(row_to_track).collect()
-}
-
-pub(crate) async fn ensure_manual_playlist(pool: &DbPool, playlist_id: i64) -> Result<()> {
-    let kind: String = sqlx::query("SELECT kind FROM playlists WHERE id = ?1")
-        .bind(playlist_id)
-        .fetch_one(pool)
-        .await?
-        .try_get("kind")?;
-    if kind != "manual" {
-        anyhow::bail!("smart playlists are rule based and cannot be edited manually");
-    }
-    Ok(())
-}
-
-pub(crate) async fn next_playlist_position(pool: &DbPool, playlist_id: i64) -> Result<i64> {
-    let position = sqlx::query(
-        "SELECT COALESCE(MAX(position), -1) + 1 AS position FROM playlist_items WHERE playlist_id = ?1",
-    )
-    .bind(playlist_id)
-    .fetch_one(pool)
-    .await?
-    .try_get("position")?;
-    Ok(position)
-}
-
-pub(crate) async fn compact_playlist_positions(pool: &DbPool, playlist_id: i64) -> Result<()> {
-    let item_ids =
-        sqlx::query("SELECT id FROM playlist_items WHERE playlist_id = ?1 ORDER BY position, id")
-            .bind(playlist_id)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(|row| row.try_get::<i64, _>("id"))
-            .collect::<Result<Vec<_>, _>>()?;
-
-    for (position, item_id) in item_ids.into_iter().enumerate() {
-        sqlx::query("UPDATE playlist_items SET position = ?1 WHERE id = ?2")
-            .bind(position as i64)
-            .bind(item_id)
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn smart_playlist_tracks(
-    pool: &DbPool,
-    rules: Option<&Value>,
-    limit: u32,
-    offset: u32,
-    include_max_tag_rating_as_favorite: bool,
-) -> Result<Vec<TrackSummary>> {
-    let mut query = QueryBuilder::<Sqlite>::new("");
-    push_track_select_builder(&mut query);
-    let has_rules = !smart_rule_values(rules).is_empty();
-    push_smart_where(&mut query, rules, include_max_tag_rating_as_favorite);
-    push_visible_recording_filter(&mut query, has_rules);
-    query.push(" GROUP BY t.id ORDER BY t.title COLLATE NOCASE LIMIT ");
-    query.push_bind(limit.clamp(1, 5000) as i64);
-    query.push(" OFFSET ");
-    query.push_bind(offset as i64);
-
-    let rows = query.build().fetch_all(pool).await?;
-    rows.into_iter().map(row_to_track).collect()
-}
-
-pub(crate) async fn smart_playlist_track_count(
-    pool: &DbPool,
-    rules: Option<&Value>,
-    include_max_tag_rating_as_favorite: bool,
-) -> Result<i64> {
-    let mut query = QueryBuilder::<Sqlite>::new("SELECT COUNT(DISTINCT t.id) AS count");
-    push_track_from_joins(&mut query);
-    let has_rules = !smart_rule_values(rules).is_empty();
-    push_smart_where(&mut query, rules, include_max_tag_rating_as_favorite);
-    push_visible_recording_filter(&mut query, has_rules);
-    Ok(query
-        .build()
-        .fetch_one(pool)
-        .await?
-        .try_get::<i64, _>("count")?)
-}
-
-fn push_visible_recording_filter(query: &mut QueryBuilder<'_, Sqlite>, has_where: bool) {
-    query.push(if has_where { " AND " } else { " WHERE " });
-    query.push(
-        r#"
-        NOT EXISTS (
-            SELECT 1 FROM track_merge_members member
-            WHERE member.track_id = t.id
-        )
-        AND (
-            NOT EXISTS (
-                SELECT 1 FROM legacy_track_catalog_links missing_link
-                WHERE missing_link.track_id = t.id
-            )
-            OR t.id = (
-                SELECT MIN(candidate.track_id)
-                FROM legacy_track_catalog_links candidate
-                JOIN release_tracks candidate_release
-                  ON candidate_release.id = candidate.release_track_id
-                LEFT JOIN track_merge_members member
-                  ON member.track_id = candidate.track_id
-                WHERE member.track_id IS NULL
-                  AND candidate_release.recording_id = (
-                    SELECT current_release.recording_id
-                    FROM legacy_track_catalog_links current_link
-                    JOIN release_tracks current_release
-                      ON current_release.id = current_link.release_track_id
-                    WHERE current_link.track_id = t.id
-                  )
-            )
-        )
-        "#,
-    );
-}
-
 pub(crate) fn push_track_select_builder(query: &mut QueryBuilder<'_, Sqlite>) {
     query.push(
         r#"
         SELECT
             t.id, t.file_id,
+            COALESCE(display_link.release_identity_id, display_link.release_track_id) AS release_identity_id,
+            display_mode.mode AS display_mode,
+            EXISTS(SELECT 1 FROM tracks playable
+              CROSS JOIN files pf ON pf.id = playable.file_id
+              CROSS JOIN library_roots pr ON pr.id = pf.library_root_id
+              LEFT JOIN devices pd ON pd.id = pr.owner_device_id
+              WHERE playable.id IN (SELECT t.id UNION ALL SELECT copy.track_id FROM track_catalog_links copy
+                WHERE COALESCE(copy.release_identity_id, copy.release_track_id) = COALESCE(display_link.release_identity_id, display_link.release_track_id))
+                AND pf.deleted_at IS NULL AND pf.scan_status IN ('ok', 'identified', 'ready') AND pr.retired_at IS NULL
+                AND (pr.owner_device_id IS NULL OR datetime(pd.online_until) >= datetime('now'))) AS is_available,
+            (SELECT json_group_array(a.name) FROM track_artists ta JOIN artists a ON a.id = ta.artist_id
+             WHERE ta.track_id = t.id AND ta.role = 'primary') AS display_artists,
+            (SELECT json_group_array(g.name) FROM track_genres tg JOIN genres g ON g.id = tg.genre_id
+             WHERE tg.track_id = t.id) AS genres,
             COALESCE(summary_album_identity.canonical_album_id, t.album_id) AS album_id,
             t.title,
             COALESCE(GROUP_CONCAT(DISTINCT ar.name), NULL) AS artist_display,
@@ -286,6 +160,8 @@ pub(crate) fn push_track_from_joins(query: &mut QueryBuilder<'_, Sqlite>) {
     query.push(
         r#"
         FROM tracks t
+        LEFT JOIN track_catalog_links display_link ON display_link.track_id = t.id
+        JOIN track_display_modes display_mode ON display_mode.track_id = t.id
         LEFT JOIN album_identity_members summary_album_identity
           ON summary_album_identity.album_id = t.album_id
         LEFT JOIN albums al
@@ -298,328 +174,6 @@ pub(crate) fn push_track_from_joins(query: &mut QueryBuilder<'_, Sqlite>) {
         LEFT JOIN files f ON f.id = t.file_id
         "#,
     );
-}
-
-pub(crate) fn push_smart_where(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    rules: Option<&Value>,
-    include_max_tag_rating_as_favorite: bool,
-) {
-    let rule_values = smart_rule_values(rules);
-    if rule_values.is_empty() {
-        return;
-    }
-
-    let match_any = smart_match_any(rules);
-    query.push(" WHERE ");
-    query.push(if match_any { "0 = 1" } else { "1 = 1" });
-    for rule in rule_values {
-        query.push(if match_any { " OR " } else { " AND " });
-        if !push_smart_rule(query, rule, include_max_tag_rating_as_favorite) {
-            query.push(if match_any { "0 = 1" } else { "1 = 1" });
-        }
-    }
-}
-
-pub(crate) fn smart_rule_values(rules: Option<&Value>) -> Vec<&Value> {
-    let Some(rules) = rules else {
-        return Vec::new();
-    };
-    if let Some(array) = rules.as_array() {
-        return array.iter().collect();
-    }
-    if let Some(array) = rules.get("rules").and_then(Value::as_array) {
-        return array.iter().collect();
-    }
-    if rules.is_object() {
-        return vec![rules];
-    }
-    Vec::new()
-}
-
-pub(crate) fn smart_match_any(rules: Option<&Value>) -> bool {
-    rules
-        .and_then(|value| value.get("match").or_else(|| value.get("mode")))
-        .and_then(Value::as_str)
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "any" | "or"))
-        .unwrap_or(false)
-}
-
-pub(crate) fn push_smart_rule(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    rule: &Value,
-    include_max_tag_rating_as_favorite: bool,
-) -> bool {
-    let field = rule
-        .get("field")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let operator = rule
-        .get("op")
-        .or_else(|| rule.get("operator"))
-        .and_then(Value::as_str)
-        .unwrap_or("contains")
-        .to_ascii_lowercase();
-    let value = rule.get("value").unwrap_or(&Value::Null);
-
-    match field.as_str() {
-        "title" | "track" => push_text_rule(query, "t.title", &operator, value),
-        "album" => push_text_rule(query, "al.title", &operator, value),
-        "album_artist" => push_text_rule(query, "al.album_artist_display", &operator, value),
-        "artist" => push_exists_text_rule(
-            query,
-            r#"EXISTS (
-                SELECT 1
-                FROM track_artists ta2
-                JOIN artists ar2 ON ar2.id = ta2.artist_id
-                WHERE ta2.track_id = t.id AND ta2.role = 'primary' AND "#,
-            "ar2.name",
-            &operator,
-            value,
-        ),
-        "composer" => push_exists_text_rule(
-            query,
-            r#"EXISTS (
-                SELECT 1
-                FROM track_artists ta2
-                JOIN artists ar2 ON ar2.id = ta2.artist_id
-                WHERE ta2.track_id = t.id AND ta2.role = 'composer' AND "#,
-            "ar2.name",
-            &operator,
-            value,
-        ),
-        "lyricist" | "writer" => push_exists_text_rule(
-            query,
-            r#"EXISTS (
-                SELECT 1
-                FROM track_artists ta2
-                JOIN artists ar2 ON ar2.id = ta2.artist_id
-                WHERE ta2.track_id = t.id AND ta2.role = 'lyricist' AND "#,
-            "ar2.name",
-            &operator,
-            value,
-        ),
-        "genre" => push_exists_text_rule(
-            query,
-            r#"EXISTS (
-                SELECT 1
-                FROM track_genres tg2
-                JOIN genres g2 ON g2.id = tg2.genre_id
-                WHERE tg2.track_id = t.id AND "#,
-            "g2.name",
-            &operator,
-            value,
-        ),
-        "extension" | "format" => push_text_rule(query, "f.extension", &operator, value),
-        "path" | "file" => push_text_rule(query, "f.path", &operator, value),
-        "year" => push_number_rule(query, "t.year", &operator, value),
-        "duration_ms" | "duration" => push_number_rule(query, "t.duration_ms", &operator, value),
-        "rating" | "effective_rating" => {
-            push_number_rule(query, effective_rating_expr(), &operator, value)
-        }
-        "tag_rating" => push_number_rule(query, "t.tag_rating", &operator, value),
-        "favorite" | "favourite" => {
-            let expression = if include_max_tag_rating_as_favorite {
-                favorite_with_tag_rating_expr()
-            } else {
-                "COALESCE(uts.is_favorite, 0)"
-            };
-            push_bool_rule(query, expression, value)
-        }
-        "library_source" | "source" => push_library_source_rule(query, &operator, value),
-        _ => false,
-    }
-}
-
-pub(crate) fn favorite_with_tag_rating_expr() -> &'static str {
-    r#"
-    (
-        COALESCE(uts.is_favorite, 0) = 1
-        OR (
-            t.tag_rating IS NOT NULL
-            AND t.tag_rating_scale IS NOT NULL
-            AND t.tag_rating_scale > 0
-            AND t.tag_rating >= t.tag_rating_scale
-        )
-    )
-    "#
-}
-
-pub(crate) fn push_exists_text_rule(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    prefix: &str,
-    column: &str,
-    operator: &str,
-    value: &Value,
-) -> bool {
-    let Some(text) = value_to_string(value) else {
-        return false;
-    };
-    query.push(prefix);
-    push_text_condition(query, column, operator, &text);
-    query.push(")");
-    true
-}
-
-pub(crate) fn push_text_rule(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    column: &str,
-    operator: &str,
-    value: &Value,
-) -> bool {
-    let Some(text) = value_to_string(value) else {
-        return false;
-    };
-    push_text_condition(query, column, operator, &text);
-    true
-}
-
-pub(crate) fn push_text_condition(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    column: &str,
-    operator: &str,
-    value: &str,
-) {
-    let normalized = value.to_ascii_lowercase();
-    query.push("LOWER(COALESCE(");
-    query.push(column);
-    query.push(", '')) ");
-    match operator {
-        "equals" | "is" | "=" | "==" => {
-            query.push("= ");
-            query.push_bind(normalized);
-        }
-        "not_equals" | "!=" => {
-            query.push("!= ");
-            query.push_bind(normalized);
-        }
-        "starts_with" => {
-            query.push("LIKE ");
-            query.push_bind(format!("{normalized}%"));
-        }
-        "ends_with" => {
-            query.push("LIKE ");
-            query.push_bind(format!("%{normalized}"));
-        }
-        "not_contains" => {
-            query.push("NOT LIKE ");
-            query.push_bind(format!("%{normalized}%"));
-        }
-        _ => {
-            query.push("LIKE ");
-            query.push_bind(format!("%{normalized}%"));
-        }
-    }
-}
-
-pub(crate) fn push_number_rule(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    expression: &str,
-    operator: &str,
-    value: &Value,
-) -> bool {
-    let Some(number) = value_to_i64(value) else {
-        return false;
-    };
-    query.push("(");
-    query.push(expression);
-    query.push(") ");
-    match operator {
-        "gt" | ">" => query.push("> "),
-        "gte" | ">=" => query.push(">= "),
-        "lt" | "<" => query.push("< "),
-        "lte" | "<=" => query.push("<= "),
-        "not_equals" | "!=" => query.push("!= "),
-        _ => query.push("= "),
-    };
-    query.push_bind(number);
-    true
-}
-
-pub(crate) fn push_bool_rule(
-    query: &mut QueryBuilder<'_, Sqlite>,
-    expression: &str,
-    value: &Value,
-) -> bool {
-    let Some(value) = value_to_bool(value) else {
-        return false;
-    };
-    query.push("(");
-    query.push(expression);
-    query.push(") = ");
-    query.push_bind(if value { 1_i64 } else { 0_i64 });
-    true
-}
-
-pub(crate) fn value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(value.trim().to_string()).filter(|value| !value.is_empty()),
-        Value::Number(value) => Some(value.to_string()),
-        Value::Bool(value) => Some(value.to_string()),
-        _ => None,
-    }
-}
-
-pub(crate) fn value_to_i64(value: &Value) -> Option<i64> {
-    match value {
-        Value::Number(value) => value
-            .as_i64()
-            .or_else(|| value.as_f64().map(|value| value as i64)),
-        Value::String(value) => value.trim().parse::<i64>().ok(),
-        _ => None,
-    }
-}
-
-pub(crate) fn value_to_bool(value: &Value) -> Option<bool> {
-    match value {
-        Value::Bool(value) => Some(*value),
-        Value::Number(value) => Some(value.as_i64()? != 0),
-        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "yes" | "1" | "favorite" | "favourite" => Some(true),
-            "false" | "no" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-pub(crate) fn parse_rules_json(value: Option<&str>) -> Result<Option<Value>> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .map(serde_json::from_str)
-        .transpose()
-        .map_err(Into::into)
-}
-
-pub(crate) fn playlist_kind_as_str(kind: &PlaylistKind) -> &'static str {
-    match kind {
-        PlaylistKind::Manual => "manual",
-        PlaylistKind::Smart => "smart",
-    }
-}
-
-pub(crate) fn parse_playlist_kind(value: &str) -> PlaylistKind {
-    if value == "smart" {
-        PlaylistKind::Smart
-    } else {
-        PlaylistKind::Manual
-    }
-}
-
-pub(crate) fn effective_rating_expr() -> &'static str {
-    r#"
-    COALESCE(
-        uts.user_rating,
-        CASE
-            WHEN t.tag_rating IS NOT NULL
-             AND t.tag_rating_scale IS NOT NULL
-             AND t.tag_rating_scale > 0
-            THEN CAST(ROUND(t.tag_rating * 100.0 / t.tag_rating_scale) AS INTEGER)
-            ELSE NULL
-        END
-    )
-    "#
 }
 
 pub(crate) fn row_to_playback_event(row: sqlx::sqlite::SqliteRow) -> Result<PlaybackEvent> {
@@ -727,56 +281,12 @@ pub(crate) fn track_select_sql(tail: &str) -> String {
 }
 
 pub(crate) fn track_select_sql_extra(extra_select: &str, tail: &str) -> String {
-    format!(
-        r#"
-        SELECT
-            {extra_select}
-            t.id, t.file_id,
-            COALESCE(summary_album_identity.canonical_album_id, t.album_id) AS album_id,
-            t.title,
-            COALESCE(GROUP_CONCAT(DISTINCT ar.name), NULL) AS artist_display,
-            COALESCE(NULLIF(summary_album_profile.title, ''), al.title) AS album_title,
-            t.disc_number, t.track_number, t.duration_ms, t.year, t.cover_asset_id,
-            COALESCE(uts.is_favorite, 0) AS is_favorite,
-            uts.user_rating,
-            t.tag_rating,
-            t.tag_rating_scale,
-            COALESCE(
-                uts.user_rating,
-                CASE
-                    WHEN t.tag_rating IS NOT NULL
-                     AND t.tag_rating_scale IS NOT NULL
-                     AND t.tag_rating_scale > 0
-                    THEN CAST(ROUND(t.tag_rating * 100.0 / t.tag_rating_scale) AS INTEGER)
-                    ELSE NULL
-                END
-            ) AS effective_rating,
-            f.size_bytes AS size_bytes,
-            f.created_at AS added_at,
-            (
-                SELECT COUNT(*)
-                FROM playback_sessions ps
-                WHERE ps.track_id = t.id
-                   OR ps.track_id IN (
-                        SELECT member.track_id
-                        FROM track_merge_members member
-                        WHERE member.canonical_track_id = t.id
-                   )
-            ) AS play_count
-        FROM tracks t
-        JOIN files f ON f.id = t.file_id
-        LEFT JOIN album_identity_members summary_album_identity
-          ON summary_album_identity.album_id = t.album_id
-        LEFT JOIN albums al
-          ON al.id = COALESCE(summary_album_identity.canonical_album_id, t.album_id)
-        LEFT JOIN album_metadata_profiles summary_album_profile
-          ON summary_album_profile.album_id = al.id
-        LEFT JOIN track_artists ta ON ta.track_id = t.id AND ta.role = 'primary'
-        LEFT JOIN artists ar ON ar.id = ta.artist_id
-        LEFT JOIN user_track_state uts ON uts.track_id = t.id
-        {tail}
-        "#
-    )
+    let mut query = QueryBuilder::<Sqlite>::new("");
+    push_track_select_builder(&mut query);
+    query
+        .sql()
+        .replacen("SELECT", &format!("SELECT {extra_select}"), 1)
+        + tail
 }
 
 pub(crate) fn parse_datetime(value: String) -> Result<DateTime<Utc>> {

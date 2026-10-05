@@ -51,6 +51,16 @@ where
         max_concurrent_jobs: config.transcoding.max_concurrent_jobs,
     })
     .await;
+    core_db::reset_runtime_authority(&pool).await?;
+    core_db::configure_tag_settings(
+        &pool,
+        &core_db::TagSettings {
+            artist_separators: config.metadata.artist_separators.clone(),
+            genre_separators: config.metadata.genre_separators.clone(),
+            tag_mappings: config.metadata.tag_mappings.clone(),
+        },
+    )
+    .await?;
     let state = AppState::new(
         config,
         paths,
@@ -69,6 +79,7 @@ where
         Ordering::SeqCst,
     );
     state.emit("core.ready", json!({ "api_prefix": API_PREFIX }));
+    start_collection_worker(state.clone());
     start_renderer_expiry_monitor(state.clone());
     start_local_playback_monitor(state.clone());
     start_distribution_transcode_worker(state.clone());
@@ -153,43 +164,32 @@ fn start_local_playback_monitor(state: AppState) {
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(750));
         loop {
             interval.tick().await;
-            for previous in state.inner.playback.cached_states().await {
-                if previous.state != PlaybackTransportState::Playing || previous.track_id.is_none()
-                {
+            for output in state.inner.playback.cached_states().await {
+                let gate = state.playback_control_gate(&output.zone_id).await;
+                let _guard = gate.lock().await;
+                let Some(previous) =
+                    state
+                        .inner
+                        .playback
+                        .cached_states()
+                        .await
+                        .into_iter()
+                        .find(|s| {
+                            s.zone_id == output.zone_id
+                                && s.state == PlaybackTransportState::Playing
+                                && s.track_id.is_some()
+                        })
+                else {
                     continue;
-                }
+                };
                 let current = state.inner.playback.state_for_zone(&previous.zone_id).await;
                 if current.state != PlaybackTransportState::Stopped {
                     continue;
                 }
                 record_playback_finish(&state, &previous, "completed", "completed", None).await;
                 state.emit("playback.state_changed", &current);
-                match step_playback_queue_and_emit(&state, &previous.zone_id, false, true).await {
-                    Ok(Some(track_id)) => {
-                        if let Err(error) = play_track_on_zone(
-                            &state,
-                            &previous.zone_id,
-                            track_id,
-                            0,
-                            &PlaybackCommandContext::default(),
-                        )
-                        .await
-                        {
-                            error!(
-                                zone_id = previous.zone_id,
-                                %error,
-                                "failed to advance the local playback queue"
-                            );
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        error!(
-                            zone_id = previous.zone_id,
-                            %error,
-                            "failed to resolve the next local queue item"
-                        );
-                    }
+                if let Err(error) = complete_core_session(&state, &previous.zone_id).await {
+                    error!(zone_id = previous.zone_id, %error, "failed to advance playback session");
                 }
             }
         }

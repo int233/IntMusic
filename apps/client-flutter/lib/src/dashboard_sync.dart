@@ -15,6 +15,7 @@ extension _DashboardSync on _CoreDashboardState {
     if (forceDiscovery) {
       final discovered = await _applyDiscoveredCoreUrl(
         includeLanScan: includeLanScan,
+        allowServerChange: true,
       );
       if (!discovered) {
         throw StateError('No IntMusic core found on the local network');
@@ -106,9 +107,7 @@ extension _DashboardSync on _CoreDashboardState {
     };
     if (!mounted) return;
     _mutate(() {
-      // This flag is retained temporarily for the legacy playback command
-      // routing only. Catalog and navigation state always stay on the same
-      // canonical Client projection across transport transitions.
+      // Offline playback keeps the same catalog and queue occurrence IDs.
       _localPlaybackFallbackActive = true;
       _verifiedLocalTrackIds
         ..clear()
@@ -157,17 +156,23 @@ extension _DashboardSync on _CoreDashboardState {
         'verified_local_tracks': availableLocalTrackIds.length,
         'projected_albums': _albums.length,
         'projected_artists': _artists.length,
-        'cached_playlists': _playlists.length,
+        'cached_collections': _collections.items.length,
       },
     );
     _startSystemVolumeMonitor();
     _scheduleCoreReconnect(resetBackoff: true);
   }
 
-  Future<bool> _applyDiscoveredCoreUrl({bool includeLanScan = false}) async {
+  Future<bool> _applyDiscoveredCoreUrl({
+    bool includeLanScan = false,
+    bool allowServerChange = false,
+  }) async {
     _rendererStatus = 'Discovering core';
     final cores = await _discoverIntMusicCores(
       hintBaseUrl: _coreUrlController.text,
+      requiredServerId: allowServerChange
+          ? null
+          : _cacheServerId ?? _offlineLibrary.serverId,
       includeLanScan: includeLanScan,
     );
     if (cores.isEmpty) {
@@ -228,98 +233,30 @@ extension _DashboardSync on _CoreDashboardState {
     });
   }
 
-  Future<void> _refreshFromCurrentCore() async {
-    final status = _asMap(await _api.getCriticalJson('/status'));
+  Future<void> _refreshFromCurrentCore() =>
+      _catalogSyncQueue.run(_refreshFromCurrentCoreNow);
+
+  Future<void> _refreshFromCurrentCoreNow() async {
+    final api = _api;
+    bool isCurrent() =>
+        mounted &&
+        api.baseUrl == CoreApiClient.normalizeBaseUrl(_coreUrlController.text);
+    final status = _asMap(await api.getCriticalJson('/status'));
     if (!_isIntMusicCoreStatus(status)) {
       throw StateError('Not an IntMusic core: ${_coreUrlController.text}');
     }
+    if (!isCurrent()) return;
     await _saveCoreUrlPreference();
-    final coreUrl = _coreUrlController.text.trim();
+    if (!isCurrent()) return;
+    final coreUrl = api.baseUrl;
     final catalogReset = await _adoptCatalogIdentity(status, coreUrl);
+    if (!isCurrent()) return;
     await _sendRendererRegistration(
       resetPlayback: _rendererRegisteredCoreUrl != coreUrl,
     );
+    if (!isCurrent()) return;
     _rendererRegisteredCoreUrl = coreUrl;
-    await _connectEventStream();
-    // Once the Core has accepted registration, keep liveness independent from
-    // the larger metadata/cache refresh that follows.
-    _startRendererHeartbeat();
-    final serverId = status['server_id']?.toString() ?? '';
-    artworkCacheCoordinator.registerServer(
-      serverId,
-      catalogEpoch: status['catalog_epoch']?.toString(),
-    );
-    final syncSnapshot = await _fetchSyncSnapshot(
-      status,
-      force: catalogReset || _cacheServerId != serverId || _tracks.isEmpty,
-    );
-    final results = await Future.wait<dynamic>([
-      _api.getJson('/outputs'),
-      _api.getCriticalJson('/zones'),
-      _api.getJson('/diagnostics'),
-      _api.getJson('/settings/server'),
-      _api.getJson('/playback/stats?top_limit=20'),
-      _api.getJson('/playback/history?limit=250'),
-      _api.getJson('/settings/favorites'),
-      _api.getJson('/settings/metadata'),
-      _api
-          .getJson('/transcoding/status')
-          .catchError((_) => const <String, dynamic>{}),
-    ]);
     _status = status;
-    _outputs = results[0] as List<dynamic>;
-    _zones = results[1] as List<dynamic>;
-    _diagnostics = _asMap(results[2]);
-    _serverSettings = _asMap(results[3]);
-    _serverAliasController.text =
-        _serverSettings?['alias']?.toString() ??
-        status['display_name']?.toString() ??
-        'Core local';
-    _playbackStats = _asMap(results[4]);
-    _playbackHistory = results[5] as List<dynamic>;
-    _favoriteSettings = _asMap(results[6]);
-    _metadataSettings = _asMap(results[7]);
-    _transcodingStatus = _asMap(results[8]);
-    if (syncSnapshot != null) {
-      final settings = <String, dynamic>{
-        ..._asMap(syncSnapshot['settings']),
-        'server': _serverSettings,
-        'favorites': _favoriteSettings,
-        'metadata': _metadataSettings,
-      };
-      final storageSnapshot = <String, dynamic>{
-        ...syncSnapshot,
-        'settings': settings,
-        'playback_stats': _playbackStats,
-        'playback_history': _playbackHistory,
-      };
-      _applySyncSnapshot(
-        storageSnapshot,
-        status: status,
-        diagnostics: _diagnostics,
-      );
-      await _ClientCacheStore.replaceSnapshot(
-        coreUrl,
-        _snapshotForStorage(
-          storageSnapshot,
-          status: status,
-          diagnostics: _diagnostics,
-        ),
-      );
-      await _markPendingDetailRefresh();
-    } else {
-      await _persistOverviewValues(<String, dynamic>{
-        'status': status,
-        'diagnostics': _diagnostics,
-        'playback_stats': _playbackStats,
-        'playback_history': _playbackHistory,
-        'settings': <String, dynamic>{
-          'server': _serverSettings,
-          'favorites': _favoriteSettings,
-          'metadata': _metadataSettings,
-        },
-      });
-    }
     final wasOffline = _localPlaybackFallbackActive;
     final continuingOutputId = wasOffline
         ? _offlineOutputForZone(_playback?['zone_id']?.toString())
@@ -342,11 +279,84 @@ extension _DashboardSync on _CoreDashboardState {
     _startDistributionWorker();
     _startLibrarySync();
     unawaited(_refreshDistributionJobs());
+    await _connectEventStream();
+    if (!isCurrent()) return;
+    // Playback and its liveness tasks are active before metadata synchronization.
+    final serverId = status['server_id']?.toString() ?? '';
+    artworkCacheCoordinator.registerServer(
+      serverId,
+      catalogEpoch: status['catalog_epoch']?.toString() ?? '',
+    );
+    final syncSnapshot = await _fetchSyncSnapshot(
+      status,
+      api: api,
+      force: catalogReset || _cacheServerId != serverId || _tracks.isEmpty,
+    );
+    Future<dynamic> overview(String key, String path) => syncSnapshot != null
+        ? Future<dynamic>.value(syncSnapshot[key])
+        : api.getJson(path);
+    final results = await Future.wait<dynamic>([
+      api.getJson('/outputs').catchError((_) => _outputs),
+      api.getCriticalJson('/zones').catchError((_) => _zones),
+      api
+          .getJson('/diagnostics')
+          .catchError((_) => _diagnostics ?? <String, dynamic>{}),
+      overview('settings', '/settings'),
+      overview('playback_stats', '/playback/stats?top_limit=50'),
+      overview('playback_history', '/playback/history?limit=250'),
+      api
+          .getJson('/transcoding/status')
+          .catchError((_) => const <String, dynamic>{}),
+    ]);
+    if (!isCurrent()) return;
+    _status = status;
+    _outputs = results[0] as List<dynamic>;
+    _zones = results[1] as List<dynamic>;
+    _diagnostics = _asMap(results[2]);
+    final settings = _asMap(results[3]);
+    _serverSettings = _asMap(settings['server']);
+    _serverAliasController.text =
+        _serverSettings?['alias']?.toString() ??
+        status['display_name']?.toString() ??
+        'Core local';
+    _playbackStats = _asMap(results[4]);
+    _playbackHistory = results[5] as List<dynamic>;
+    _favoriteSettings = _asMap(settings['favorites']);
+    _metadataSettings = _asMap(settings['metadata']);
+    _songDisplaySettings = _asMap(settings['song_display']);
+    _transcodingStatus = _asMap(results[6]);
+    if (syncSnapshot != null) {
+      await _ClientCacheStore.replaceSnapshot(coreUrl, {
+        ...syncSnapshot,
+        'status': status,
+        'diagnostics': _diagnostics,
+      });
+      if (!isCurrent()) return;
+      _applySyncSnapshot(
+        syncSnapshot,
+        status: status,
+        diagnostics: _diagnostics,
+      );
+      await _markPendingDetailRefresh();
+    } else {
+      await _persistOverviewValues(<String, dynamic>{
+        'status': status,
+        'diagnostics': _diagnostics,
+        'playback_stats': _playbackStats,
+        'playback_history': _playbackHistory,
+        'settings': settings,
+      });
+    }
     _offlineLibrary.serverId = status['server_id']?.toString();
     _offlineLibrary.catalogEpoch = status['catalog_epoch']?.toString();
-    final flushedOfflineMutations = await _flushOfflineMutations();
+    var flushedOfflineMutations = false;
+    try {
+      flushedOfflineMutations = await _flushOfflineMutations();
+    } catch (error) {
+      await _ClientCacheStore.recordError(coreUrl, error);
+    }
     if (flushedOfflineMutations) {
-      await _backgroundLibrarySync();
+      unawaited(_backgroundLibrarySync());
       unawaited(_refreshHistoryCache());
     }
     final onlineTracks = <int, Map<String, dynamic>>{
@@ -411,69 +421,31 @@ extension _DashboardSync on _CoreDashboardState {
 
   Future<Map<String, dynamic>?> _fetchSyncSnapshot(
     Map<String, dynamic> status, {
+    required CoreApiClient api,
     bool force = false,
   }) async {
-    final serverId = status['server_id']?.toString() ?? '';
-    try {
-      if (force) {
-        _detailRefreshScopes.addAll(const <String>{
-          'track',
-          'album',
-          'artist',
-          'playlist',
-        });
-      }
-      if (!force && _cacheServerId == serverId) {
-        final changes = _asMap(
-          await _api.getJson(
-            '/client-sync/changes?after=$_cacheCursor&limit=500',
-          ),
-        );
-        if (changes['server_id']?.toString() == serverId &&
-            changes['requires_snapshot'] != true) {
-          _cacheCursor = _intValue(changes['cursor']) ?? _cacheCursor;
-          return null;
-        }
-        for (final value
-            in ((changes['changes'] as List?) ?? const <dynamic>[])) {
-          if (value is! Map) continue;
-          final reason = value['reason']?.toString().toLowerCase() ?? '';
-          switch (value['scope']?.toString()) {
-            case 'tracks':
-              if (!reason.contains('favorite') &&
-                  !reason.contains('mutation')) {
-                _detailRefreshScopes.addAll(const <String>{
-                  'track',
-                  'album',
-                  'artist',
-                  'playlist',
-                });
-              }
-            case 'albums':
-              _detailRefreshScopes.add('album');
-            case 'artists':
-              _detailRefreshScopes.add('artist');
-            case 'playlists':
-              _detailRefreshScopes.add('playlist');
-            default:
-              _detailRefreshScopes.addAll(const <String>{
-                'track',
-                'album',
-                'artist',
-                'playlist',
-              });
-          }
-        }
-      }
-      return _asMap(
-        await _api.getJson(
-          '/client-sync/snapshot?device_id=${Uri.encodeQueryComponent(_clientId)}',
+    final result = await fetchLibrarySnapshot(
+      identity: CatalogIdentity(
+        status['server_id']?.toString() ?? '',
+        status['catalog_epoch']?.toString() ?? '',
+      ),
+      cursor: _cacheCursor,
+      deviceId: _clientId,
+      force: force || _cacheServerId != status['server_id'],
+      get: (path) async => _asMap(
+        await api.getBulkJson(
+          path,
           requestTimeout: const Duration(seconds: 60),
         ),
-      );
-    } on HttpException {
-      return _loadLegacySyncSnapshot(status);
+      ),
+    );
+    if (!mounted ||
+        api.baseUrl !=
+            CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
+      throw StateError('Core connection changed during synchronization');
     }
+    _detailRefreshScopes.addAll(result.detailKinds);
+    return result.snapshot;
   }
 
   void _startLibrarySync() {
@@ -510,6 +482,7 @@ extension _DashboardSync on _CoreDashboardState {
           _serverSettings = _asMap(settings['server']);
           _favoriteSettings = _asMap(settings['favorites']);
           _metadataSettings = _asMap(settings['metadata']);
+          _songDisplaySettings = _asMap(settings['song_display']);
         });
       }
       await _persistOverviewValues(<String, dynamic>{
@@ -530,58 +503,65 @@ extension _DashboardSync on _CoreDashboardState {
       return;
     }
     _backgroundSyncBusy = true;
+    try {
+      await _catalogSyncQueue.run(
+        () => _backgroundLibrarySyncNow(force: force),
+      );
+    } finally {
+      _backgroundSyncBusy = false;
+    }
+  }
+
+  Future<void> _backgroundLibrarySyncNow({required bool force}) async {
+    if (!mounted ||
+        _localPlaybackFallbackActive ||
+        _clientLibrarySyncingRootIds.isNotEmpty) {
+      return;
+    }
+    final api = _api;
+    final coreUrl = api.baseUrl;
     var catalogReset = false;
     try {
-      final status = _asMap(await _api.getJson('/status'));
+      final status = _asMap(await api.getJson('/status'));
       if (!_isIntMusicCoreStatus(status)) return;
+      if (!mounted ||
+          coreUrl != CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
+        return;
+      }
       catalogReset = await _adoptCatalogIdentity(
         status,
         _coreUrlController.text.trim(),
       );
+      try {
+        await _flushOfflineMutations();
+      } catch (error) {
+        // A rejected/offline mutation must not prevent downloading the catalog.
+        await _ClientCacheStore.recordError(coreUrl, error);
+      }
       final snapshot = await _fetchSyncSnapshot(
         status,
+        api: api,
         force: force || catalogReset,
       );
       if (snapshot == null) return;
-      final storageSnapshot = <String, dynamic>{
+      await _ClientCacheStore.replaceSnapshot(coreUrl, {
         ...snapshot,
-        'settings': <String, dynamic>{
-          ..._asMap(snapshot['settings']),
-          if (_serverSettings != null) 'server': _serverSettings,
-          if (_favoriteSettings != null) 'favorites': _favoriteSettings,
-          if (_metadataSettings != null) 'metadata': _metadataSettings,
-        },
-      };
-      if (mounted) {
-        _mutate(() {
-          _applySyncSnapshot(
-            storageSnapshot,
-            status: status,
-            diagnostics: _diagnostics,
-          );
-          _error = null;
-        });
-      } else {
-        _applySyncSnapshot(
-          storageSnapshot,
-          status: status,
-          diagnostics: _diagnostics,
-        );
+        'status': status,
+        'diagnostics': _diagnostics,
+      });
+      if (!mounted ||
+          coreUrl != CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
+        return;
       }
-      await _ClientCacheStore.replaceSnapshot(
-        _coreUrlController.text,
-        _snapshotForStorage(
-          storageSnapshot,
-          status: status,
-          diagnostics: _diagnostics,
-        ),
-      );
+      _mutate(() {
+        _applySyncSnapshot(snapshot, status: status, diagnostics: _diagnostics);
+        _error = null;
+      });
       await _markPendingDetailRefresh();
       unawaited(_warmDetailCache());
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _ClientCacheStore.recordError(coreUrl, error);
     } finally {
-      _backgroundSyncBusy = false;
       if (catalogReset && _clientLibraryRoots.isNotEmpty && mounted) {
         unawaited(_rebindLocalLibraryAfterCatalogReset());
       }
@@ -597,78 +577,76 @@ extension _DashboardSync on _CoreDashboardState {
     }
     _detailWarmupBusy = true;
     final serverId = _cacheServerId!;
+    final epoch = _cacheCatalogEpoch;
+    final api = _api;
+    final identity = CatalogIdentity(serverId, epoch ?? '');
     var retryPending = false;
     try {
-      for (final kind in const <String>[
-        'track',
-        'artist',
-        'album',
-        'playlist',
-      ]) {
+      for (final kind in const <String>['track', 'artist', 'album']) {
         if (!_detailRefreshScopes.contains(kind)) continue;
         final target = switch (kind) {
           'artist' => _artistDetailCache,
           'album' => _albumDetailCache,
-          'playlist' => _playlistDetailCache,
           _ => _trackDetailCache,
         };
-        var afterId = _detailWarmAfterIds[kind] ?? 0;
         final targetCursor = _detailWarmTargetCursors[kind] ?? _cacheCursor;
-        var superseded = false;
-        while (!_localPlaybackFallbackActive &&
+        _detailWarmTargetCursors[kind] = targetCursor;
+        bool canContinue() =>
+            mounted &&
+            !_localPlaybackFallbackActive &&
             _cacheServerId == serverId &&
-            _clientLibrarySyncingRootIds.isEmpty) {
-          final response = _asMap(
-            await _api.getBulkJson(
-              '/client-sync/details?kind=$kind&after_id=$afterId&limit=100',
-              requestTimeout: const Duration(seconds: 60),
-            ),
-          );
-          if (response['server_id']?.toString() != serverId) return;
-          if ((_detailWarmTargetCursors[kind] ?? targetCursor) !=
-              targetCursor) {
-            superseded = true;
-            break;
-          }
-          final batch = <int, Map<String, dynamic>>{};
-          for (final value
-              in ((response['items'] as List?) ?? const <dynamic>[])) {
-            if (value is! Map) continue;
-            final id = _intValue(value['id']);
-            final detail = _asMap(value['detail']);
-            if (id == null || detail.isEmpty) continue;
-            target[id] = detail;
-            batch[id] = detail;
-          }
-          await _ClientCacheStore.putDetails(
-            _coreUrlController.text,
-            serverId,
-            kind,
-            batch,
-          );
-          final next = _intValue(response['next_after_id']) ?? afterId;
-          final complete = response['has_more'] != true || next <= afterId;
-          _detailWarmAfterIds[kind] = next;
-          await _ClientCacheStore.updateDetailWarmProgress(
-            _coreUrlController.text,
-            kind,
-            next,
-            targetCursor: targetCursor,
-            complete: complete,
-          );
-          if ((_detailWarmTargetCursors[kind] ?? targetCursor) !=
-              targetCursor) {
-            superseded = true;
-            break;
-          }
-          if (complete) break;
-          afterId = next;
-          await Future<void>.delayed(const Duration(milliseconds: 20));
-        }
-        if (superseded ||
-            (_detailWarmTargetCursors[kind] ?? targetCursor) != targetCursor) {
+            _cacheCatalogEpoch == epoch &&
+            api.baseUrl ==
+                CoreApiClient.normalizeBaseUrl(_coreUrlController.text) &&
+            _detailWarmTargetCursors[kind] == targetCursor &&
+            _clientLibrarySyncingRootIds.isEmpty;
+        final completed = await syncLibraryDetailPages(
+          afterId: _detailWarmAfterIds[kind] ?? 0,
+          canContinue: canContinue,
+          load: (afterId) async {
+            final response = _asMap(
+              await api.getBulkJson(
+                '/client-sync/details?kind=$kind&after_id=$afterId&limit=100',
+                requestTimeout: const Duration(seconds: 60),
+              ),
+            );
+            if (!identity.matches(response)) {
+              throw StateError(
+                'Core catalog changed during detail synchronization',
+              );
+            }
+            return response;
+          },
+          save: (response, next, complete) async {
+            final batch = <int, Map<String, dynamic>>{};
+            for (final value in ((response['items'] as List?) ?? const [])) {
+              if (value is! Map) continue;
+              final id = _intValue(value['id']);
+              final detail = _asMap(value['detail']);
+              if (id == null || detail.isEmpty) continue;
+              target[id] = detail;
+              batch[id] = detail;
+            }
+            await _ClientCacheStore.putDetails(
+              api.baseUrl,
+              serverId,
+              kind,
+              batch,
+            );
+            if (!canContinue()) return;
+            _detailWarmAfterIds[kind] = next;
+            await _ClientCacheStore.updateDetailWarmProgress(
+              api.baseUrl,
+              kind,
+              next,
+              targetCursor: targetCursor,
+              complete: complete,
+            );
+          },
+        );
+        if (!completed) {
           retryPending = true;
-          continue;
+          return;
         }
         _detailWarmAfterIds.remove(kind);
         _detailWarmTargetCursors.remove(kind);
@@ -681,13 +659,6 @@ extension _DashboardSync on _CoreDashboardState {
         _mutate(() => _refreshTrackAvailabilityProjection());
       }
       unawaited(_warmOfflineArtworkCache());
-    } on HttpException catch (error) {
-      // A 404 means an older Core: details are then cached on first visit.
-      // Transient HTTP failures keep their durable cursor and retry later.
-      retryPending = !error.message.startsWith('HTTP 404');
-      if (retryPending) {
-        await _ClientCacheStore.recordError(_coreUrlController.text, error);
-      }
     } catch (error) {
       retryPending = true;
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
@@ -724,13 +695,27 @@ extension _DashboardSync on _CoreDashboardState {
     );
   }
 
-  Future<bool> _flushOfflineMutations() async {
-    if (_offlineLibrary.outbox.isEmpty) return false;
+  Future<bool> _flushOfflineMutations() =>
+      _offlineMutationSyncQueue.run(_flushOfflineMutationsNow);
+
+  Future<bool> _flushOfflineMutationsNow() async {
+    final library = _offlineLibrary;
+    final api = _api;
+    bool isCurrent() =>
+        mounted &&
+        identical(library, _offlineLibrary) &&
+        library.serverId == _cacheServerId &&
+        library.catalogEpoch == _cacheCatalogEpoch &&
+        _rendererRegisteredCoreUrl != null &&
+        CoreApiClient.normalizeBaseUrl(_rendererRegisteredCoreUrl!) ==
+            api.baseUrl &&
+        api.baseUrl == CoreApiClient.normalizeBaseUrl(_coreUrlController.text);
+    if (!isCurrent() || library.outbox.isEmpty) return false;
     var flushedAny = false;
-    while (_offlineLibrary.outbox.isNotEmpty) {
-      final batch = _offlineLibrary.outbox.take(100).toList(growable: false);
+    while (isCurrent() && library.outbox.isNotEmpty) {
+      final batch = library.outbox.take(100).toList(growable: false);
       final result = _asMap(
-        await _api.postJson('/client-sync/mutations', <String, dynamic>{
+        await api.postJson('/client-sync/mutations', <String, dynamic>{
           'device_id': _clientId,
           'device_name': _clientAlias(),
           'platform': Platform.operatingSystem,
@@ -739,6 +724,8 @@ extension _DashboardSync on _CoreDashboardState {
               .toList(growable: false),
         }),
       );
+      if (!isCurrent()) break;
+      final sentIds = batch.map((mutation) => mutation.id).toSet();
       final acknowledged = <String>{
         for (final value
             in ((result['applied_ids'] as List?) ?? const <dynamic>[]))
@@ -746,37 +733,19 @@ extension _DashboardSync on _CoreDashboardState {
         for (final value
             in ((result['duplicate_ids'] as List?) ?? const <dynamic>[]))
           value.toString(),
-      };
+      }.intersection(sentIds);
       if (acknowledged.isEmpty) {
         break;
       }
-      _offlineLibrary.outbox.removeWhere(
+      library.outbox.removeWhere(
         (mutation) => acknowledged.contains(mutation.id),
       );
       flushedAny = true;
-      await _OfflineLibraryStore.save(_offlineLibrary);
+      await _OfflineLibraryStore.save(library);
       if (acknowledged.length < batch.length) {
         break;
       }
     }
     return flushedAny;
-  }
-
-  Future<List<dynamic>> _loadPagedList(
-    String path, {
-    int pageSize = 500,
-  }) async {
-    final items = <dynamic>[];
-    for (var offset = 0; ; offset += pageSize) {
-      final separator = path.contains('?') ? '&' : '?';
-      final page =
-          await _api.getJson('$path${separator}limit=$pageSize&offset=$offset')
-              as List<dynamic>;
-      items.addAll(page);
-      if (page.length < pageSize) {
-        break;
-      }
-    }
-    return items;
   }
 }

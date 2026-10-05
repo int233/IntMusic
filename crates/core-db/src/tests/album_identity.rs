@@ -85,6 +85,24 @@ async fn source_scoped_album_rows_are_exposed_as_one_catalog_album() {
     assert_eq!(detail.album.id, canonical_album_id);
     assert_eq!(detail.tracks.len(), 2);
     assert_eq!(library_counts(&pool).await.expect("counts").albums, 1);
+    assert_eq!(
+        client_sync_detail_ids(&pool, "album", 0, 100)
+            .await
+            .unwrap(),
+        vec![canonical_album_id]
+    );
+    sqlx::query("UPDATE files SET deleted_at = 'removed'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(client_sync_detail_ids(&pool, "album", 0, 100)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(client_sync_detail_ids(&pool, "track", 0, 100)
+        .await
+        .unwrap()
+        .is_empty());
 
     close_test_pool(pool, path).await;
 }

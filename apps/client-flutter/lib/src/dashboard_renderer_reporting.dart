@@ -49,34 +49,6 @@ extension _DashboardRendererReporting on _CoreDashboardState {
     }
   }
 
-  void _acknowledgeLocallyAppliedRendererCommand(
-    Map<String, dynamic> command,
-    String outputId,
-  ) {
-    final action = command['action']?.toString();
-    if (action == 'volume') return;
-    final state = switch (action) {
-      'pause' => 'paused',
-      'stop' => 'stopped',
-      _ => 'playing',
-    };
-    _reportRendererStateInBackground(
-      state,
-      outputId: outputId,
-      command: command,
-      positionMs: _intValue(command['position_ms']),
-    );
-    ClientLog.event(
-      'renderer.command.local_intent_acknowledged',
-      data: <String, Object?>{
-        'action': action,
-        'output_id': outputId,
-        'sequence': _intValue(command['sequence']),
-        'intent_id': command['intent_id']?.toString(),
-      },
-    );
-  }
-
   void _reportRendererStateInBackground(
     String state, {
     String? outputId,
@@ -159,10 +131,6 @@ extension _DashboardRendererReporting on _CoreDashboardState {
         }
         _mergePlaybackEvent(snapshot);
       });
-      if (command['action']?.toString() == 'play' &&
-          outputId == _activeZoneId()) {
-        unawaited(_refreshPlaybackQueue(zoneId: outputId));
-      }
     }
   }
 
@@ -190,7 +158,7 @@ extension _DashboardRendererReporting on _CoreDashboardState {
   }
 
   Future<bool> _ensureRendererSource(
-    _RendererAudioPlayer player,
+    RendererSession player,
     String outputId,
     Map<String, dynamic> command,
     int positionMs,
@@ -205,11 +173,6 @@ extension _DashboardRendererReporting on _CoreDashboardState {
         'renderer has no loaded source and command has no stream path',
       );
     }
-    await _runRendererAudioOperation(
-      outputId,
-      'stop_before_ensure_source',
-      player.stop,
-    );
     final source = await _rendererSource(trackId, streamPath);
     final openWatch = Stopwatch()..start();
     _rendererLoadedTrackByOutput[outputId] = trackId;
@@ -217,9 +180,7 @@ extension _DashboardRendererReporting on _CoreDashboardState {
       outputId,
       'ensure_source',
       () => player.open(source.uri, localFile: source.localFile),
-      timeout: source.localFile
-          ? const Duration(seconds: 6)
-          : const Duration(seconds: 10),
+      timeout: const Duration(seconds: 15),
     );
     _rendererLocalFileByOutput[outputId] = source.localFile;
     ClientLog.event(
@@ -308,6 +269,25 @@ extension _DashboardRendererReporting on _CoreDashboardState {
     int? positionMs,
   }) async {
     final targetOutputId = outputId ?? _clientOutputId;
+    return _rendererReportsByOutput
+        .putIfAbsent(targetOutputId, SerialTaskQueue.new)
+        .run(
+          () => _sendRendererState(
+            state,
+            outputId: targetOutputId,
+            command: command,
+            positionMs: positionMs,
+          ),
+        );
+  }
+
+  Future<void> _sendRendererState(
+    String state, {
+    required String outputId,
+    Map<String, dynamic>? command,
+    int? positionMs,
+  }) async {
+    final targetOutputId = outputId;
     final previous = _rendererPlaybackByOutput[targetOutputId];
     final operationGenerationBeforeReport =
         _rendererOperationGenerationByOutput[targetOutputId] ?? 0;
@@ -348,6 +328,14 @@ extension _DashboardRendererReporting on _CoreDashboardState {
         body,
       ),
     );
+    final local = await _audioPlayers[targetOutputId];
+    final active = _rendererActiveCommandByOutput[targetOutputId];
+    if (local != null && active?['sequence'] == playback['command_sequence']) {
+      playback['state'] = local.snapshot.phase == RendererPhase.completed
+          ? 'loading'
+          : local.snapshot.transport;
+      playback['position_ms'] = local.snapshot.positionMs;
+    }
     final playbackSnapshot = _withPlaybackTimestamp(playback);
     if (!_acceptIncomingPlayback(playbackSnapshot)) {
       return;
@@ -383,30 +371,25 @@ extension _DashboardRendererReporting on _CoreDashboardState {
       return 0;
     }
 
-    final previousEstimate = previous == null
-        ? null
-        : _estimatedPlaybackPositionMs(previous);
-    final reported = reportedPositionMs;
-    if (reported == null) {
-      return previousEstimate ?? 0;
-    }
-    if ((state == 'playing' || state == 'paused') &&
-        previousEstimate != null &&
-        previousEstimate > 1500 &&
-        reported + 1500 < previousEstimate) {
-      return previousEstimate;
-    }
-    return reported;
+    return reportedPositionMs ?? _intValue(previous?['position_ms']) ?? 0;
   }
 
   Future<void> _reportRendererPositions() async {
-    for (final entry in _rendererPlaybackByOutput.entries.toList()) {
-      final state = entry.value['state']?.toString();
-      final trackId = _intValue(entry.value['track_id']);
-      if (trackId == null || (state != 'playing' && state != 'paused')) {
-        continue;
-      }
-      await _reportRendererState(state!, outputId: entry.key);
-    }
+    await Future.wait(
+      _audioPlayers.entries.toList().map((entry) async {
+        final player = await entry.value;
+        final command = _rendererActiveCommandByOutput[entry.key];
+        if (command == null ||
+            player.snapshot.phase == RendererPhase.completed) {
+          return;
+        }
+        await _reportRendererStateSafely(
+          player.snapshot.transport,
+          outputId: entry.key,
+          command: command,
+          positionMs: player.snapshot.positionMs,
+        );
+      }),
+    );
   }
 }

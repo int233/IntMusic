@@ -2,31 +2,7 @@ part of '../intmusic_client.dart';
 
 bool get _usesDesktopRendererBackend => Platform.isMacOS || Platform.isWindows;
 
-abstract class _RendererAudioPlayer {
-  Stream<bool> get completed;
-
-  Stream<bool> get playing;
-
-  Future<void> stop();
-
-  Future<void> open(String uri, {bool localFile = false});
-
-  Future<void> play();
-
-  Future<void> pause();
-
-  Future<void> seek(Duration position);
-
-  Future<void> setVolume(double volume);
-
-  Future<int?> currentPositionMs();
-
-  Future<int?> durationMs();
-
-  Future<void> dispose();
-}
-
-class _MediaKitRendererAudioPlayer implements _RendererAudioPlayer {
+class _MediaKitRendererAudioPlayer implements AudioEngine {
   _MediaKitRendererAudioPlayer(this.player);
 
   final Player player;
@@ -36,6 +12,12 @@ class _MediaKitRendererAudioPlayer implements _RendererAudioPlayer {
 
   @override
   Stream<bool> get playing => player.stream.playing;
+  @override
+  Stream<bool> get buffering => player.stream.buffering;
+  @override
+  Stream<Duration> get position => player.stream.position;
+  @override
+  Stream<String> get errors => player.stream.error;
 
   @override
   Future<void> stop() => player.stop();
@@ -68,7 +50,7 @@ class _MediaKitRendererAudioPlayer implements _RendererAudioPlayer {
   Future<void> dispose() => player.dispose();
 }
 
-class _MobileRendererAudioPlayer implements _RendererAudioPlayer {
+class _MobileRendererAudioPlayer implements AudioEngine {
   _MobileRendererAudioPlayer(this.player);
 
   final ap.AudioPlayer player;
@@ -81,6 +63,12 @@ class _MobileRendererAudioPlayer implements _RendererAudioPlayer {
     (state) => state == ap.PlayerState.playing,
   );
 
+  @override
+  Stream<bool> get buffering => const Stream.empty();
+  @override
+  Stream<Duration> get position => player.onPositionChanged;
+  @override
+  Stream<String> get errors => const Stream.empty();
   @override
   Future<void> stop() => player.stop();
 

@@ -44,15 +44,23 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
         anchorContext: anchorContext,
         width: 460,
         maxHeight: 560,
-        child: _QueueSheet(
-          coreBaseUrl: _coreUrlController.text,
-          items: _queueItems(),
-          currentIndex: _intValue(_playbackQueue?['current_index']),
-          onPlayTrack: _playQueueItem,
-          onMove: _moveQueueItem,
-          onRemove: _removeQueueItem,
-          onClearUpcoming: _clearUpcomingQueue,
-          onClearAll: _clearEntireQueue,
+        child: ListenableBuilder(
+          listenable: _songDisplayState,
+          builder: (context, _) => _QueueSheet(
+            displayState: _songDisplayState,
+            sourceName: _asMap(
+              _playbackQueue?['queue_source'],
+            )['name']?.toString(),
+            mergeSameName: _songDisplaySettings['merge_same_name'] == true,
+            coreBaseUrl: _coreUrlController.text,
+            items: _queueItems(),
+            currentIndex: _intValue(_playbackQueue?['current_index']),
+            onPlayTrack: _playQueueItem,
+            onMove: _moveQueueItem,
+            onRemove: _removeQueueItem,
+            onClearUpcoming: _clearUpcomingQueue,
+            onClearAll: _clearEntireQueue,
+          ),
         ),
       ),
     );
@@ -158,89 +166,25 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
   }
 
   Future<void> _postZoneAction(String zoneId, String action) async {
-    final intentId = _beginPlaybackIntent(zoneId, action);
-    final outputId = _clientOutputForZone(zoneId);
-    if (outputId != null && _hasActiveRendererSource(zoneId)) {
-      final player = await _playerForOutput(outputId);
-      final position =
-          await player.currentPositionMs() ??
-          _estimatedPlaybackPositionMs(_playback);
-      switch (action) {
-        case 'pause':
-          await _runRendererAudioOperation(
-            outputId,
-            'local_pause',
-            player.pause,
-          );
-        case 'play':
-          await _runRendererAudioOperation(
-            outputId,
-            'local_resume',
-            player.play,
-          );
-        case 'stop':
-          await _runRendererAudioOperation(outputId, 'local_stop', player.stop);
-          _rendererLoadedTrackByOutput.remove(outputId);
-          _rendererLocalFileByOutput.remove(outputId);
-          _optimisticLocalTrackByOutput.remove(outputId);
-          _optimisticLocalStartedAtByOutput.remove(outputId);
-      }
-      _markPlaybackIntentAppliedLocally(intentId);
-      final localPlayback = _withPlaybackTimestamp(<String, dynamic>{
-        ...?_playback,
-        'zone_id': zoneId,
-        'state': action == 'play'
-            ? 'playing'
-            : action == 'pause'
-            ? 'paused'
-            : 'stopped',
-        if (action == 'stop') 'track_id': null,
-        if (action == 'stop') 'track_title': null,
-        'position_ms': action == 'stop' ? 0 : position,
-        'origin_client_id': _clientId,
-        'intent_id': intentId,
-      });
-      if (action == 'stop') {
-        _rendererPlaybackByOutput.remove(outputId);
-      } else {
-        _rendererPlaybackByOutput[outputId] = localPlayback;
-      }
-      if (mounted) {
-        _mutatePlayback(() {
-          _applyPlayback(localPlayback);
-        });
-      }
-      ClientLog.event(
-        'playback.local_control.applied',
-        data: <String, Object?>{
-          'action': action,
-          'zone_id': zoneId,
-          'position_ms': position,
-        },
-      );
-    }
     if (_localPlaybackFallbackActive) {
+      final outputId = _offlineOutputForZone(zoneId);
+      final player = await _playerForOutput(outputId);
+      switch (action) {
+        case 'play':
+          await player.play();
+        case 'pause':
+          await player.pause();
+        case 'stop':
+          await player.stop();
+      }
       return;
     }
-    final v3Action = <String, dynamic>{
-      'type': action == 'play' ? 'play' : action,
+    final playback = await _postPlaybackSessionActionV3(zoneId, {
+      'type': action,
       if (action == 'play') 'position_ms': 0,
-    };
-    final playback =
-        await _postPlaybackSessionActionV3(
-          zoneId,
-          v3Action,
-          commandId: intentId,
-        ) ??
-        await _postPlaybackControl(
-          zoneId,
-          '/zones/${Uri.encodeComponent(zoneId)}/$action',
-          _playbackCommandBody(const <String, dynamic>{}, intentId: intentId),
-        );
+    }, commandId: _beginPlaybackIntent(zoneId, action));
     if (mounted && playback != null) {
-      _mutatePlayback(() {
-        _applyPlayback(playback);
-      });
+      _mutatePlayback(() => _applyPlayback(playback));
     }
   }
 
@@ -347,130 +291,12 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
       return;
     }
     final zoneId = _activeZoneId();
-    final intentId = _beginPlaybackIntent(zoneId, 'seek');
-    final outputId = _clientOutputForZone(zoneId);
-    if (outputId != null && _hasActiveRendererSource(zoneId)) {
-      final player = await _playerForOutput(outputId);
-      await _runRendererAudioOperation(
-        outputId,
-        'local_seek',
-        () => player.seek(Duration(milliseconds: positionMs)),
-      );
-      _markPlaybackIntentAppliedLocally(intentId);
-      final localPlayback = _withPlaybackTimestamp(<String, dynamic>{
-        ...?_playback,
-        'position_ms': positionMs,
-        'origin_client_id': _clientId,
-        'intent_id': intentId,
-      });
-      _rendererPlaybackByOutput[outputId] = localPlayback;
-      if (mounted) {
-        _mutatePlayback(() {
-          _applyPlayback(localPlayback);
-        });
-      }
-    }
-    final playback =
-        await _postPlaybackSessionActionV3(zoneId, <String, dynamic>{
-          'type': 'seek',
-          'position_ms': positionMs,
-        }, commandId: intentId) ??
-        await _postPlaybackControl(
-          zoneId,
-          '/zones/${Uri.encodeComponent(zoneId)}/seek',
-          _playbackCommandBody(<String, dynamic>{
-            'position_ms': positionMs,
-          }, intentId: intentId),
-        );
+    final playback = await _postPlaybackSessionActionV3(zoneId, {
+      'type': 'seek',
+      'position_ms': positionMs,
+    }, commandId: _beginPlaybackIntent(zoneId, 'seek'));
     if (mounted && playback != null) {
-      _mutatePlayback(() {
-        _applyPlayback(playback);
-      });
-    }
-  }
-
-  Future<T> _serializePlaybackRequest<T>(
-    String zoneId,
-    String intentId,
-    Future<T> Function() request,
-  ) {
-    final previous =
-        _playbackRequestQueueByZone[zoneId] ?? Future<void>.value();
-    final completer = Completer<T>();
-    late final Future<void> queued;
-    queued =
-        (() async {
-          try {
-            try {
-              await previous;
-            } catch (_) {
-              // A failed older request must not block a newer user intent.
-            }
-            final latestIntent = _latestPlaybackIntentByZone[zoneId];
-            if (latestIntent != null && latestIntent != intentId) {
-              throw _SupersededPlaybackIntent(intentId);
-            }
-            completer.complete(await request());
-          } catch (error, stackTrace) {
-            completer.completeError(error, stackTrace);
-          }
-        })().whenComplete(() {
-          if (identical(_playbackRequestQueueByZone[zoneId], queued)) {
-            _playbackRequestQueueByZone.remove(zoneId);
-          }
-        });
-    _playbackRequestQueueByZone[zoneId] = queued;
-    return completer.future;
-  }
-
-  Future<Map<String, dynamic>?> _postPlaybackControl(
-    String zoneId,
-    String path,
-    Map<String, dynamic> body,
-  ) async {
-    final watch = Stopwatch()..start();
-    ClientLog.event(
-      'playback.control.start',
-      data: <String, Object?>{'path': path},
-    );
-    try {
-      final result = _asMap(
-        await _serializePlaybackRequest<dynamic>(
-          zoneId,
-          body['intent_id']?.toString() ?? '',
-          () => _api.postControlJson(path, body),
-        ),
-      );
-      ClientLog.event(
-        'playback.control.end',
-        data: <String, Object?>{
-          'path': path,
-          'elapsed_ms': watch.elapsedMilliseconds,
-        },
-      );
-      return _acceptIncomingPlayback(result) ? result : null;
-    } on _SupersededPlaybackIntent catch (error) {
-      ClientLog.event(
-        'playback.control.superseded',
-        data: <String, Object?>{
-          'path': path,
-          'intent_id': error.intentId,
-          'elapsed_ms': watch.elapsedMilliseconds,
-        },
-      );
-      return null;
-    } catch (error, stackTrace) {
-      ClientLog.error(
-        'playback.control.failed',
-        error,
-        stackTrace: stackTrace,
-        data: <String, Object?>{
-          'path': path,
-          'elapsed_ms': watch.elapsedMilliseconds,
-        },
-      );
-      if (mounted) _mutate(() => _rendererStatus = 'Playback link is slow');
-      return null;
+      _mutatePlayback(() => _applyPlayback(playback));
     }
   }
 }

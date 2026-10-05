@@ -29,6 +29,21 @@ pub async fn migrate(pool: &DbPool) -> Result<()> {
         .run(pool)
         .await
         .context("failed to run database migrations")?;
+    // Collection members require a release identity even for catalog rows
+    // imported without a media graph. This only rebuilds database metadata.
+    let missing: Vec<(i64,i64)> = sqlx::query_as("SELECT t.id,t.file_id FROM tracks t LEFT JOIN track_catalog_links l ON l.track_id=t.id WHERE l.track_id IS NULL").fetch_all(pool).await?;
+    for (id, file_id) in missing {
+        ensure_track_media_graph(
+            pool,
+            id,
+            file_id,
+            &file_ingest_by_id(pool, file_id).await?,
+            &current_track_ingest(pool, id).await?,
+        )
+        .await?;
+    }
+    reconcile_catalog_identity(pool).await?;
+    initialize_collections(pool).await?;
     audit_library_inventory(pool)
         .await
         .context("failed to audit the library file inventory")?;
@@ -159,17 +174,22 @@ pub async fn client_sync_detail_ids(
     after_id: i64,
     limit: u32,
 ) -> Result<Vec<i64>> {
-    let table = match kind {
-        "track" => "tracks",
-        "album" => "albums",
-        "artist" => "artists",
-        "playlist" => "playlists",
+    // Page the same visible identities as the catalog. Raw album rows include
+    // aliases and retired inventories whose details no longer exist.
+    let ids = match kind {
+        "track" => "SELECT track_id AS id FROM visible_catalog_tracks",
+        "album" => {
+            r#"SELECT DISTINCT identity.canonical_album_id AS id
+            FROM album_identity_members identity
+            JOIN tracks track ON track.album_id = identity.album_id
+            JOIN active_catalog_tracks active ON active.track_id = track.id"#
+        }
+        "artist" => "SELECT id FROM artists",
         _ => bail!("unsupported Client sync detail kind"),
     };
-    // `table` is selected from the closed list above; values remain bound.
-    Ok(sqlx::query_scalar::<_, i64>(
-        format!("SELECT id FROM {table} WHERE id > ?1 ORDER BY id LIMIT ?2").as_str(),
-    )
+    Ok(sqlx::query_scalar::<_, i64>(&format!(
+        "SELECT id FROM ({ids}) WHERE id > ?1 ORDER BY id LIMIT ?2"
+    ))
     .bind(after_id.max(0))
     .bind(i64::from(limit.clamp(1, 200)))
     .fetch_all(pool)

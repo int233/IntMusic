@@ -72,7 +72,9 @@ class _TracksPageState extends State<_TracksPage> {
   Widget build(BuildContext context) {
     final compactPage = MediaQuery.sizeOf(context).width < 600;
     final query = _query.trim().toLowerCase();
-    final tracks = widget.tracks
+    final displayState = _TrackActionScope.maybeOf(context)?.displayState;
+    var tracks = widget.tracks
+        .map((value) => displayState?.project(_asMap(value)) ?? _asMap(value))
         .where((item) {
           if (query.isEmpty) {
             return true;
@@ -80,7 +82,7 @@ class _TracksPageState extends State<_TracksPage> {
           final track = (item as Map).cast<String, dynamic>();
           return '${track['title'] ?? ''}\u0000'
                   '${track['artist_display'] ?? ''}\u0000'
-                  '${track['album_title'] ?? ''}'
+                  '${track['album_title'] ?? ''} ${track['genres'] ?? ''} ${songDisplayModeLabel(track['display_mode'])} ${track['display_mode'] ?? 'inherit'}'
               .toLowerCase()
               .contains(query);
         })
@@ -110,6 +112,7 @@ class _TracksPageState extends State<_TracksPage> {
         _ => _compareLibraryText(a['title'], b['title']),
       };
     });
+    tracks = _displayTracks(context, tracks);
     final visibleTrackIds = tracks
         .map((item) => _intValue((item as Map)['id']))
         .whereType<int>()
@@ -245,7 +248,14 @@ class _TracksPageState extends State<_TracksPage> {
                               : () => unawaited(widget.onOpenTrack(id)),
                           onPlay: id == null || _selecting
                               ? null
-                              : () => unawaited(widget.onPlayTrack(id)),
+                              : () => unawaited(
+                                  _playDisplayedSong(
+                                    context,
+                                    id,
+                                    tracks,
+                                    widget.onPlayTrack,
+                                  ),
+                                ),
                           onAddToPlaylist: id == null || _selecting
                               ? null
                               : () => unawaited(widget.onAddToPlaylist(id)),
@@ -319,7 +329,12 @@ class _TracksPageState extends State<_TracksPage> {
                                       onPlay: id == null || _selecting
                                           ? null
                                           : () => unawaited(
-                                              widget.onPlayTrack(id),
+                                              _playDisplayedSong(
+                                                context,
+                                                id,
+                                                tracks,
+                                                widget.onPlayTrack,
+                                              ),
                                             ),
                                       onAddToPlaylist: id == null || _selecting
                                           ? null
@@ -834,11 +849,15 @@ class _TrackActionsState extends State<_TrackActions> {
         (trackId != null && queueActions != null);
     if (condensed) {
       final actions = <Widget>[
+        if (widget.track['_display_members'] is List)
+          _SongGroupButton(track: widget.track),
         PopupMenuButton<_TrackMoreAction>(
           tooltip: _tr(context, 'More'),
           icon: const Icon(Icons.more_horiz),
           onSelected: (action) {
             switch (action) {
+              case _TrackMoreAction.display:
+                unawaited(_showSongDisplay(context, widget.track));
               case _TrackMoreAction.toggleFavorite:
                 unawaited(_toggleFavorite(favorite));
               case _TrackMoreAction.playNext:
@@ -852,6 +871,13 @@ class _TrackActionsState extends State<_TrackActions> {
             }
           },
           itemBuilder: (context) => [
+            if (queueActions?.onSetDisplayMode != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.display,
+                child: Text(
+                  '展示方式 · ${songDisplayModeLabel(widget.track['display_mode'])}',
+                ),
+              ),
             PopupMenuItem(
               value: _TrackMoreAction.toggleFavorite,
               child: ListTile(
@@ -910,6 +936,8 @@ class _TrackActionsState extends State<_TrackActions> {
       );
     }
     final actions = <Widget>[
+      if (widget.track['_display_members'] is List)
+        _SongGroupButton(track: widget.track),
       _AppTooltip(
         message: favorite ? 'Unfavorite' : 'Favorite',
         child: IconButton(
@@ -923,6 +951,8 @@ class _TrackActionsState extends State<_TrackActions> {
           icon: const Icon(Icons.more_horiz),
           onSelected: (action) {
             switch (action) {
+              case _TrackMoreAction.display:
+                unawaited(_showSongDisplay(context, widget.track));
               case _TrackMoreAction.toggleFavorite:
                 unawaited(_toggleFavorite(favorite));
               case _TrackMoreAction.playNext:
@@ -936,6 +966,13 @@ class _TrackActionsState extends State<_TrackActions> {
             }
           },
           itemBuilder: (context) => [
+            if (queueActions?.onSetDisplayMode != null)
+              PopupMenuItem(
+                value: _TrackMoreAction.display,
+                child: Text(
+                  '展示方式 · ${songDisplayModeLabel(widget.track['display_mode'])}',
+                ),
+              ),
             if (trackId != null && queueActions != null)
               PopupMenuItem(
                 value: _TrackMoreAction.playNext,
@@ -988,6 +1025,7 @@ class _TrackActionsState extends State<_TrackActions> {
 }
 
 enum _TrackMoreAction {
+  display,
   toggleFavorite,
   playNext,
   addToQueue,

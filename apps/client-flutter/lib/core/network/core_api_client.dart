@@ -138,11 +138,24 @@ class CoreApiClient {
     channel: _CoreApiChannel.bulk,
   );
 
+  Future<dynamic> patchJson(
+    String path,
+    Map<String, dynamic> body, {
+    Map<String, String>? headers,
+  }) => _request('PATCH', path, body: body, headers: headers);
+
   Future<dynamic> postJson(
     String path,
     Map<String, dynamic> body, {
     Duration? requestTimeout,
-  }) => _request('POST', path, body: body, requestTimeout: requestTimeout);
+    Map<String, String>? headers,
+  }) => _request(
+    'POST',
+    path,
+    body: body,
+    requestTimeout: requestTimeout,
+    headers: headers,
+  );
 
   Future<dynamic> postCriticalJson(
     String path,
@@ -198,8 +211,16 @@ class CoreApiClient {
     channel: _CoreApiChannel.control,
   );
 
-  Future<dynamic> deleteJson(String path, {Duration? requestTimeout}) =>
-      _request('DELETE', path, requestTimeout: requestTimeout);
+  Future<dynamic> deleteJson(
+    String path, {
+    Duration? requestTimeout,
+    Map<String, String>? headers,
+  }) => _request(
+    'DELETE',
+    path,
+    requestTimeout: requestTimeout,
+    headers: headers,
+  );
 
   /// Cancels obsolete inventory reads before a newer filter/page request.
   ///
@@ -271,6 +292,7 @@ class CoreApiClient {
     String method,
     String path, {
     Map<String, dynamic>? body,
+    Map<String, String>? headers,
     Duration? requestTimeout,
     _CoreApiChannel channel = _CoreApiChannel.background,
   }) async {
@@ -292,6 +314,7 @@ class CoreApiClient {
           method,
           path,
           body: body,
+          headers: headers,
           requestTimeout: requestTimeout,
           channel: channel,
         );
@@ -331,6 +354,7 @@ class CoreApiClient {
     String method,
     String path, {
     Map<String, dynamic>? body,
+    Map<String, String>? headers,
     Duration? requestTimeout,
     _CoreApiChannel channel = _CoreApiChannel.background,
   }) async {
@@ -365,10 +389,13 @@ class CoreApiClient {
     try {
       final request = switch (method) {
         'POST' => await client.postUrl(uri).timeout(remainingTimeout()),
+        'PATCH' =>
+          await client.openUrl('PATCH', uri).timeout(remainingTimeout()),
         'DELETE' => await client.deleteUrl(uri).timeout(remainingTimeout()),
         _ => await client.getUrl(uri).timeout(remainingTimeout()),
       };
       request.headers.contentType = ContentType.json;
+      headers?.forEach(request.headers.set);
       request.headers.set(HttpHeaders.acceptHeader, 'application/json');
       request.headers.set(HttpHeaders.acceptEncodingHeader, 'gzip');
       if (body != null) {

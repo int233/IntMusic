@@ -28,7 +28,7 @@ async fn v3_session_and_queue_identities_are_durable() {
             added_at: now,
         },
     ];
-    replace_playback_queue_v3(&pool, "local", &items, Some(second_id))
+    replace_playback_queue_v3(&pool, "local", &items, Some(second_id), None)
         .await
         .expect("replace queue");
     let queue = playback_queue_state_v3(&pool, "local")

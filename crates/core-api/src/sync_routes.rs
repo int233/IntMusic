@@ -9,6 +9,8 @@ pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<CoreStatu
         api_version: "v1".to_string(),
         server_id: state.inner.server_id.to_string(),
         catalog_epoch: state.inner.catalog_epoch.clone(),
+        catalog_identity_guard: true,
+        capabilities: vec!["collections_v1".into()],
         bind_address: state.inner.bind_address.to_string(),
         discovery_service: state.inner.discovery_service.clone(),
         started_at: state.inner.started_at,
@@ -219,9 +221,11 @@ pub(crate) async fn client_sync_snapshot(
         }
         offset += PAGE_SIZE;
     }
-    let playlists =
-        core_db::list_playlists(state.pool(), config.favorites.treat_max_rating_as_favorite)
-            .await?;
+    let collections = core_db::list_collections(state.pool())
+        .await?
+        .into_iter()
+        .filter(|c| c.system_key.is_none())
+        .collect();
     Ok(Json(ClientSyncSnapshot {
         server_id: state.inner.server_id.to_string(),
         catalog_epoch: state.inner.catalog_epoch.clone(),
@@ -230,7 +234,7 @@ pub(crate) async fn client_sync_snapshot(
         albums,
         artists,
         tracks,
-        playlists,
+        collections,
         playback_history: core_db::list_playback_events(state.pool(), 250, 0, None, None).await?,
         playback_stats: core_db::playback_stats(state.pool(), None, None, 50).await?,
         library_roots: core_db::list_library_roots(state.pool()).await?,
@@ -261,9 +265,12 @@ pub(crate) async fn client_sync_changes(
     let cursor = core_db::sync_cursor(state.pool()).await?;
     Ok(Json(ClientSyncChanges {
         server_id: state.inner.server_id.to_string(),
+        catalog_epoch: state.inner.catalog_epoch.clone(),
         after,
         cursor,
-        requires_snapshot: !changes.is_empty(),
+        // The changes query and high-water mark are separate reads. A write
+        // between them must trigger a snapshot, never silently advance clients.
+        requires_snapshot: cursor != after || !changes.is_empty(),
         changes,
     }))
 }
@@ -302,16 +309,6 @@ pub(crate) async fn client_sync_details(
                 apply_favorite_settings_to_tracks(&config.favorites, &mut detail.tracks);
                 serde_json::to_value(detail)
             }
-            "playlist" => {
-                let mut detail = core_db::playlist_detail(
-                    state.pool(),
-                    *id,
-                    config.favorites.treat_max_rating_as_favorite,
-                )
-                .await?;
-                apply_favorite_settings_to_playlist(&config.favorites, &mut detail);
-                serde_json::to_value(detail)
-            }
             _ => unreachable!(),
         }
         .map_err(anyhow::Error::from)?;
@@ -320,6 +317,7 @@ pub(crate) async fn client_sync_details(
     let next_after_id = ids.last().copied().unwrap_or(after_id);
     Ok(Json(json!({
         "server_id": state.inner.server_id.to_string(),
+        "catalog_epoch": state.inner.catalog_epoch,
         "cursor": core_db::sync_cursor(state.pool()).await?,
         "kind": kind,
         "items": items,

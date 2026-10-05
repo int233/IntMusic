@@ -21,6 +21,7 @@ pub struct PlaybackQueueStateV3 {
     pub current_item_id: Option<Uuid>,
     pub shuffle_seed: u64,
     pub items: Vec<PlaybackQueueItemV3>,
+    pub source: Option<protocol::CollectionQueueSource>,
 }
 
 pub async fn ensure_playback_session_v3(
@@ -197,11 +198,12 @@ pub async fn update_playback_session_mode_v3(
 pub async fn playback_queue_state_v3(pool: &DbPool, zone_id: &str) -> Result<PlaybackQueueStateV3> {
     ensure_playback_queue(pool, zone_id).await?;
     backfill_playback_queue_item_ids_v3(pool, zone_id).await?;
-    let metadata =
-        sqlx::query("SELECT current_index, shuffle_seed FROM playback_queues WHERE zone_id = ?1")
-            .bind(zone_id)
-            .fetch_one(pool)
-            .await?;
+    let metadata = sqlx::query(
+        "SELECT current_index, shuffle_seed, source_json FROM playback_queues WHERE zone_id = ?1",
+    )
+    .bind(zone_id)
+    .fetch_one(pool)
+    .await?;
     let rows = sqlx::query(
         r#"
         SELECT stable_item_id, track_id, added_by_device_id, added_at
@@ -231,6 +233,10 @@ pub async fn playback_queue_state_v3(pool: &DbPool, zone_id: &str) -> Result<Pla
         .and_then(|index| items.get(index))
         .map(|item| item.item_id);
     Ok(PlaybackQueueStateV3 {
+        source: metadata
+            .try_get::<Option<String>, _>("source_json")?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?,
         current_item_id,
         shuffle_seed: metadata.try_get::<i64, _>("shuffle_seed")?.max(1) as u64,
         items,
@@ -242,6 +248,7 @@ pub async fn replace_playback_queue_v3(
     zone_id: &str,
     items: &[PlaybackQueueItemV3],
     current_item_id: Option<Uuid>,
+    source: Option<&protocol::CollectionQueueSource>,
 ) -> Result<()> {
     validate_queue_items(items)?;
     ensure_playback_queue(pool, zone_id).await?;
@@ -261,7 +268,7 @@ pub async fn replace_playback_queue_v3(
         UPDATE playback_queues
         SET revision = revision + 1,
             current_index = ?2,
-            shuffle_seed = CASE WHEN shuffle_seed >= 2147483646 THEN 1 ELSE shuffle_seed + 1 END,
+            source_json = ?4,
             updated_at = ?3
         WHERE zone_id = ?1
         "#,
@@ -269,6 +276,11 @@ pub async fn replace_playback_queue_v3(
     .bind(zone_id)
     .bind(current_index)
     .bind(Utc::now().to_rfc3339())
+    .bind(if items.is_empty() {
+        None
+    } else {
+        source.map(serde_json::to_string).transpose()?
+    })
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

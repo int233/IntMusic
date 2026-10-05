@@ -25,12 +25,21 @@ extension _DashboardEventRouter on _CoreDashboardState {
           return;
         }
 
+        if (eventType == 'collections.changed') {
+          unawaited(_collections.refresh());
+          return;
+        }
+
         if (eventType == 'renderer.resync_required') {
           unawaited(_restartEventStream('renderer_resync_required'));
           return;
         }
 
         if (eventType == 'connection.snapshot_required') {
+          unawaited(_collections.refresh());
+          final snapshotCursor = _intValue(_asMap(payload)['event_cursor']);
+          if (snapshotCursor != null) _eventCursor = snapshotCursor;
+          unawaited(_sendRendererRegistration(requestPlaybackSync: true));
           unawaited(_refreshZonesSilently());
           unawaited(_refreshPlaybackQueue());
           unawaited(_backgroundLibrarySync(force: true));
@@ -82,14 +91,6 @@ extension _DashboardEventRouter on _CoreDashboardState {
           _mutatePlayback(() {
             _mergePlaybackEvent(playback);
           });
-          return;
-        }
-
-        if (eventType == 'playback.queue_changed' && payload is Map) {
-          final queue = payload.cast<String, dynamic>();
-          if (queue['zone_id']?.toString() == _activeZoneId()) {
-            _mutatePlayback(() => _applyPlaybackQueue(queue));
-          }
           return;
         }
 
@@ -191,22 +192,16 @@ extension _DashboardEventRouter on _CoreDashboardState {
         extra: <String, Object?>{
           'age_ms': ageMs,
           'expires_after_ms': effectiveTtl,
-          'legacy_ttl': configuredTtl == null,
         },
       );
-      unawaited(_restartEventStream('expired_renderer_command'));
       return false;
     }
 
     final sequence = _intValue(command['sequence']) ?? 0;
     final previousSequence = _rendererCommandSequences.latest(outputId);
     final latestStateSequence = _playbackStateSequenceByZone[outputId];
-    final previousIssuedAt = _latestRendererCommandIssuedAtByOutput[outputId];
-    if (sequence <= 0 &&
-        issuedAt != null &&
-        previousIssuedAt != null &&
-        !issuedAt.isAfter(previousIssuedAt)) {
-      _dropRendererCommand(command, 'stale_legacy_timestamp');
+    if (sequence <= 0 || issuedAt == null || configuredTtl == null) {
+      _dropRendererCommand(command, 'missing_command_identity');
       return false;
     }
     if (sequence > 0) {
@@ -242,70 +237,11 @@ extension _DashboardEventRouter on _CoreDashboardState {
       );
     }
 
-    if (!_rendererCommandMatchesLatestIntent(command)) {
-      _dropRendererCommand(command, 'superseded_local_intent');
-      return false;
-    }
-    if (issuedAt != null) {
-      _latestRendererCommandIssuedAtByOutput[outputId] = issuedAt;
-    }
     return true;
   }
 
-  bool _rendererCommandMatchesLatestIntent(Map<String, dynamic> command) {
-    final outputId = command['target_output_id']?.toString();
-    if (outputId == null) return true;
-    final action = command['action']?.toString();
-    final intentId = command['intent_id']?.toString();
-    final originClientId = command['origin_client_id']?.toString();
-    final latestIntent = action == 'volume'
-        ? _latestVolumeIntentByZone[outputId]
-        : _latestPlaybackIntentByZone[outputId];
-    if (originClientId == _clientId &&
-        intentId != null &&
-        latestIntent != null) {
-      return intentId == latestIntent;
-    }
-
-    // Compatibility with an older Core which does not echo origin/intent:
-    // UUIDv7 still lets us reject a command issued before a newer local click.
-    if (action != 'volume') {
-      final localIntentAt = _latestPlaybackIntentAtByZone[outputId];
-      final issuedAt = _rendererCommandIssuedAt(command);
-      if (localIntentAt != null &&
-          issuedAt != null &&
-          issuedAt.isBefore(localIntentAt)) {
-        return false;
-      }
-      if (localIntentAt != null &&
-          issuedAt == null &&
-          DateTime.now().toUtc().difference(localIntentAt) <
-              const Duration(seconds: 10)) {
-        final desired = _desiredTransportStateByZone[outputId];
-        final commanded = _transportStateForAction(action);
-        if (desired != null && commanded != desired) return false;
-      }
-    }
-    return true;
-  }
-
-  String _transportStateForAction(String? action) => switch (action) {
-    'pause' => 'paused',
-    'stop' => 'stopped',
-    _ => 'playing',
-  };
-
-  DateTime? _rendererCommandIssuedAt(Map<String, dynamic> command) {
-    final explicit = DateTime.tryParse(
-      command['issued_at']?.toString() ?? '',
-    )?.toUtc();
-    if (explicit != null) return explicit;
-    final commandId = command['command_id']?.toString().replaceAll('-', '');
-    if (commandId == null || commandId.length < 12) return null;
-    final milliseconds = int.tryParse(commandId.substring(0, 12), radix: 16);
-    if (milliseconds == null) return null;
-    return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
-  }
+  DateTime? _rendererCommandIssuedAt(Map<String, dynamic> command) =>
+      DateTime.tryParse(command['issued_at']?.toString() ?? '')?.toUtc();
 
   void _dropRendererCommand(
     Map<String, dynamic> command,
@@ -345,15 +281,6 @@ extension _DashboardEventRouter on _CoreDashboardState {
         (previousSequence == null || sequence > previousSequence)) {
       _playbackStateSequenceByZone[zoneId] = sequence;
     }
-    if (playback['origin_client_id']?.toString() == _clientId) {
-      final intentId = playback['intent_id']?.toString();
-      final latestIntent = _latestPlaybackIntentByZone[zoneId];
-      if (intentId != null &&
-          latestIntent != null &&
-          intentId != latestIntent) {
-        return false;
-      }
-    }
     return true;
   }
 
@@ -369,6 +296,20 @@ extension _DashboardEventRouter on _CoreDashboardState {
         : (_rendererOperationGenerationByOutput[outputId] ?? 0) + 1;
     if (action != 'volume') {
       _rendererOperationGenerationByOutput[outputId] = operationGeneration;
+    }
+    if (action != 'volume') {
+      final player = _audioPlayers[outputId];
+      if (player != null) {
+        unawaited(
+          player
+              .then((session) async {
+                if (session.snapshot.phase == RendererPhase.loading) {
+                  await session.stop();
+                }
+              })
+              .catchError((Object _) {}),
+        );
+      }
     }
     final previous =
         _rendererCommandQueueByOutput[outputId] ?? Future<void>.value();
@@ -391,7 +332,13 @@ extension _DashboardEventRouter on _CoreDashboardState {
   }
 
   bool _rendererCommandStillExecutable(Map<String, dynamic> command) {
-    if (!_rendererCommandMatchesLatestIntent(command)) return false;
+    final outputId = command['target_output_id']?.toString();
+    final sequence = _intValue(command['sequence']);
+    if (outputId == null || sequence == null) return false;
+    final latest = command['action'] == 'volume'
+        ? _rendererCommandSequences.latest(outputId)
+        : _rendererCommandSequences.latestTransport(outputId);
+    if (latest != null && sequence < latest) return false;
     final issuedAt = _rendererCommandIssuedAt(command);
     if (issuedAt == null) return true;
     final ttl =

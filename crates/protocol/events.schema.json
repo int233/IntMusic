@@ -43,7 +43,8 @@
         "distribution.task_claimed",
         "distribution.source_task_claimed",
         "distribution.transcoding",
-        "core.settings_changed"
+        "core.settings_changed",
+        "collections.changed"
       ]
     },
     "time": { "type": "string", "format": "date-time" },

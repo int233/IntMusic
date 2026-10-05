@@ -93,10 +93,9 @@ extension _DashboardLibrary on _CoreDashboardState {
     bool refreshAfter = true,
   }) async {
     if (!_clientLibraryQueuedRootIds.add(externalId)) return;
-    final operation = _clientLibrarySyncQueue.then(
-      (_) => _syncClientLibraryRootNow(externalId, refreshAfter: refreshAfter),
+    final operation = _clientLibrarySyncQueue.run(
+      () => _syncClientLibraryRootNow(externalId, refreshAfter: refreshAfter),
     );
-    _clientLibrarySyncQueue = operation;
     try {
       await operation;
     } finally {
@@ -116,7 +115,25 @@ extension _DashboardLibrary on _CoreDashboardState {
       _clientLibrarySyncingRootIds.add(externalId);
       _replaceClientLibraryRoot(root.copyWith(clearError: true));
     });
+    final api = _api;
+    final library = _offlineLibrary;
+    final serverId = _cacheServerId;
+    final epoch = _cacheCatalogEpoch;
+    void checkSession() {
+      if (!mounted ||
+          !identical(library, _offlineLibrary) ||
+          _cacheServerId != serverId ||
+          _cacheCatalogEpoch != epoch ||
+          api.baseUrl !=
+              CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
+        throw StateError(
+          'Core connection changed during folder synchronization',
+        );
+      }
+    }
+
     try {
+      checkSession();
       final directory = Directory(root.path);
       if (!await directory.exists()) {
         throw FileSystemException(
@@ -133,6 +150,7 @@ extension _DashboardLibrary on _CoreDashboardState {
       var manifestBatchSequence = 0;
       final seenExternalIds = <String>{};
       Future<void> sendBatch({required bool complete}) async {
+        checkSession();
         final sentBatch = List<Map<String, dynamic>>.of(batch);
         final sequence = manifestBatchSequence++;
         final stopwatch = Stopwatch()..start();
@@ -147,7 +165,7 @@ extension _DashboardLibrary on _CoreDashboardState {
           },
         );
         final result = _asMap(
-          await _api.postLibrarySyncJson(
+          await api.postLibrarySyncJson(
             '/client-library/manifests',
             <String, dynamic>{
               'device_id': _clientId,
@@ -165,6 +183,7 @@ extension _DashboardLibrary on _CoreDashboardState {
             },
           ),
         );
+        checkSession();
         final elapsed = stopwatch.elapsed;
         manifestBatchTarget = switch (elapsed.inSeconds) {
           >= 8 => 10,
@@ -249,6 +268,7 @@ extension _DashboardLibrary on _CoreDashboardState {
       }
       await inspectPendingPaths();
       await sendBatch(complete: true);
+      checkSession();
       _offlineLibrary.retainRootFiles(root.externalId, seenExternalIds);
       await _OfflineLibraryStore.save(_offlineLibrary);
       final updated = root.copyWith(
@@ -282,10 +302,16 @@ extension _DashboardLibrary on _CoreDashboardState {
       } else {
         _clientLibrarySyncingRootIds.remove(externalId);
       }
+      if (mounted) unawaited(_warmDetailCache());
     }
   }
 
-  Future<void> _removeClientLibraryRoot(String externalId) async {
+  Future<void> _removeClientLibraryRoot(String externalId) =>
+      _clientLibrarySyncQueue.run(
+        () => _removeClientLibraryRootNow(externalId),
+      );
+
+  Future<void> _removeClientLibraryRootNow(String externalId) async {
     final root = _clientLibraryRoots
         .where((item) => item.externalId == externalId)
         .firstOrNull;
@@ -391,7 +417,7 @@ extension _DashboardLibrary on _CoreDashboardState {
         'year',
       ]),
       'artists': filter(_artists, const ['name', 'sort_name']),
-      'playlists': filter(_playlists, const ['name', 'description']),
+      'collections': _collections.search(query, limit: limit),
     };
     return _ClientCacheStore.search(
       _coreUrlController.text,
@@ -399,11 +425,19 @@ extension _DashboardLibrary on _CoreDashboardState {
       limit: limit,
     ).then((cached) {
       final cachedCount =
-          const <String>['tracks', 'albums', 'artists', 'playlists'].fold<int>(
+          const <String>[
+            'tracks',
+            'albums',
+            'artists',
+            'collections',
+          ].fold<int>(
             0,
             (count, key) => count + ((cached[key] as List?)?.length ?? 0),
           );
-      return cachedCount == 0 ? memoryResult : cached;
+      return {
+        ...(cachedCount == 0 ? memoryResult : cached),
+        'collections': _collections.search(query, limit: limit),
+      };
     });
   }
 
@@ -463,7 +497,10 @@ extension _DashboardLibrary on _CoreDashboardState {
     addItems((result['tracks'] as List?) ?? const [], _ResultKind.track);
     addItems((result['albums'] as List?) ?? const [], _ResultKind.album);
     addItems((result['artists'] as List?) ?? const [], _ResultKind.artist);
-    addItems((result['playlists'] as List?) ?? const [], _ResultKind.playlist);
+    addItems(
+      (result['collections'] as List?) ?? const [],
+      _ResultKind.playlist,
+    );
     return suggestions.take(10).toList(growable: false);
   }
 

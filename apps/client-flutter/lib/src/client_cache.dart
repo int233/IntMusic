@@ -10,7 +10,6 @@ class _ClientCacheSnapshot {
     required this.trackDetails,
     required this.albumDetails,
     required this.artistDetails,
-    required this.playlistDetails,
     required this.pendingDetailRefresh,
     required this.pendingDetailTargetCursors,
   });
@@ -23,7 +22,6 @@ class _ClientCacheSnapshot {
   final Map<int, Map<String, dynamic>> trackDetails;
   final Map<int, Map<String, dynamic>> albumDetails;
   final Map<int, Map<String, dynamic>> artistDetails;
-  final Map<int, Map<String, dynamic>> playlistDetails;
   final Map<String, int> pendingDetailRefresh;
   final Map<String, int> pendingDetailTargetCursors;
 
@@ -31,7 +29,7 @@ class _ClientCacheSnapshot {
 }
 
 class _ClientCacheStore {
-  static const _databaseVersion = 5;
+  static const _databaseVersion = 1;
   static Database? _database;
   static Future<void> _writeQueue = Future<void>.value();
 
@@ -52,7 +50,7 @@ class _ClientCacheStore {
     );
     await cacheDirectory.create(recursive: true);
     final database = await _factory().openDatabase(
-      '${cacheDirectory.path}${Platform.pathSeparator}client-cache-v1.sqlite3',
+      '${cacheDirectory.path}${Platform.pathSeparator}client-cache-v2.sqlite3',
       options: OpenDatabaseOptions(
         version: _databaseVersion,
         onConfigure: configureClientCacheDatabase,
@@ -97,38 +95,6 @@ class _ClientCacheStore {
           ''');
           await _createCatalogEntitiesTable(database);
           await _createDetailWarmStateTable(database);
-        },
-        onUpgrade: (database, oldVersion, _) async {
-          if (oldVersion < 2) {
-            await _createDetailWarmStateTable(database);
-          }
-          if (oldVersion < 3) {
-            await database.execute(
-              'ALTER TABLE sync_state ADD COLUMN catalog_epoch TEXT',
-            );
-            // v1/v2 rows contain logical IDs from the retired catalog model.
-            // Local folder preferences and SAF grants live in SharedPreferences
-            // and are intentionally preserved outside this database.
-            await database.delete('cache_entries');
-            await database.delete('search_index');
-            await database.delete('detail_warm_state');
-            await database.delete('sync_state');
-          }
-          if (oldVersion < 4) {
-            await _createCatalogEntitiesTable(database);
-            // Development builds deliberately rebuild the disposable Client
-            // projection instead of migrating legacy whole-list JSON rows.
-            await database.delete('cache_entries');
-            await database.delete('catalog_entities');
-            await database.delete('search_index');
-            await database.delete('detail_warm_state');
-            await database.delete('sync_state');
-          }
-          if (oldVersion < 5) {
-            await database.execute(
-              'ALTER TABLE sync_state ADD COLUMN event_cursor INTEGER NOT NULL DEFAULT 0',
-            );
-          }
         },
       ),
     );
@@ -210,7 +176,6 @@ class _ClientCacheStore {
       final trackDetails = decoded.trackDetails;
       final albumDetails = decoded.albumDetails;
       final artistDetails = decoded.artistDetails;
-      final playlistDetails = decoded.playlistDetails;
       final pendingDetailRefresh = <String, int>{};
       final pendingDetailTargetCursors = <String, int>{};
       final warmRows = await database.query(
@@ -236,7 +201,6 @@ class _ClientCacheStore {
         trackDetails: trackDetails,
         albumDetails: albumDetails,
         artistDetails: artistDetails,
-        playlistDetails: playlistDetails,
         pendingDetailRefresh: pendingDetailRefresh,
         pendingDetailTargetCursors: pendingDetailTargetCursors,
       );
@@ -250,7 +214,6 @@ class _ClientCacheStore {
         trackDetails: <int, Map<String, dynamic>>{},
         albumDetails: <int, Map<String, dynamic>>{},
         artistDetails: <int, Map<String, dynamic>>{},
-        playlistDetails: <int, Map<String, dynamic>>{},
         pendingDetailRefresh: <String, int>{},
         pendingDetailTargetCursors: <String, int>{},
       );
@@ -262,7 +225,6 @@ class _ClientCacheStore {
     final trackDetails = <int, Map<String, dynamic>>{};
     final albumDetails = <int, Map<String, dynamic>>{};
     final artistDetails = <int, Map<String, dynamic>>{};
-    final playlistDetails = <int, Map<String, dynamic>>{};
     for (final row in rows) {
       final kind = row['kind']?.toString() ?? '';
       final key = row['entity_key']?.toString() ?? '';
@@ -284,10 +246,6 @@ class _ClientCacheStore {
           if (id != null && payload is Map) {
             artistDetails[id] = payload.cast<String, dynamic>();
           }
-        case 'playlist_detail':
-          if (id != null && payload is Map) {
-            playlistDetails[id] = payload.cast<String, dynamic>();
-          }
       }
     }
     return _DecodedCacheRows(
@@ -295,7 +253,6 @@ class _ClientCacheStore {
       trackDetails: trackDetails,
       albumDetails: albumDetails,
       artistDetails: artistDetails,
-      playlistDetails: playlistDetails,
     );
   }
 
@@ -308,7 +265,7 @@ class _ClientCacheStore {
       'albums',
       'artists',
       'tracks',
-      'playlists',
+      'collections',
     ]) {
       values[key] = <dynamic>[];
     }
@@ -336,7 +293,7 @@ class _ClientCacheStore {
       'albums': (snapshot['albums'] as List?) ?? const <dynamic>[],
       'artists': (snapshot['artists'] as List?) ?? const <dynamic>[],
       'tracks': (snapshot['tracks'] as List?) ?? const <dynamic>[],
-      'playlists': (snapshot['playlists'] as List?) ?? const <dynamic>[],
+      'collections': (snapshot['collections'] as List?) ?? const <dynamic>[],
     };
     final values = <String, dynamic>{
       'playback_history':
@@ -409,18 +366,13 @@ class _ClientCacheStore {
                 if (value is Map && _intValue(value['id']) != null)
                   _intValue(value['id'])!.toString(),
             },
-            'playlist_detail': {
-              for (final value in catalogValues['playlists']!)
-                if (value is Map && _intValue(value['id']) != null)
-                  _intValue(value['id'])!.toString(),
-            },
           };
           final existingDetails = await transaction.query(
             'cache_entries',
             columns: <String>['kind', 'entity_key'],
             where:
                 "core_url = ? AND kind IN "
-                "('track_detail','album_detail','artist_detail','playlist_detail')",
+                "('track_detail','album_detail','artist_detail')",
             whereArgs: <Object?>[normalized],
           );
           for (final detail in existingDetails) {
@@ -488,7 +440,7 @@ class _ClientCacheStore {
         for (final artist in catalogValues['artists']!) {
           _addSearchInsert(batch, normalized, 'artist', artist);
         }
-        for (final playlist in catalogValues['playlists']!) {
+        for (final playlist in catalogValues['collections']!) {
           _addSearchInsert(batch, normalized, 'playlist', playlist);
         }
         await batch.commit(noResult: true);
@@ -599,7 +551,7 @@ class _ClientCacheStore {
     'albums' => 'album',
     'artists' => 'artist',
     'tracks' => 'track',
-    'playlists' => 'playlist',
+    'collections' => 'playlist',
     _ => null,
   };
 
@@ -607,7 +559,7 @@ class _ClientCacheStore {
     'album' => 'albums',
     'artist' => 'artists',
     'track' => 'tracks',
-    'playlist' => 'playlists',
+    'playlist' => 'collections',
     _ => null,
   };
 
@@ -809,7 +761,7 @@ class _ClientCacheStore {
         'tracks': const <dynamic>[],
         'albums': const <dynamic>[],
         'artists': const <dynamic>[],
-        'playlists': const <dynamic>[],
+        'collections': const <dynamic>[],
       };
     }
     final database = await _open();
@@ -841,7 +793,7 @@ class _ClientCacheStore {
       'tracks': <dynamic>[],
       'albums': <dynamic>[],
       'artists': <dynamic>[],
-      'playlists': <dynamic>[],
+      'collections': <dynamic>[],
     };
     for (final row in rows) {
       final payload = _decodeCachePayload(row['payload']);
@@ -850,7 +802,7 @@ class _ClientCacheStore {
         'track' => result['tracks'] as List<dynamic>,
         'album' => result['albums'] as List<dynamic>,
         'artist' => result['artists'] as List<dynamic>,
-        _ => result['playlists'] as List<dynamic>,
+        _ => result['collections'] as List<dynamic>,
       };
       target.add(payload.cast<String, dynamic>());
     }
@@ -887,12 +839,10 @@ class _DecodedCacheRows {
     required this.trackDetails,
     required this.albumDetails,
     required this.artistDetails,
-    required this.playlistDetails,
   });
 
   final Map<String, dynamic> values;
   final Map<int, Map<String, dynamic>> trackDetails;
   final Map<int, Map<String, dynamic>> albumDetails;
   final Map<int, Map<String, dynamic>> artistDetails;
-  final Map<int, Map<String, dynamic>> playlistDetails;
 }

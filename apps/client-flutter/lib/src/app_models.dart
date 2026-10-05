@@ -8,15 +8,24 @@ class _Destination {
   final IconData selectedIcon;
 }
 
-class _TrackActionScope extends InheritedWidget {
+class _TrackActionScope extends InheritedNotifier<SongDisplayState> {
   const _TrackActionScope({
     required this.onPlayNext,
     required this.onAddToQueue,
     required this.onPlayCollection,
     required this.onQueueCollection,
     required this.onDistributeCollection,
+    this.songDisplaySettings = const {},
+    this.onSetSongDisplaySettings,
+    SongDisplayState? displayState,
+    this.onSetDisplayMode,
+    this.onApplyTagMappings,
+    this.onOpenTrack,
+    this.onPlayTrack,
+    this.onPlayListSong,
+    this.catalogTracks = const [],
     required super.child,
-  });
+  }) : super(notifier: displayState);
 
   final Future<void> Function(int trackId) onPlayNext;
   final Future<void> Function(int trackId) onAddToQueue;
@@ -25,6 +34,16 @@ class _TrackActionScope extends InheritedWidget {
   final Future<void> Function(List<int> trackIds, bool playNext)
   onQueueCollection;
   final Future<void> Function(List<int> trackIds) onDistributeCollection;
+  final Map<String, dynamic> songDisplaySettings;
+  bool get mergeSameName => songDisplaySettings['merge_same_name'] == true;
+  SongDisplayState? get displayState => notifier;
+  final Future<void> Function(Map<String, dynamic>)? onSetSongDisplaySettings;
+  final Future<void> Function(int, String)? onSetDisplayMode;
+  final Future<void> Function()? onApplyTagMappings;
+  final Future<void> Function(int)? onOpenTrack;
+  final Future<void> Function(int)? onPlayTrack;
+  final Future<void> Function(int, List<dynamic>)? onPlayListSong;
+  final List<dynamic> catalogTracks;
 
   static _TrackActionScope? maybeOf(BuildContext context) {
     return context.dependOnInheritedWidgetOfExactType<_TrackActionScope>();
@@ -32,7 +51,11 @@ class _TrackActionScope extends InheritedWidget {
 
   @override
   bool updateShouldNotify(_TrackActionScope oldWidget) {
-    return onPlayNext != oldWidget.onPlayNext ||
+    return super.updateShouldNotify(oldWidget) ||
+        songDisplaySettings != oldWidget.songDisplaySettings ||
+        catalogTracks != oldWidget.catalogTracks ||
+        onSetDisplayMode != oldWidget.onSetDisplayMode ||
+        onPlayNext != oldWidget.onPlayNext ||
         onAddToQueue != oldWidget.onAddToQueue ||
         onPlayCollection != oldWidget.onPlayCollection ||
         onQueueCollection != oldWidget.onQueueCollection ||

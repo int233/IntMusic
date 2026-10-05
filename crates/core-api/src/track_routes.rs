@@ -223,8 +223,32 @@ pub(crate) async fn track_stream(
     Path(track_id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let (path, extension) = core_db::track_stream_source(state.pool(), track_id).await?;
-    stream_file_response(std::path::PathBuf::from(path), &extension, &headers).await
+    let source = readable_track_source(&state, track_id).await?;
+    stream_file_response(
+        std::path::PathBuf::from(source.path),
+        &source.extension,
+        &headers,
+    )
+    .await
+}
+
+/// Resolve a real, readable Core copy from the same song graph used by the UI.
+pub(crate) async fn readable_track_source(
+    state: &AppState,
+    track_id: i64,
+) -> Result<core_db::TrackSourceCandidate> {
+    for source in core_db::track_source_candidates(state.pool(), track_id).await? {
+        if let Ok(file) = tokio::fs::File::open(&source.path).await {
+            if file
+                .metadata()
+                .await
+                .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+            {
+                return Ok(source);
+            }
+        }
+    }
+    anyhow::bail!("No readable Core copy for track {track_id}")
 }
 
 pub(crate) async fn stream_file_response(
@@ -279,4 +303,48 @@ pub(crate) async fn stream_file_response(
         );
     }
     Ok(response)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct TrackDisplayUpdate {
+    mode: String,
+}
+
+pub(crate) async fn update_track_display(
+    State(state): State<AppState>,
+    Path(track_id): Path<i64>,
+    Json(update): Json<TrackDisplayUpdate>,
+) -> ApiResult<serde_json::Value> {
+    if !matches!(update.mode.as_str(), "inherit" | "merged" | "independent") {
+        return Err(anyhow::anyhow!("invalid song display mode").into());
+    }
+    core_db::set_track_display_mode(state.pool(), track_id, &update.mode).await?;
+    let cursor = state
+        .bump_library_revision("track display preference changed")
+        .await;
+    Ok(Json(json!({ "cursor": cursor })))
+}
+
+pub(crate) async fn update_track_favorite(
+    State(state): State<AppState>,
+    Path(track_id): Path<i64>,
+    Json(mut payload): Json<TrackFavoriteUpdate>,
+) -> ApiResult<protocol::TrackDetail> {
+    let config = state.config();
+    if payload.is_favorite && config.favorites.write_rating_on_favorite {
+        payload.user_rating = payload.user_rating.or(Some(100));
+        let path = core_db::track_file_path(state.pool(), track_id).await?;
+        let path_for_write = std::path::PathBuf::from(path);
+        tokio::task::spawn_blocking(move || {
+            library_scanner::write_rating_tag(&path_for_write, 100, 100)
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
+        core_db::update_track_tag_rating(state.pool(), track_id, 100, 100).await?;
+    }
+
+    let mut detail = core_db::set_track_favorite(state.pool(), track_id, payload).await?;
+    apply_favorite_settings_to_track(&config.favorites, &mut detail.track);
+    state.bump_library_revision("track_favorite_updated").await;
+    Ok(Json(detail))
 }

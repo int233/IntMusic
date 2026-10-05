@@ -1,6 +1,13 @@
 part of '../intmusic_client.dart';
 
 extension _DashboardBootstrap on _CoreDashboardState {
+  Map<int, bool> get _pendingFavoriteStates => {
+    for (final mutation in _offlineLibrary.outbox)
+      if (mutation.kind == 'favorite' &&
+          mutation.payload['is_favorite'] is bool)
+        mutation.trackId: mutation.payload['is_favorite'] as bool,
+  };
+
   Future<void> _refreshAll() async {
     bool connected;
     if (_tracks.isNotEmpty || _albums.isNotEmpty || _artists.isNotEmpty) {
@@ -26,8 +33,12 @@ extension _DashboardBootstrap on _CoreDashboardState {
           }) ??
           false;
     }
-    if (connected != true && _offlineLibrary.copies.isNotEmpty) {
-      await _activateLocalPlaybackFallback();
+    if (connected != true && _eventSocket == null) {
+      if (_offlineLibrary.copies.isNotEmpty) {
+        await _activateLocalPlaybackFallback();
+      } else {
+        _scheduleEventReconnect();
+      }
     }
   }
 
@@ -59,7 +70,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
       _trackDetailCache.addAll(cached.trackDetails);
       _albumDetailCache.addAll(cached.albumDetails);
       _artistDetailCache.addAll(cached.artistDetails);
-      _playlistDetailCache.addAll(cached.playlistDetails);
       _detailWarmAfterIds.addAll(cached.pendingDetailRefresh);
       _detailWarmTargetCursors.addAll(cached.pendingDetailTargetCursors);
       _detailRefreshScopes.addAll(cached.pendingDetailRefresh.keys);
@@ -73,11 +83,19 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _albums = (values['albums'] as List?) ?? _albums;
     _artists = (values['artists'] as List?) ?? _artists;
     _tracks = (values['tracks'] as List?) ?? _tracks;
-    _playlists = (values['playlists'] as List?) ?? _playlists;
+    _tracks = projectPendingFavorites(_tracks, _pendingFavoriteStates);
+    _songDisplayState.updateCatalog(_tracks, cursor: _cacheCursor);
     _outputs = (values['outputs'] as List?) ?? _outputs;
-    _zones = (values['zones'] as List?) ?? _zones;
+    _zones = ((values['zones'] as List?) ?? _zones)
+        .whereType<Map>()
+        .map((zone) => <String, dynamic>{..._asMap(zone), 'state': 'stopped'})
+        .toList();
     if (values['playback'] is Map) {
-      _playback = _withPlaybackTimestamp(_asMap(values['playback']));
+      // A cached transport is history, not evidence of a running decoder.
+      _playback = _withPlaybackTimestamp({
+        ..._asMap(values['playback']),
+        'state': 'stopped',
+      });
     }
     if (values['playback_queue'] is Map) {
       _playbackQueue = _asMap(values['playback_queue']);
@@ -97,6 +115,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
       _serverSettings = _asMap(settings['server']);
       _favoriteSettings = _asMap(settings['favorites']);
       _metadataSettings = _asMap(settings['metadata']);
+      _songDisplaySettings = _asMap(settings['song_display']);
     }
     if (values['status'] is Map) {
       _status = _asMap(values['status']);
@@ -113,21 +132,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
   }) {
     final nextServerId = snapshot['server_id']?.toString();
     final nextCatalogEpoch = snapshot['catalog_epoch']?.toString();
-    final serverChanged =
-        _cacheServerId != null &&
-        nextServerId != null &&
-        _cacheServerId != nextServerId;
-    if (serverChanged) {
-      _trackDetailCache.clear();
-      _albumDetailCache.clear();
-      _artistDetailCache.clear();
-      _playlistDetailCache.clear();
-      _searchResultCache.clear();
-      _detailWarmAfterIds.clear();
-      _detailWarmTargetCursors.clear();
-      _activeTrackDetail = null;
-      _activeTrackDetailId = null;
-    }
     _cacheServerId = nextServerId;
     _cacheCatalogEpoch = nextCatalogEpoch;
     artworkCacheCoordinator.registerServer(
@@ -135,10 +139,12 @@ extension _DashboardBootstrap on _CoreDashboardState {
       catalogEpoch: nextCatalogEpoch,
     );
     _cacheCursor = _intValue(snapshot['cursor']) ?? _cacheCursor;
+    _searchResultCache.clear();
     _albums = (snapshot['albums'] as List?) ?? const <dynamic>[];
     _artists = (snapshot['artists'] as List?) ?? const <dynamic>[];
     _tracks = (snapshot['tracks'] as List?) ?? const <dynamic>[];
-    _playlists = (snapshot['playlists'] as List?) ?? const <dynamic>[];
+    _tracks = projectPendingFavorites(_tracks, _pendingFavoriteStates);
+    _songDisplayState.updateCatalog(_tracks, cursor: _cacheCursor);
     _playbackHistory =
         (snapshot['playback_history'] as List?) ?? const <dynamic>[];
     _playbackStats = _asMap(snapshot['playback_stats']);
@@ -152,14 +158,19 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _serverSettings = _asMap(settings['server']);
     _favoriteSettings = _asMap(settings['favorites']);
     _metadataSettings = _asMap(settings['metadata']);
+    _songDisplaySettings = _asMap(settings['song_display']);
     final trackIds = _entityIds(_tracks);
     final albumIds = _entityIds(_albums);
     final artistIds = _entityIds(_artists);
-    final playlistIds = _entityIds(_playlists);
     _trackDetailCache.removeWhere((id, _) => !trackIds.contains(id));
     _albumDetailCache.removeWhere((id, _) => !albumIds.contains(id));
     _artistDetailCache.removeWhere((id, _) => !artistIds.contains(id));
-    _playlistDetailCache.removeWhere((id, _) => !playlistIds.contains(id));
+    if (_activeTrackDetailId != null &&
+        !trackIds.contains(_activeTrackDetailId)) {
+      _activeTrackDetail = null;
+      _activeTrackDetailId = null;
+    }
+    _verifiedLocalTrackIds.removeWhere((id) => !trackIds.contains(id));
     _reconcileTrackSummariesInDetails();
     _refreshTrackAvailabilityProjection();
     if (status != null) _status = status;
@@ -184,13 +195,13 @@ extension _DashboardBootstrap on _CoreDashboardState {
         _trackDetailCache[entry.key] = <String, dynamic>{
           ...entry.value,
           'track': summary,
+          'genres': summary['genres'],
         };
       }
     }
     for (final cache in <Map<int, Map<String, dynamic>>>[
       _albumDetailCache,
       _artistDetailCache,
-      _playlistDetailCache,
     ]) {
       for (final entry in cache.entries.toList(growable: false)) {
         final detailTracks = (entry.value['tracks'] as List?) ?? const [];
@@ -206,17 +217,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
         };
       }
     }
-  }
-
-  Map<String, dynamic> _snapshotForStorage(
-    Map<String, dynamic> snapshot, {
-    Map<String, dynamic>? status,
-    Map<String, dynamic>? diagnostics,
-  }) {
-    final stored = <String, dynamic>{...snapshot};
-    if (status != null) stored['status'] = status;
-    if (diagnostics != null) stored['diagnostics'] = diagnostics;
-    return stored;
   }
 
   Future<void> _handlePlatformCommand(_PlatformCommand command) async {
@@ -264,9 +264,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
         preferences.getString(_prefsTrackViewModeKey),
         fallback: _LibraryViewMode.list,
       );
-      final playlistViewMode = _viewModeFromPreference(
-        preferences.getString(_prefsPlaylistViewModeKey),
-      );
       final recentSearches =
           preferences.getStringList(_prefsRecentSearchesKey) ?? const [];
       final pinCurrentClientRegion =
@@ -311,7 +308,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
         _albumViewMode = albumViewMode;
         _artistViewMode = artistViewMode;
         _trackViewMode = trackViewMode;
-        _playlistViewMode = playlistViewMode;
         _pinCurrentClientRegion = pinCurrentClientRegion;
         _zoneRegionSort = zoneRegionSort;
         _diagnosticLoggingEnabled = diagnosticLoggingEnabled;

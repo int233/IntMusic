@@ -21,9 +21,12 @@ pub struct PlaybackSessionSnapshotV3 {
     pub transport: PlaybackTransportState,
     pub current_item_id: Option<Uuid>,
     pub position_ms: u64,
+    pub command_sequence: Option<u64>,
     pub mode: PlaybackSessionModeV3,
     pub shuffle_seed: u64,
     pub queue: Vec<PlaybackQueueItemV3>,
+    #[serde(default)]
+    pub queue_source: Option<crate::CollectionQueueSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_command_id: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
@@ -90,6 +93,10 @@ pub enum PlaybackSessionActionV3 {
         #[serde(default)]
         automatic: bool,
     },
+    /// Only the decoder that owns this command may complete its queue item.
+    Complete {
+        command_sequence: u64,
+    },
     Previous,
     ReplaceQueue {
         items: Vec<PlaybackQueueItemV3>,
@@ -100,6 +107,8 @@ pub enum PlaybackSessionActionV3 {
     /// command. This avoids exposing a half-applied queue when a weak link
     /// drops between separate replace and play requests.
     ReplaceQueueAndPlay {
+        #[serde(default)]
+        source: Option<crate::CollectionQueueSource>,
         items: Vec<PlaybackQueueItemV3>,
         start_item_id: Uuid,
         #[serde(default)]
@@ -201,6 +210,7 @@ mod tests {
     fn queue_replacement_and_play_is_one_tagged_command() {
         let item_id = Uuid::now_v7();
         let action = PlaybackSessionActionV3::ReplaceQueueAndPlay {
+            source: None,
             items: vec![PlaybackQueueItemV3 {
                 item_id,
                 track_id: 42,
