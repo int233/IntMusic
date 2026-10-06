@@ -477,6 +477,7 @@ class _LibraryToolbar extends StatefulWidget {
 
 class _LibraryToolbarState extends State<_LibraryToolbar> {
   final _queryController = TextEditingController();
+  bool _expanded = false;
 
   @override
   void dispose() {
@@ -569,9 +570,70 @@ class _LibraryToolbarState extends State<_LibraryToolbar> {
       ],
     );
 
+    if (useCompactAndroidRendering(context)) {
+      return Column(
+        children: [
+          SizedBox(
+            height: 44,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    widget.countLabel,
+                    key: const Key('library-count-label'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+                IconButton(
+                  tooltip: _tr(context, 'Filter tracks'),
+                  onPressed: () => setState(() => _expanded = !_expanded),
+                  icon: Icon(_expanded ? Icons.expand_less : Icons.search),
+                ),
+                PopupMenuButton<String>(
+                  tooltip: _tr(context, 'Sort'),
+                  icon: const Icon(Icons.sort),
+                  onSelected: widget.onSortChanged,
+                  itemBuilder: (_) => widget.sortOptions.entries
+                      .map(
+                        (entry) => CheckedPopupMenuItem(
+                          value: entry.key,
+                          checked: entry.key == widget.sortValue,
+                          child: Text(entry.value),
+                        ),
+                      )
+                      .toList(),
+                ),
+                IconButton(
+                  tooltip: widget.viewMode == _LibraryViewMode.list
+                      ? 'Grid'
+                      : 'List',
+                  onPressed: () => widget.onViewModeChanged(
+                    widget.viewMode == _LibraryViewMode.list
+                        ? _LibraryViewMode.grid
+                        : _LibraryViewMode.list,
+                  ),
+                  icon: Icon(
+                    widget.viewMode == _LibraryViewMode.list
+                        ? Icons.grid_view
+                        : Icons.view_list,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_expanded) ...[
+            search,
+            if (widget.action != null)
+              Align(alignment: Alignment.centerRight, child: widget.action!),
+          ],
+        ],
+      );
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact = constraints.maxWidth < 720;
+        final compact = constraints.maxWidth < 900;
         if (compact) {
           final veryCompact = constraints.maxWidth < 520;
           return Column(
@@ -713,13 +775,54 @@ class _AnimatedPageHost extends StatelessWidget {
   }
 }
 
-class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.message});
+class _ErrorBanner extends StatefulWidget {
+  const _ErrorBanner({required this.message, this.onDismiss});
+
+  final VoidCallback? onDismiss;
 
   final String message;
 
   @override
+  State<_ErrorBanner> createState() => _ErrorBannerState();
+}
+
+class _ErrorBannerState extends State<_ErrorBanner> {
+  Timer? _timer;
+  bool _dismissed = false;
+  void _restart() {
+    _timer?.cancel();
+    _dismissed = false;
+    _timer = Timer(const Duration(seconds: 8), _dismiss);
+  }
+
+  void _dismiss() {
+    if (!mounted) return;
+    _timer?.cancel();
+    setState(() => _dismissed = true);
+    widget.onDismiss?.call();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _restart();
+  }
+
+  @override
+  void didUpdateWidget(_ErrorBanner oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.message != widget.message) _restart();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    if (_dismissed) return const SizedBox.shrink();
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -729,7 +832,16 @@ class _ErrorBanner extends StatelessWidget {
           const Icon(Icons.error_outline),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(message, maxLines: 2, overflow: TextOverflow.ellipsis),
+            child: Text(
+              widget.message,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          IconButton(
+            tooltip: _tr(context, 'Close'),
+            onPressed: _dismiss,
+            icon: const Icon(Icons.close),
           ),
         ],
       ),

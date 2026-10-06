@@ -407,3 +407,33 @@ const _destinations = [
   ),
   _Destination('Settings', Icons.tune_outlined, Icons.tune),
 ];
+
+int _compareLibraryText(
+  Object? a,
+  Object? b, {
+  Object? secondaryA,
+  Object? secondaryB,
+}) {
+  final primary = (a?.toString() ?? '').toLowerCase().compareTo(
+    (b?.toString() ?? '').toLowerCase(),
+  );
+  if (primary != 0) {
+    return primary;
+  }
+  return (secondaryA?.toString() ?? '').toLowerCase().compareTo(
+    (secondaryB?.toString() ?? '').toLowerCase(),
+  );
+}
+
+int _compareLibraryNumber(
+  Object? a,
+  Object? b, {
+  Object? secondaryA,
+  Object? secondaryB,
+}) {
+  final primary = (_intValue(a) ?? 0).compareTo(_intValue(b) ?? 0);
+  if (primary != 0) {
+    return primary;
+  }
+  return _compareLibraryText(secondaryA, secondaryB);
+}

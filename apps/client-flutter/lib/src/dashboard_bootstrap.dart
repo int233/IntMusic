@@ -274,6 +274,10 @@ extension _DashboardBootstrap on _CoreDashboardState {
       final diagnosticLoggingEnabled =
           preferences.getBool(_prefsDiagnosticLoggingKey) ?? true;
       await ClientLog.initialize(enabled: diagnosticLoggingEnabled);
+      await _loadLogIdentity(preferences);
+      _configureRemoteLogging(
+        preferences.getBool('intmusic.diagnostics.upload') ?? false,
+      );
       var clientLibraryRoots = _decodeClientLibraryRoots(
         preferences.getString(_prefsClientLibraryRootsKey),
       );

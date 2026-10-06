@@ -20,6 +20,8 @@ class _SettingsPage extends StatelessWidget {
     required this.clientId,
     required this.diagnostics,
     required this.diagnosticLoggingEnabled,
+    this.remoteLoggingEnabled = false,
+    this.onRemoteLoggingChanged,
     required this.diagnosticLogPath,
     required this.language,
     required this.pinCurrentClientRegion,
@@ -65,6 +67,8 @@ class _SettingsPage extends StatelessWidget {
   final String clientId;
   final Map<String, dynamic>? diagnostics;
   final bool diagnosticLoggingEnabled;
+  final bool remoteLoggingEnabled;
+  final ValueChanged<bool>? onRemoteLoggingChanged;
   final String diagnosticLogPath;
   final _AppLanguage language;
   final bool pinCurrentClientRegion;
@@ -338,6 +342,14 @@ class _SettingsPage extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                _SettingsSwitchRow(
+                  key: const Key('remote-logging-setting'),
+                  value: remoteLoggingEnabled,
+                  title: '同步本机日志到 Core',
+                  subtitle:
+                      '仅控制此客户端，默认关闭。开启后批量同步诊断日志和慢帧记录，可通过 Core API 查看；关闭后停止上传并清空待传日志。',
+                  onChanged: (value) => onRemoteLoggingChanged?.call(value),
+                ),
                 _SettingsSwitchRow(
                   key: const Key('diagnostic-logging-setting'),
                   value: diagnosticLoggingEnabled,

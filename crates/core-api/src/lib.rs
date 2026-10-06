@@ -1,6 +1,7 @@
 mod artist_routes;
 mod artwork_routes;
 mod catalog_guard;
+mod client_log_routes;
 mod collection_routes;
 mod distribution_routes;
 mod events;
@@ -17,6 +18,7 @@ mod track_routes;
 
 pub(crate) use artist_routes::*;
 pub(crate) use artwork_routes::*;
+pub(crate) use client_log_routes::*;
 pub(crate) use collection_routes::*;
 pub(crate) use distribution_routes::*;
 pub(crate) use events::*;
@@ -126,6 +128,7 @@ struct AppStateInner {
     musicbrainz_gate: tokio::sync::Mutex<tokio::time::Instant>,
     distribution_claim_gate: tokio::sync::Mutex<()>,
     metadata_rules_gate: tokio::sync::Mutex<()>,
+    client_log_gate: tokio::sync::Mutex<()>,
     waveform_cache: tokio::sync::RwLock<HashMap<String, Vec<f32>>>,
     transcoder: Transcoder,
 }
@@ -180,6 +183,7 @@ impl AppState {
                 ),
                 distribution_claim_gate: tokio::sync::Mutex::new(()),
                 metadata_rules_gate: tokio::sync::Mutex::new(()),
+                client_log_gate: tokio::sync::Mutex::new(()),
                 waveform_cache: tokio::sync::RwLock::new(HashMap::new()),
                 transcoder,
             }),

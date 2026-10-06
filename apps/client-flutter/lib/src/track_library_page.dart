@@ -68,55 +68,82 @@ class _TracksPageState extends State<_TracksPage> {
     return false;
   }
 
+  Object? _projectionKey;
+  List<Map<String, dynamic>> _projectedTracks = [];
+  List<Map<String, dynamic>> _projectTracks(BuildContext context) {
+    final scope = _TrackActionScope.maybeOf(context);
+    final displayState = scope?.displayState;
+    final query = _query.trim().toLowerCase();
+    final key = (
+      widget.tracks,
+      displayState,
+      displayState?.revision,
+      query,
+      _sort,
+      scope?.mergeSameName,
+      scope?.songDisplaySettings['attribute_filter'],
+      scope?.songDisplaySettings['sort_by_mode'],
+    );
+    if (_projectionKey == key) return _projectedTracks;
+    _projectionKey = key;
+    final input = <String, dynamic>{
+      'tracks': widget.tracks
+          .map((value) => displayState?.project(_asMap(value)) ?? _asMap(value))
+          .toList(),
+      'query': query,
+      'sort': _sort,
+      'merge': scope?.mergeSameName ?? false,
+      'filter': scope?.songDisplaySettings['attribute_filter'] ?? 'all',
+      'sortByMode': scope?.songDisplaySettings['sort_by_mode'] == true,
+    };
+    if (widget.tracks.length < 500) {
+      return _projectedTracks = projectTrackLibrary(input);
+    }
+    _pendingProjection = (key, input);
+    _startProjection();
+    return _projectedTracks;
+  }
+
+  (Object, Map<String, dynamic>)? _pendingProjection;
+  bool _projecting = false;
+  Future<void> _startProjection() async {
+    if (_projecting) return;
+    _projecting = true;
+    try {
+      while (mounted && _pendingProjection != null) {
+        final (key, input) = _pendingProjection!;
+        _pendingProjection = null;
+        final watch = Stopwatch()..start();
+        final result = await compute(projectTrackLibrary, input);
+        ClientLog.event(
+          'ui.track_projection',
+          data: {
+            'elapsed_ms': watch.elapsedMilliseconds,
+            'count': result.length,
+          },
+        );
+        if (mounted && _projectionKey == key) {
+          setState(() => _projectedTracks = result);
+        }
+      }
+    } catch (error, stack) {
+      ClientLog.error('ui.track_projection.failed', error, stackTrace: stack);
+    } finally {
+      _projecting = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final compactPage = MediaQuery.sizeOf(context).width < 600;
     final query = _query.trim().toLowerCase();
-    final displayState = _TrackActionScope.maybeOf(context)?.displayState;
-    var tracks = widget.tracks
-        .map((value) => displayState?.project(_asMap(value)) ?? _asMap(value))
-        .where((item) {
-          if (query.isEmpty) {
-            return true;
-          }
-          final track = (item as Map).cast<String, dynamic>();
-          return '${track['title'] ?? ''}\u0000'
-                  '${track['artist_display'] ?? ''}\u0000'
-                  '${track['album_title'] ?? ''} ${track['genres'] ?? ''} ${songDisplayModeLabel(track['display_mode'])} ${track['display_mode'] ?? 'inherit'}'
-              .toLowerCase()
-              .contains(query);
-        })
-        .toList(growable: false);
-    tracks.sort((left, right) {
-      final a = (left as Map).cast<String, dynamic>();
-      final b = (right as Map).cast<String, dynamic>();
-      return switch (_sort) {
-        'artist' => _compareLibraryText(
-          a['artist_display'],
-          b['artist_display'],
-          secondaryA: a['title'],
-          secondaryB: b['title'],
-        ),
-        'album' => _compareLibraryText(
-          a['album_title'],
-          b['album_title'],
-          secondaryA: a['disc_number'],
-          secondaryB: b['disc_number'],
-        ),
-        'duration' => _compareLibraryNumber(
-          b['duration_ms'],
-          a['duration_ms'],
-          secondaryA: a['title'],
-          secondaryB: b['title'],
-        ),
-        _ => _compareLibraryText(a['title'], b['title']),
-      };
-    });
-    tracks = _displayTracks(context, tracks);
-    final visibleTrackIds = tracks
-        .map((item) => _intValue((item as Map)['id']))
-        .whereType<int>()
-        .toSet();
+    final tracks = _projectTracks(context);
+    final visibleTrackIds = !_selecting
+        ? const <int>{}
+        : tracks
+              .map((item) => _intValue((item as Map)['id']))
+              .whereType<int>()
+              .toSet();
     final allVisibleSelected =
         visibleTrackIds.isNotEmpty &&
         visibleTrackIds.every(_selectedTrackIds.contains);
@@ -207,7 +234,11 @@ class _TracksPageState extends State<_TracksPage> {
           ),
           Expanded(
             child: tracks.isEmpty
-                ? const Center(child: Text('No tracks'))
+                ? Center(
+                    child: _projecting
+                        ? const CircularProgressIndicator()
+                        : const Text('No tracks'),
+                  )
                 : widget.viewMode == _LibraryViewMode.grid
                 ? NotificationListener<ScrollNotification>(
                     onNotification: _handleScrollNotification,
@@ -285,7 +316,11 @@ class _TracksPageState extends State<_TracksPage> {
                                 ),
                                 scrollCacheExtent:
                                     const ScrollCacheExtent.pixels(220),
-                                itemExtent: compactList ? 89 : 67,
+                                itemExtent: compactList
+                                    ? (useCompactAndroidRendering(context)
+                                          ? 65
+                                          : 89)
+                                    : 67,
                                 itemCount: tracks.length,
                                 itemBuilder: (context, index) {
                                   final track = (tracks[index] as Map)
@@ -619,18 +654,24 @@ class _TrackTableRow extends StatelessWidget {
             : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
-          onTap: selectionMode ? onSelectionChanged : onTap,
+          onTap: selectionMode
+              ? onSelectionChanged
+              : (useCompactAndroidRendering(context) ? onPlay : onTap),
+          onLongPress: selectionMode ? null : onTap,
           borderRadius: BorderRadius.circular(8),
           child: SizedBox(
-            height: 88,
+            height: useCompactAndroidRendering(context) ? 64 : 88,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              padding: EdgeInsets.symmetric(
+                horizontal: 6,
+                vertical: useCompactAndroidRendering(context) ? 4 : 6,
+              ),
               child: Row(
                 children: [
                   _ArtworkTile(
                     title: title,
                     subtitle: artist,
-                    size: 52,
+                    size: useCompactAndroidRendering(context) ? 40 : 52,
                     icon: Icons.music_note_outlined,
                     imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
                     deferImage: deferArtwork,
@@ -662,8 +703,10 @@ class _TrackTableRow extends StatelessWidget {
                                 color: IntMusicTheme.of(context).textSecondary,
                               ),
                         ),
-                        const SizedBox(height: 4),
-                        _TrackAvailabilityBadge(track: track, compact: true),
+                        if (!useCompactAndroidRendering(context)) ...[
+                          const SizedBox(height: 4),
+                          _TrackAvailabilityBadge(track: track, compact: true),
+                        ],
                       ],
                     ),
                   ),
@@ -679,6 +722,7 @@ class _TrackTableRow extends StatelessWidget {
                     _TrackActions(
                       track: track,
                       compact: true,
+                      showPlayButton: !useCompactAndroidRendering(context),
                       onToggleFavorite: onToggleFavorite,
                       onAddToPlaylist: onAddToPlaylist,
                       onPlay: onPlay,
@@ -809,6 +853,7 @@ class _TrackActions extends StatefulWidget {
     this.onAddToPlaylist,
     this.onPlay,
     this.compact = false,
+    this.showPlayButton = true,
   });
 
   final Map<String, dynamic> track;
@@ -816,6 +861,7 @@ class _TrackActions extends StatefulWidget {
   final VoidCallback? onAddToPlaylist;
   final VoidCallback? onPlay;
   final bool compact;
+  final bool showPlayButton;
 
   @override
   State<_TrackActions> createState() => _TrackActionsState();
@@ -921,7 +967,7 @@ class _TrackActionsState extends State<_TrackActions> {
               ),
           ],
         ),
-        if (widget.onPlay != null)
+        if (widget.onPlay != null && widget.showPlayButton)
           _AppTooltip(
             message: 'Play',
             child: IconButton(
@@ -1031,34 +1077,4 @@ enum _TrackMoreAction {
   addToQueue,
   addToPlaylist,
   distribute,
-}
-
-int _compareLibraryText(
-  Object? a,
-  Object? b, {
-  Object? secondaryA,
-  Object? secondaryB,
-}) {
-  final primary = (a?.toString() ?? '').toLowerCase().compareTo(
-    (b?.toString() ?? '').toLowerCase(),
-  );
-  if (primary != 0) {
-    return primary;
-  }
-  return (secondaryA?.toString() ?? '').toLowerCase().compareTo(
-    (secondaryB?.toString() ?? '').toLowerCase(),
-  );
-}
-
-int _compareLibraryNumber(
-  Object? a,
-  Object? b, {
-  Object? secondaryA,
-  Object? secondaryB,
-}) {
-  final primary = (_intValue(a) ?? 0).compareTo(_intValue(b) ?? 0);
-  if (primary != 0) {
-    return primary;
-  }
-  return _compareLibraryText(secondaryA, secondaryB);
 }

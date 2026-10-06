@@ -172,7 +172,11 @@ extension _DashboardShell on _CoreDashboardState {
           onSelectRecentSearch: _selectRecentSearch,
           onClearSearch: _clearSearch,
         ),
-        if (_error != null) _ErrorBanner(message: _error!),
+        if (_error != null)
+          _ErrorBanner(
+            message: _error!,
+            onDismiss: () => _mutate(() => _error = null),
+          ),
         body,
       ],
     );
@@ -392,6 +396,9 @@ extension _DashboardShell on _CoreDashboardState {
           clientId: _clientId,
           diagnostics: _diagnostics,
           diagnosticLoggingEnabled: _diagnosticLoggingEnabled,
+          remoteLoggingEnabled: _remoteLoggingEnabled,
+          onRemoteLoggingChanged: (value) =>
+              unawaited(_setRemoteLogging(value)),
           diagnosticLogPath: _diagnosticLogPath,
           language: _language,
           pinCurrentClientRegion: _pinCurrentClientRegion,

@@ -153,6 +153,39 @@ void main() {
     expect(preferences.getBool('intmusic.diagnostics.logging'), isFalse);
   });
 
+  testWidgets('remote log upload is local opt-in and persists across toggles', (
+    tester,
+  ) async {
+    await pumpDesktop(tester);
+    await tester.tap(find.byIcon(Icons.tune_outlined).first);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 280));
+    final setting = find.byKey(const Key('remote-logging-setting'));
+    final scroll = find.byKey(const Key('settings-scroll-view'));
+    await tester.scrollUntilVisible(
+      setting,
+      280,
+      scrollable: find
+          .descendant(of: scroll, matching: find.byType(Scrollable))
+          .first,
+    );
+    await tester.ensureVisible(setting);
+    await tester.pump();
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.getBool('intmusic.diagnostics.upload') ?? false,
+      isFalse,
+    );
+    await tester.tap(setting);
+    await tester.pump();
+    expect(preferences.getBool('intmusic.diagnostics.upload'), isTrue);
+    await tester.tap(setting);
+    await tester.pump();
+    expect(preferences.getBool('intmusic.diagnostics.upload'), isFalse);
+    await tester.pumpWidget(const SizedBox());
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('shows player and system volume controls together', (
     tester,
   ) async {

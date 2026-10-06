@@ -272,3 +272,45 @@ Widget compactPlaybackForTesting({Map<String, dynamic>? playback}) =>
 @visibleForTesting
 Object parsedLyricsForTesting(String text, {int offset = 0}) =>
     _parseLyricLines(text, offsetMs: offset);
+
+@visibleForTesting
+Widget compactLibraryShellForTesting(
+  List<Map<String, dynamic>> tracks, {
+  VoidCallback? onDismiss,
+}) => Column(
+  children: [
+    const SizedBox(height: 56, child: Center(child: Text('歌曲'))),
+    if (onDismiss != null)
+      _ErrorBanner(
+        message: 'Playback command failed: TimeoutException after 0:00:04',
+        onDismiss: onDismiss,
+      ),
+    Expanded(child: responsiveTracksLibraryForTesting(tracks)),
+    _PlaybackBar(
+      coreBaseUrl: '',
+      state: const {'state': 'stopped'},
+      trackDetail: null,
+      targetLabel: 'This device',
+      playbackMode: _PlaybackMode.sequential,
+      volumeState: const _DualVolumeState(
+        playerVolume: 1,
+        playerMuted: false,
+        systemVolume: 1,
+        systemMuted: false,
+        systemVolumeSupported: true,
+      ),
+      onResume: () {},
+      onPause: () {},
+      onPrevious: () {},
+      onNext: () {},
+      onSeek: (_) async {},
+      onVolumeChanged: (_, _) {},
+      onToggleMute: (_) {},
+      onCycleMode: () {},
+      onShowModeMenu: (_) {},
+      onShowQueue: (_) {},
+      onShowDevices: (_) {},
+      onOpenPlayback: () {},
+    ),
+  ],
+);

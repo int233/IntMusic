@@ -3,6 +3,13 @@ use super::*;
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(status))
+        .route("/diagnostics/clients", get(list_client_logs))
+        .route(
+            "/diagnostics/clients/{id}/logs",
+            get(read_client_logs)
+                .post(append_client_logs)
+                .layer(DefaultBodyLimit::max(128 * 1024)),
+        )
         .route(
             "/collections",
             get(list_collections).post(create_collection),

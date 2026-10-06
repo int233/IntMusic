@@ -28,9 +28,12 @@ import 'core/json_values.dart';
 import 'core/library_sync.dart';
 import 'core/release_media.dart';
 import 'core/song_display.dart';
+import 'core/track_library_projection.dart';
 import 'core/collections.dart';
 import 'core/serial_task_queue.dart';
 import 'core/logging/client_log.dart';
+import 'core/logging/log_uploader.dart';
+import 'package:flutter/scheduler.dart';
 import 'core/network/core_api_client.dart';
 import 'core/playback_agent.dart';
 import 'core/playback/renderer_session.dart';
@@ -99,6 +102,7 @@ part 'src/i18n.dart';
 part 'src/platform_integration.dart';
 part 'src/renderer_audio.dart';
 part 'src/dashboard_bootstrap.dart';
+part 'src/dashboard_diagnostics.dart';
 part 'src/dashboard_navigation.dart';
 part 'src/dashboard_artwork_cache.dart';
 part 'src/dashboard_catalog_identity.dart';
@@ -317,6 +321,11 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, int> _detailWarmTargetCursors = <String, int>{};
   bool _localPlaybackFallbackActive = false;
   final Set<int> _verifiedLocalTrackIds = <int>{};
+  String _logClientId = '';
+  bool _remoteLoggingEnabled = false;
+  LogUploader? _logUploader;
+  DateTime? _lastSlowFrameLog;
+  void Function(List<FrameTiming>)? _frameTimingsCallback;
   bool _diagnosticLoggingEnabled = true;
   String _diagnosticLogPath = '';
 
@@ -355,7 +364,11 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   void _mutate(VoidCallback mutation) {
     if (mounted) {
+      final previousError = _error;
       setState(mutation);
+      if (_error != null && _error != previousError) {
+        ClientLog.event('ui.error', level: 'error', message: _error);
+      }
     }
   }
 
@@ -387,6 +400,7 @@ class _CoreDashboardState extends State<CoreDashboard>
 
   @override
   void dispose() {
+    _disposeRemoteLogging();
     WidgetsBinding.instance.removeObserver(this);
     _taskScheduler.dispose();
     CoreApiClient.closeAll();

@@ -4,6 +4,87 @@ import 'package:intmusic_client/intmusic_client.dart';
 import 'package:intmusic_client/src/app_theme.dart';
 
 void main() {
+  testWidgets('240dp and 360dp shells leave room for multiple readable songs', (
+    tester,
+  ) async {
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final tracks = List.generate(
+      30,
+      (id) => <String, dynamic>{
+        'id': id,
+        'title': 'Song $id',
+        'artist_display': 'Taylor Swift',
+        'album_title': 'Lover',
+        'duration_ms': 180000,
+      },
+    );
+    for (final width in [240.0, 360.0]) {
+      tester.view.physicalSize = Size(width, width * 1280 / 720);
+      tester.view.devicePixelRatio = 1;
+      for (final scale in [1.0, 1.3]) {
+        var dismissed = false;
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: buildIntMusicTheme(platform: TargetPlatform.android),
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: TextScaler.linear(scale)),
+              child: child!,
+            ),
+            home: Scaffold(
+              body: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: compactLibraryShellForTesting(tracks),
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull, reason: '$width / $scale');
+        final visible = find.textContaining('Song ').hitTestable();
+        expect(visible.evaluate().length, greaterThanOrEqualTo(3));
+        expect(tester.getSize(visible.first).width, greaterThan(60));
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: buildIntMusicTheme(platform: TargetPlatform.android),
+            home: Scaffold(
+              body: compactLibraryShellForTesting(
+                tracks,
+                onDismiss: () => dismissed = true,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(Icons.close).first);
+        expect(dismissed, isTrue);
+        expect(tester.takeException(), isNull);
+      }
+    }
+  });
+  testWidgets('errors automatically release the occupied screen space', (
+    tester,
+  ) async {
+    var dismissed = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: compactLibraryShellForTesting(
+            [],
+            onDismiss: () => dismissed = true,
+          ),
+        ),
+      ),
+    );
+    expect(find.textContaining('Playback command failed'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 8));
+    expect(dismissed, isTrue);
+    expect(find.textContaining('Playback command failed'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('small Android surfaces avoid blur but desktop keeps it', (
     tester,
   ) async {

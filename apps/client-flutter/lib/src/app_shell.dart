@@ -166,6 +166,65 @@ class _PlaybackBar extends StatelessWidget {
     final canNavigate = hasTrack;
     final compactScreen = MediaQuery.sizeOf(context).width < 560;
 
+    if (useCompactAndroidRendering(context)) {
+      return Material(
+        color: IntMusicTheme.of(context).surface,
+        child: SizedBox(
+          height: 60,
+          child: Row(
+            children: [
+              const SizedBox(width: 8),
+              Expanded(
+                child: InkWell(
+                  onTap: onOpenPlayback,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodyMedium,
+                        ),
+                        Text(
+                          artist,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: _tr(context, isPaused ? 'Resume' : 'Pause'),
+                onPressed: hasTrack ? (isPaused ? onResume : onPause) : null,
+                icon: Icon(
+                  isPaused || !hasTrack ? Icons.play_arrow : Icons.pause,
+                ),
+              ),
+              IconButton(
+                tooltip: _tr(context, 'Next'),
+                onPressed: canNavigate ? onNext : null,
+                icon: const Icon(Icons.skip_next),
+              ),
+              Builder(
+                builder: (buttonContext) => IconButton(
+                  tooltip: _tr(context, 'Queue'),
+                  onPressed: () => onShowQueue(buttonContext),
+                  icon: const Icon(Icons.queue_music),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final bar = Padding(
       padding: EdgeInsets.fromLTRB(
         compactScreen ? 8 : 10,

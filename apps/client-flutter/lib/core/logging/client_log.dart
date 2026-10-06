@@ -4,7 +4,7 @@ import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
 
-/// Lightweight, local-only JSON Lines diagnostics for the client.
+/// Bounded JSON Lines diagnostics with an optional remote sink.
 ///
 /// Writes are serialized away from the playback path and the active log is
 /// rotated before it grows beyond 5 MiB. No audio, artwork, credentials, or
@@ -15,6 +15,7 @@ class ClientLog {
   static const int _maxPendingLines = 1024;
   static const int _writeBatchSize = 128;
 
+  static void Function(Map<String, Object?>)? remoteSink;
   static bool _enabled = true;
   static File? _file;
   static int _estimatedBytes = 0;
@@ -60,15 +61,18 @@ class ClientLog {
     String? message,
     Map<String, Object?> data = const <String, Object?>{},
   }) {
-    if (!_enabled || _file == null) return;
+    if ((!_enabled || _file == null) && remoteSink == null) return;
     final sanitized = <String, Object?>{
       'timestamp': DateTime.now().toUtc().toIso8601String(),
       'sequence': ++_sequence,
       'level': level,
       'event': name,
-      if (message != null && message.isNotEmpty) 'message': message,
+      if (message != null && message.isNotEmpty)
+        'message': _sanitizeValue('message', message),
       if (data.isNotEmpty) 'data': _sanitize(data),
     };
+    remoteSink?.call(sanitized);
+    if (!_enabled || _file == null) return;
     final line = '${jsonEncode(sanitized)}\n';
     if (_pendingLines.length >= _maxPendingLines) {
       _droppedLines += 1;

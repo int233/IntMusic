@@ -5,6 +5,13 @@ import 'serial_task_queue.dart';
 /// The catalog owns saved modes; edits take effect immediately, including on
 /// cached detail pages. A saved edit stays visible until a snapshot confirms it.
 class SongDisplayState extends ChangeNotifier {
+  int revision = 0;
+  @override
+  void notifyListeners() {
+    revision++;
+    super.notifyListeners();
+  }
+
   final _writes = SerialTaskQueue();
   Map<String, String> _catalog = {};
   final _confirmed = <String, ({String mode, int cursor})>{};
@@ -29,15 +36,14 @@ class SongDisplayState extends ChangeNotifier {
 
   Map<String, dynamic> project(Map<String, dynamic> track) {
     final key = _key(track);
-    return {
-      ...track,
-      'display_mode':
-          _pending[key]?.mode ??
-          _confirmed[key]?.mode ??
-          _catalog[key] ??
-          track['display_mode'] ??
-          'inherit',
-    };
+    final mode =
+        _pending[key]?.mode ??
+        _confirmed[key]?.mode ??
+        _catalog[key] ??
+        track['display_mode'] ??
+        'inherit';
+    if (track['display_mode'] == mode) return track;
+    return {...track, 'display_mode': mode};
   }
 
   Future<void> setMode(
