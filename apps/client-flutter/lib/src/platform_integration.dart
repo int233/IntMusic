@@ -287,14 +287,12 @@ class _IntMusicPlatform {
     required String suggestedName,
     required String mimeType,
   }) async {
-    final saved = await _channel.invokeMethod<bool>(
-      'saveFile',
-      <String, dynamic>{
-        'sourcePath': sourcePath,
-        'suggestedName': suggestedName,
-        'mimeType': mimeType,
-      },
-    );
+    final arguments = <String, dynamic>{
+      'sourcePath': sourcePath,
+      'suggestedName': suggestedName,
+      'mimeType': mimeType,
+    };
+    final saved = await _channel.invokeMethod<bool>('saveFile', arguments);
     return saved == true;
   }
 
