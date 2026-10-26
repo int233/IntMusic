@@ -102,10 +102,10 @@ class _IntMusicPlatform {
 
   Future<Map<dynamic, dynamic>> deviceIdentity() async {
     try {
-      return await _channel
-              .invokeMapMethod<dynamic, dynamic>('getDeviceIdentity')
-              .timeout(const Duration(seconds: 3)) ??
-          const {};
+      final identity = await _channel
+          .invokeMapMethod<dynamic, dynamic>('getDeviceIdentity')
+          .timeout(const Duration(seconds: 3));
+      return identity ?? const {};
     } on MissingPluginException {
       return const {};
     } on PlatformException catch (error) {
