@@ -9,6 +9,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.webkit.MimeTypeMap
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -49,6 +50,20 @@ class MainActivity : FlutterActivity() {
         IntMusicPlatformBridge.channel = platformChannel
         platformChannel.setMethodCallHandler { call, result ->
             when (call.method) {
+                "getDeviceIdentity" -> {
+                    val deviceName = runCatching {
+                        Settings.Global.getString(contentResolver, "device_name")
+                    }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+                    result.success(
+                        mapOf(
+                            "stableId" to runCatching {
+                                Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+                            }.getOrNull(),
+                            "displayName" to (deviceName ?: Build.MODEL),
+                        ),
+                    )
+                }
+
                 "initialize" -> {
                     result.success(
                         mapOf(

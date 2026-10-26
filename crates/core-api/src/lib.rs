@@ -13,6 +13,7 @@ mod renderers;
 mod router;
 mod server;
 mod settings_routes;
+mod status_cache;
 mod sync_routes;
 mod track_routes;
 
@@ -115,6 +116,7 @@ struct AppStateInner {
     pool: DbPool,
     started_at: chrono::DateTime<Utc>,
     library_revision: AtomicU64,
+    library_counts: RwLock<protocol::LibraryCounts>,
     event_cursor: AtomicU64,
     event_journal_tx: mpsc::UnboundedSender<EventEnvelope>,
     events: broadcast::Sender<EventEnvelope>,
@@ -168,6 +170,7 @@ impl AppState {
                 pool,
                 started_at: Utc::now(),
                 library_revision: AtomicU64::new(1),
+                library_counts: RwLock::new(protocol::LibraryCounts::default()),
                 event_cursor: AtomicU64::new(0),
                 event_journal_tx,
                 events,

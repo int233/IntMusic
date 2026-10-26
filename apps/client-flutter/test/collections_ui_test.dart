@@ -67,6 +67,7 @@ class _WidgetStore extends CollectionStore {
   }
 
   final int total = 240;
+  List<JsonMap>? planTracks;
   @override
   Future<JsonMap> load(int id, {int count = 50, bool fresh = false}) async =>
       pages[id]!;
@@ -84,11 +85,41 @@ class _WidgetStore extends CollectionStore {
     List<int>? entityIds,
   }) async => {
     'source': {'plan_id': 'plan'},
-    'tracks': [for (var i = 1; i <= total; i++) collectionSong(i)],
+    'tracks':
+        planTracks ?? [for (var i = 1; i <= total; i++) collectionSong(i)],
   };
 }
 
 void main() {
+  testWidgets('collection column header remains pinned while songs scroll', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1200, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final store = _WidgetStore();
+    addTearDown(store.dispose);
+    store.pages[1]!['items'] = [
+      for (var i = 1; i <= 80; i++)
+        {'entity_id': i, 'entity_type': 'track', 'data': collectionSong(i)},
+    ];
+    await tester.pumpWidget(
+      MaterialApp(home: Scaffold(body: collectionPageForTesting(store))),
+    );
+    await tester.pumpAndSettle();
+    final scroll = find.byType(CustomScrollView).first;
+    await tester.drag(scroll, const Offset(0, -600));
+    await tester.pumpAndSettle();
+    final header = find.byKey(const Key('collection-track-header'));
+    final top = tester.getTopLeft(header).dy;
+    expect(header.hitTestable(), findsOneWidget);
+    await tester.drag(scroll, const Offset(0, -400));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(header).dy, top);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('home sections update in place on phone and desktop', (
     tester,
   ) async {
@@ -174,4 +205,103 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+  testWidgets('collection play all skips offline songs', (tester) async {
+    final store = _WidgetStore()
+      ..planTracks = [
+        {...collectionSong(1), 'is_available': false},
+        collectionSong(2),
+      ];
+    addTearDown(store.dispose);
+    int? selected;
+    List<dynamic>? queue;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: collectionPageForTesting(
+            store,
+            onPlay: (id, tracks, _) async {
+              selected = id;
+              queue = tracks;
+            },
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('播放全部'));
+    await tester.pumpAndSettle();
+    expect(selected, 2);
+    expect(queue?.length, 1);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+    'click keeps release selection when its file representative changes',
+    (tester) async {
+      final store = _WidgetStore()
+        ..planTracks = [
+          collectionSong(1),
+          {...collectionSong(202), 'release_identity_id': 2},
+        ];
+      addTearDown(store.dispose);
+      int? selected;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: collectionPageForTesting(
+              store,
+              onPlay: (id, _, _) async => selected = id,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final row = find.ancestor(
+        of: find.text('Song 2'),
+        matching: find.byWidgetPredicate(
+          (w) => w.runtimeType.toString() == '_SheetTrackRow',
+        ),
+      );
+      await tester.tap(
+        find.descendant(of: row, matching: find.byIcon(Icons.play_arrow)).first,
+      );
+      await tester.pumpAndSettle();
+      expect(selected, 202);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets('clicking offline song never silently plays first song', (
+    tester,
+  ) async {
+    final store = _WidgetStore()
+      ..planTracks = [
+        collectionSong(1),
+        {...collectionSong(2), 'is_available': false},
+      ];
+    addTearDown(store.dispose);
+    int? selected;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: collectionPageForTesting(
+            store,
+            onPlay: (id, _, _) async => selected = id,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final row = find.ancestor(
+      of: find.text('Song 2'),
+      matching: find.byWidgetPredicate(
+        (w) => w.runtimeType.toString() == '_SheetTrackRow',
+      ),
+    );
+    await tester.tap(
+      find.descendant(of: row, matching: find.byIcon(Icons.play_arrow)).first,
+    );
+    await tester.pumpAndSettle();
+    expect(selected, isNull);
+    expect(find.textContaining('当前没有在线副本'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
 }

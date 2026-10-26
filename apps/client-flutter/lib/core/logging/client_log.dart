@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
+import 'error_history.dart';
 
 /// Bounded JSON Lines diagnostics with an optional remote sink.
 ///
@@ -10,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 /// rotated before it grows beyond 5 MiB. No audio, artwork, credentials, or
 /// request bodies are recorded.
 class ClientLog {
+  static final errors = ErrorHistory();
   static const int _maxBytes = 5 * 1024 * 1024;
   static const int _retainedFiles = 3;
   static const int _maxPendingLines = 1024;
@@ -32,6 +34,7 @@ class ClientLog {
     final support = await getApplicationSupportDirectory();
     final directory = Directory('${support.path}${Platform.pathSeparator}logs');
     await directory.create(recursive: true);
+    await errors.initialize(directory);
     _file = File(
       '${directory.path}${Platform.pathSeparator}client-playback.jsonl',
     );
@@ -61,7 +64,11 @@ class ClientLog {
     String? message,
     Map<String, Object?> data = const <String, Object?>{},
   }) {
-    if ((!_enabled || _file == null) && remoteSink == null) return;
+    if (level != 'error' &&
+        (!_enabled || _file == null) &&
+        remoteSink == null) {
+      return;
+    }
     final sanitized = <String, Object?>{
       'timestamp': DateTime.now().toUtc().toIso8601String(),
       'sequence': ++_sequence,
@@ -71,6 +78,7 @@ class ClientLog {
         'message': _sanitizeValue('message', message),
       if (data.isNotEmpty) 'data': _sanitize(data),
     };
+    if (level == 'error') errors.record(sanitized);
     remoteSink?.call(sanitized);
     if (!_enabled || _file == null) return;
     final line = '${jsonEncode(sanitized)}\n';
@@ -104,6 +112,7 @@ class ClientLog {
   }
 
   static Future<void> exportTo(String destinationPath) async {
+    await errors.flush();
     await _drainFuture.catchError((_) {});
     final source = _file;
     if (source == null || !await source.exists()) {

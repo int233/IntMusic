@@ -11,6 +11,7 @@ class FakeEngine implements AudioEngine {
   Future<void> Function()? onOpen;
   bool disposed = false;
   int stops = 0;
+  int nativePosition = 0;
   @override
   Stream<bool> get completed => completedEvents.stream;
   @override
@@ -56,7 +57,7 @@ class FakeEngine implements AudioEngine {
   @override
   Future<void> setVolume(double volume) async {}
   @override
-  Future<int?> currentPositionMs() async => 0;
+  Future<int?> currentPositionMs() async => nativePosition;
   @override
   Future<int?> durationMs() async => 315360;
   @override
@@ -178,6 +179,27 @@ void main() {
     expect(session.snapshot.phase, RendererPhase.stopped);
     expect(session.snapshot.positionMs, 0);
   });
+  test(
+    'missing position callbacks do not stop an advancing native decoder',
+    () async {
+      final engine = FakeEngine();
+      final guarded = RendererSession(
+        createEngine: () async => engine,
+        stallTimeout: Duration.zero,
+      );
+      await guarded.open('long-track');
+      engine.nativePosition = 1200;
+      final recovered = guarded.states.firstWhere((s) => s.positionMs == 1200);
+      await recovered.timeout(const Duration(seconds: 2));
+      expect(guarded.snapshot.phase, RendererPhase.playing);
+      expect(engine.stops, 0);
+      await guarded.pause();
+      engine.nativePosition = 2000;
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(guarded.snapshot.phase, RendererPhase.paused);
+      await guarded.dispose();
+    },
+  );
   test('lost progress is detected even when playing remains true', () async {
     final engine = FakeEngine();
     final stalled = RendererSession(

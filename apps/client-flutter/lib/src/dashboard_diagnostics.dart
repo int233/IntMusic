@@ -1,19 +1,6 @@
 part of '../intmusic_client.dart';
 
 extension _DashboardDiagnostics on _CoreDashboardState {
-  Future<void> _loadLogIdentity(SharedPreferences preferences) async {
-    _logClientId =
-        preferences.getString('intmusic.diagnostics.client_id') ?? '';
-    if (_logClientId.isNotEmpty) return;
-    final random = Random.secure();
-    final suffix = List.generate(
-      12,
-      (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
-    ).join();
-    _logClientId = 'flutter-${Platform.operatingSystem}-$suffix';
-    await preferences.setString('intmusic.diagnostics.client_id', _logClientId);
-  }
-
   void _configureRemoteLogging(bool enabled) {
     if (!mounted) return;
     if (_frameTimingsCallback != null) {
@@ -23,7 +10,7 @@ extension _DashboardDiagnostics on _CoreDashboardState {
     _remoteLoggingEnabled = enabled;
     _logUploader ??= LogUploader((events) async {
       await _api.postJson(
-        '/diagnostics/clients/${Uri.encodeComponent(_logClientId)}/logs',
+        '/diagnostics/clients/${Uri.encodeComponent(_clientId)}/logs',
         {'events': events},
         requestTimeout: const Duration(seconds: 4),
       );
@@ -36,7 +23,7 @@ extension _DashboardDiagnostics on _CoreDashboardState {
       ClientLog.event(
         'client.log.upload_enabled',
         data: {
-          'client_id': _logClientId,
+          'client_id': _clientId,
           'renderer_id': _clientId,
           'name': _clientAliasController.text,
           'platform': Platform.operatingSystem,
@@ -50,7 +37,6 @@ extension _DashboardDiagnostics on _CoreDashboardState {
 
   Future<void> _setRemoteLogging(bool enabled) async {
     final preferences = _preferences ?? await SharedPreferences.getInstance();
-    await _loadLogIdentity(preferences);
     await preferences.setBool('intmusic.diagnostics.upload', enabled);
     if (!mounted) return;
     _mutate(() => _configureRemoteLogging(enabled));

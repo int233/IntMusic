@@ -47,6 +47,13 @@ extension _DashboardBootstrap on _CoreDashboardState {
       onCommand: _handlePlatformCommand,
       onSeek: _seekPlayback,
     );
+    await _initializeDeviceIdentity();
+    if (!mounted) return;
+    _rendererAudioInitialization = widget.enableAudioRenderer
+        ? _initializeRendererAudio()
+        : Future<void>.sync(() {
+            _rendererAudioDevicesByOutput[_clientOutputId] = AudioDevice.auto();
+          });
     await _loadSavedCoreUrl();
     await _loadClientCache();
     await _rendererAudioInitialization;
@@ -274,7 +281,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
       final diagnosticLoggingEnabled =
           preferences.getBool(_prefsDiagnosticLoggingKey) ?? true;
       await ClientLog.initialize(enabled: diagnosticLoggingEnabled);
-      await _loadLogIdentity(preferences);
       _configureRemoteLogging(
         preferences.getBool('intmusic.diagnostics.upload') ?? false,
       );
@@ -506,7 +512,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
     }
   }
 
-  String _defaultClientAlias() => '${Platform.localHostname} Client';
+  String _defaultClientAlias() => _deviceIdentity.displayName;
 
   String _clientAlias() {
     final alias = _clientAliasController.text.trim();
@@ -519,7 +525,11 @@ extension _DashboardBootstrap on _CoreDashboardState {
     try {
       final preferences = _preferences ?? await SharedPreferences.getInstance();
       _preferences = preferences;
-      await preferences.setString(_prefsClientAliasKey, _clientAlias());
+      if (alias.isEmpty) {
+        await preferences.remove(_prefsClientAliasKey);
+      } else {
+        await preferences.setString(_prefsClientAliasKey, alias);
+      }
     } catch (_) {
       // The renderer can still advertise the alias for the current session.
     }

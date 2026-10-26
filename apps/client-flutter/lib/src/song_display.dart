@@ -136,13 +136,19 @@ class _SongGroupButton extends StatelessWidget {
   const _SongGroupButton({required this.track});
   final Map<String, dynamic> track;
   @override
-  Widget build(BuildContext context) => TextButton(
-    style: TextButton.styleFrom(
-      minimumSize: const Size(48, 40),
-      padding: const EdgeInsets.symmetric(horizontal: 4),
+  Widget build(BuildContext context) => Tooltip(
+    message: '当前列表合并的专辑收录数，不是设备或文件数量；点击查看收录',
+    child: TextButton(
+      style: TextButton.styleFrom(
+        minimumSize: const Size(48, 40),
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+      ),
+      onPressed: () => unawaited(_showSongDisplay(context, track)),
+      child: Text(
+        '${(track['_display_members'] as List).length}收录',
+        style: const TextStyle(fontSize: 11),
+      ),
     ),
-    onPressed: () => unawaited(_showSongDisplay(context, track)),
-    child: Text('${(track['_display_members'] as List).length}版'),
   );
 }
 
@@ -186,7 +192,9 @@ Future<void> _showSongDisplay(
                     ),
                   ],
                 ),
-                const Text('选择后立即生效。专辑、收藏、流派和播放文件仍属于各自版本。'),
+                const Text(
+                  '以下为当前列表合并的专辑收录，不代表相同录音。设备和文件格式不计入收录数量。展示方式修改后立即生效。',
+                ),
                 const SizedBox(height: 12),
                 Flexible(
                   child: SingleChildScrollView(

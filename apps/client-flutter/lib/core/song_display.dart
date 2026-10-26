@@ -96,11 +96,13 @@ List<Map<String, dynamic>> projectSongList(
   required bool mergeSameName,
   String filter = 'all',
   bool sortByMode = false,
+  bool preserveOccurrences = false,
 }) {
   final groups = <String, List<Map<String, dynamic>>>{};
   var occurrence = 0;
   for (final value in tracks) {
-    final track = Map<String, dynamic>.from(value as Map);
+    final track = Map<String, dynamic>.from(value as Map)
+      ..remove('_display_members');
     final mode = track['display_mode']?.toString() ?? 'inherit';
     if (filter != 'all' && filter != mode) continue;
     final merge = mode == 'merged' || (mode == 'inherit' && mergeSameName);
@@ -109,7 +111,23 @@ List<Map<String, dynamic>> projectSongList(
     final group = merge && key != null && key.isNotEmpty
         ? 'group:$key'
         : 'occurrence:${occurrence++}';
-    (groups[group] ??= []).add(track);
+    final members = groups[group] ??= [];
+    // Copies and repeated rows are not additional album editions. Only merge
+    // projection deduplicates; an unmerged queue may deliberately repeat songs.
+    final identity = track['release_identity_id'];
+    final duplicate = !preserveOccurrences && group.startsWith('group:')
+        ? members.indexWhere(
+            (member) => identity != null
+                ? member['release_identity_id'] == identity
+                : track['id'] != null && member['id'] == track['id'],
+          )
+        : -1;
+    if (duplicate < 0) {
+      members.add(track);
+    } else if (_availabilityRank(track) >
+        _availabilityRank(members[duplicate])) {
+      members[duplicate] = track;
+    }
   }
   final result = groups.values.map((members) {
     // Stable order among equally usable copies. Do not combine metadata from

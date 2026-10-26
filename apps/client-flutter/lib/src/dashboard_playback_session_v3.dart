@@ -147,14 +147,20 @@ extension _DashboardPlaybackSessionV3 on _CoreDashboardState {
         await _forgetPendingPlaybackCommandV3(id);
         if (!retry &&
             status == 'conflict' &&
-            ack['error_code'] == 'revision_conflict' &&
+            (ack['error_code'] == 'revision_conflict' ||
+                ack['error_code'] == 'epoch_conflict') &&
             attempt == 0) {
           final newId = _newPlaybackCommandId();
           id = newId;
           continue;
         }
         if (status != 'applied' && status != 'duplicate') {
-          throw StateError('Playback command rejected: ${ack['error_code']}');
+          final reason = switch (ack['error_code']) {
+            'track_unavailable' => '所选歌曲当前没有在线副本，原播放队列已保留',
+            'collection_result_expired' => '集合播放结果已失效，请刷新后重试',
+            _ => 'Playback command rejected: ${ack['error_code']}',
+          };
+          throw StateError(reason);
         }
         final snapshot = _asMap(ack['snapshot']);
         final index = agent.currentIndex;

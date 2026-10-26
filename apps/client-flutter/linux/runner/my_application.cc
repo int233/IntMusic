@@ -14,6 +14,21 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
+static void platform_method_call(FlMethodChannel* channel, FlMethodCall* call,
+                                 gpointer user_data) {
+  if (g_strcmp0(fl_method_call_get_name(call), "getDeviceIdentity") != 0) {
+    fl_method_call_respond_not_implemented(call, nullptr);
+    return;
+  }
+  g_autofree gchar* identifier = nullptr;
+  g_file_get_contents("/etc/machine-id", &identifier, nullptr, nullptr);
+  g_autoptr(FlValue) value = fl_value_new_map();
+  fl_value_set_string_take(value, "stableId",
+                          fl_value_new_string(identifier ? g_strstrip(identifier) : ""));
+  fl_value_set_string_take(value, "displayName", fl_value_new_string(g_get_host_name()));
+  fl_method_call_respond_success(call, value, nullptr);
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -75,6 +90,13 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) platform_channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)),
+      "dev.intmusic/platform", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(platform_channel,
+                                          platform_method_call, nullptr, nullptr);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

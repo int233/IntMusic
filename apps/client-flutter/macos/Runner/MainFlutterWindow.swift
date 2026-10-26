@@ -1,6 +1,7 @@
 import Cocoa
 import CoreAudio
 import FlutterMacOS
+import IOKit
 import MediaPlayer
 
 class MainFlutterWindow: NSWindow {
@@ -109,6 +110,17 @@ private final class IntMusicPlatformController: NSObject {
 
   private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
+    case "getDeviceIdentity":
+      let service = IOServiceGetMatchingService(0, IOServiceMatching("IOPlatformExpertDevice"))
+      var identifier: String?
+      if service != IO_OBJECT_NULL {
+        identifier = IORegistryEntryCreateCFProperty(service, kIOPlatformUUIDKey as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
+        IOObjectRelease(service)
+      }
+      result([
+        "stableId": identifier ?? "",
+        "displayName": Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
+      ])
     case "initialize":
       configureStatusItem()
       let titlebarSafeInset = currentTitlebarSafeInset()

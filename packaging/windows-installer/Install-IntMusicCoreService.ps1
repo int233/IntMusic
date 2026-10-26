@@ -102,10 +102,11 @@ function Test-IntMusicCoreReady {
             return $false
         }
         $status = Invoke-RestMethod `
-            -Uri "$($baseUrl.TrimEnd('/'))/api/v1/status" `
+            -Uri "$($baseUrl.TrimEnd('/'))/api/v1/health" `
             -Method Get `
             -TimeoutSec 2
-        return $status.name -eq "IntMusic Local Music Core" -and
+        return $status.ready -eq $true -and
+            $status.name -eq "IntMusic Local Music Core" -and
             $status.api_version -eq "v1"
     } catch {
         return $false

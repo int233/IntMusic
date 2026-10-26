@@ -635,7 +635,12 @@ class _SheetTrackRow extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (showAvailability)
-                _TrackAvailabilityBadge(track: track, compact: true),
+                SizedBox(
+                  width: 132,
+                  child: Center(
+                    child: _TrackAvailabilityBadge(track: track, compact: true),
+                  ),
+                ),
               const SizedBox(width: 4),
               _TrackActions(
                 track: track,

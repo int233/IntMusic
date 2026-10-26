@@ -182,7 +182,7 @@ pub async fn client_sync_detail_ids(
             r#"SELECT DISTINCT identity.canonical_album_id AS id
             FROM album_identity_members identity
             JOIN tracks track ON track.album_id = identity.album_id
-            JOIN active_catalog_tracks active ON active.track_id = track.id"#
+            JOIN visible_catalog_tracks active ON active.track_id = track.id"#
         }
         "artist" => "SELECT id FROM artists",
         _ => bail!("unsupported Client sync detail kind"),

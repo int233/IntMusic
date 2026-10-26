@@ -287,7 +287,7 @@ class _TrackVersionManagerDialogState
                   ),
                   if (_error != null) ...[
                     const SizedBox(height: 14),
-                    Text(_error!, style: TextStyle(color: tokens.danger)),
+                    _ErrorBanner(message: _error!),
                   ],
                 ],
               ),

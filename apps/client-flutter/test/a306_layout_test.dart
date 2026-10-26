@@ -1,9 +1,50 @@
 import 'package:flutter/material.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intmusic_client/intmusic_client.dart';
 import 'package:intmusic_client/src/app_theme.dart';
 
 void main() {
+  testWidgets(
+    'scrolling preserves the mounted cover image instead of a placeholder',
+    (tester) async {
+      final tracks = List.generate(
+        40,
+        (id) => <String, dynamic>{
+          'id': id,
+          'title': 'Song $id',
+          'artist_display': 'Artist',
+          'album_title': 'Album',
+        },
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: responsiveTracksLibraryForTesting(
+              tracks,
+              coreBaseUrl: 'http://localhost:49338',
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      final image = find.byType(CachedNetworkImage).at(2);
+      final element = tester.element(image);
+      final key = tester.widget<CachedNetworkImage>(image).key!;
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byType(ListView).first),
+      );
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump();
+      await gesture.moveBy(const Offset(0, -20));
+      await tester.pump();
+      expect(find.byKey(key), findsOneWidget);
+      expect(identical(tester.element(find.byKey(key)), element), isTrue);
+      await gesture.up();
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
   testWidgets('240dp and 360dp shells leave room for multiple readable songs', (
     tester,
   ) async {

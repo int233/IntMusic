@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "tests/status.rs"]
+mod status_tests;
+
 #[test]
 fn parses_musicbrainz_artist_id_and_url() {
     let expected = Uuid::parse_str("20244d07-534f-4eff-b4d4-930878889970").unwrap();

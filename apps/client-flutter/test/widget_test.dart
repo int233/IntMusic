@@ -147,6 +147,10 @@ void main() {
     expect(setting, findsOneWidget);
     expect(find.text('Export log'), findsOneWidget);
 
+    await tester.ensureVisible(
+      find.byKey(const Key('diagnostic-logging-setting')),
+    );
+    await tester.pump();
     await tester.tap(find.byKey(const Key('diagnostic-logging-setting')));
     await tester.pump();
     final preferences = await SharedPreferences.getInstance();

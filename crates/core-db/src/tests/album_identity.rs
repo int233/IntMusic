@@ -271,3 +271,32 @@ async fn album_migration_folds_a_split_album_without_removing_tracks_or_files() 
     assert_eq!(files_after, files_before);
     close_test_pool(pool, path).await;
 }
+
+#[tokio::test]
+async fn detail_sync_excludes_albums_with_only_hidden_release_members() {
+    let (pool, path) = test_pool().await;
+    let first = ingest_test_track(&pool, "visible.flac", "Visible album", "Song").await;
+    let second = ingest_test_track(&pool, "hidden.flac", "Hidden album", "Song").await;
+    reconcile_catalog_identity(&pool).await.unwrap();
+    let first_identity: i64 = sqlx::query_scalar("SELECT COALESCE(release_identity_id, release_track_id) FROM track_catalog_links WHERE track_id = ?1").bind(first).fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE track_catalog_links SET release_identity_id = ?1 WHERE track_id = ?2")
+        .bind(first_identity)
+        .bind(second)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hidden_album: i64 = sqlx::query_scalar("SELECT album_id FROM tracks WHERE id = ?1")
+        .bind(second)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let ids = client_sync_detail_ids(&pool, "album", 0, 100)
+        .await
+        .unwrap();
+    assert!(!ids.contains(&hidden_album));
+    assert!(!ids.is_empty());
+    for id in ids {
+        album_detail(&pool, id).await.unwrap();
+    }
+    close_test_pool(pool, path).await;
+}

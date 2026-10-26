@@ -416,6 +416,8 @@ extension _DashboardSync on _CoreDashboardState {
     unawaited(_warmOfflineArtworkCache());
     if (catalogReset && _clientLibraryRoots.isNotEmpty) {
       unawaited(_rebindLocalLibraryAfterCatalogReset());
+    } else {
+      unawaited(_ensureLocalLibraryDeviceBinding());
     }
   }
 
@@ -569,6 +571,7 @@ extension _DashboardSync on _CoreDashboardState {
   }
 
   Future<void> _warmDetailCache() async {
+    if (_detailWarmRetryAt?.isAfter(DateTime.now()) == true) return;
     if (_detailWarmupBusy ||
         _localPlaybackFallbackActive ||
         _cacheServerId == null ||
@@ -658,8 +661,14 @@ extension _DashboardSync on _CoreDashboardState {
       if (mounted) {
         _mutate(() => _refreshTrackAvailabilityProjection());
       }
+      _detailWarmFailures = 0;
+      _detailWarmRetryAt = null;
       unawaited(_warmOfflineArtworkCache());
     } catch (error) {
+      _detailWarmFailures = min(_detailWarmFailures + 1, 6);
+      _detailWarmRetryAt = DateTime.now().add(
+        Duration(seconds: min(180, 3 * (1 << _detailWarmFailures))),
+      );
       retryPending = true;
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
     } finally {
@@ -668,13 +677,16 @@ extension _DashboardSync on _CoreDashboardState {
           _detailRefreshScopes.isNotEmpty &&
           !_localPlaybackFallbackActive) {
         unawaited(
-          Future<void>.delayed(const Duration(seconds: 3), () {
-            if (mounted &&
-                !_localPlaybackFallbackActive &&
-                _clientLibrarySyncingRootIds.isEmpty) {
-              unawaited(_warmDetailCache());
-            }
-          }),
+          Future<void>.delayed(
+            Duration(seconds: min(180, 3 * (1 << _detailWarmFailures))),
+            () {
+              if (mounted &&
+                  !_localPlaybackFallbackActive &&
+                  _clientLibrarySyncingRootIds.isEmpty) {
+                unawaited(_warmDetailCache());
+              }
+            },
+          ),
         );
       }
     }

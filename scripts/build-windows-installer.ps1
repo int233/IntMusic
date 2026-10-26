@@ -209,7 +209,11 @@ or pass -FfmpegBundle with an already validated bundle.
         -Path (Join-Path $coreDist "tools\ffmpeg\bin\ffprobe.exe") `
         -Description "Staged ffprobe executable"
 
-    & $isccPath $issFile
+    $versionLine = Get-Content (Join-Path $clientProject "pubspec.yaml") |
+        Where-Object { $_ -match '^version:\s+' } | Select-Object -First 1
+    if (-not $versionLine) { throw "Flutter package version was not found." }
+    $installerVersion = (($versionLine -replace '^version:\s+', '').Trim() -split '\+')[0]
+    & $isccPath "/DMyAppVersion=$installerVersion" $issFile
     Assert-NativeCommandSucceeded `
         -Command "Inno Setup compilation" `
         -ExitCode $LASTEXITCODE

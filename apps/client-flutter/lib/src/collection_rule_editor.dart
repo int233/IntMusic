@@ -418,7 +418,7 @@ class _CollectionEntityPickerState extends State<_CollectionEntityPicker> {
           },
         ),
         if (_loading) const LinearProgressIndicator(),
-        if (_error != null) Text(_error!),
+        if (_error != null) _ErrorBanner(message: _error!),
         Expanded(
           child: ListView.builder(
             itemCount: _items.length + (_next == null ? 0 : 1),

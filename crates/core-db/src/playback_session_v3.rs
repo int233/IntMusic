@@ -317,6 +317,47 @@ pub async fn set_playback_queue_current_item_v3(
     Ok(row.try_get("track_id")?)
 }
 
+/// Copy an output's complete queue, cursor, source and playback policy together.
+/// Stable occurrence IDs also preserve duplicate songs and shuffle order.
+pub async fn copy_playback_session_queue_v3(
+    pool: &DbPool,
+    source_zone: &str,
+    target_zone: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        source_zone != target_zone,
+        "cannot copy a queue onto itself"
+    );
+    ensure_playback_queue(pool, source_zone).await?;
+    ensure_playback_queue(pool, target_zone).await?;
+    backfill_playback_queue_item_ids_v3(pool, source_zone).await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM playback_queue_items WHERE zone_id = ?1")
+        .bind(target_zone)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO playback_queue_items (zone_id, position, track_id, added_at, stable_item_id, added_by_device_id)
+         SELECT ?2, position, track_id, added_at, stable_item_id, added_by_device_id
+         FROM playback_queue_items WHERE zone_id = ?1",
+    ).bind(source_zone).bind(target_zone).execute(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE playback_queues SET
+         (mode, current_index, shuffle_seed, source_json) =
+         (SELECT mode, current_index, shuffle_seed, source_json FROM playback_queues WHERE zone_id = ?1),
+         revision = revision + 1, updated_at = ?3 WHERE zone_id = ?2",
+    ).bind(source_zone).bind(target_zone).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE playback_sessions_v3 SET
+         (repeat_mode, shuffle, stop_after_current) =
+         (SELECT repeat_mode, shuffle, stop_after_current FROM playback_sessions_v3 WHERE zone_id = ?1),
+         epoch = epoch + 1, revision = revision + 1, last_command_id = NULL,
+         updated_at = ?3 WHERE zone_id = ?2",
+    ).bind(source_zone).bind(target_zone).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn backfill_playback_queue_item_ids_v3(pool: &DbPool, zone_id: &str) -> Result<()> {
     let rows = sqlx::query(
         "SELECT id FROM playback_queue_items WHERE zone_id = ?1 AND stable_item_id IS NULL",

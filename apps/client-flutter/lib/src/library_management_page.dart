@@ -525,7 +525,7 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(22, 0, 22, 8),
-              child: _LibraryManagementError(message: _error!),
+              child: _ErrorBanner(message: _error!),
             ),
           Expanded(
             child: AnimatedSwitcher(
@@ -627,42 +627,6 @@ class _LibraryManagementPageState extends State<_LibraryManagementPage> {
             ),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _LibraryManagementError extends StatelessWidget {
-  const _LibraryManagementError({required this.message});
-
-  final String message;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Row(
-          children: [
-            Icon(
-              Icons.error_outline,
-              color: Theme.of(context).colorScheme.onErrorContainer,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                message,
-                style: TextStyle(
-                  color: Theme.of(context).colorScheme.onErrorContainer,
-                ),
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

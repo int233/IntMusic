@@ -404,6 +404,7 @@ class _SettingsPage extends StatelessWidget {
                     ),
                   ),
                 ),
+                const _ErrorHistoryPanel(),
                 const SizedBox(height: 14),
                 _InfoRow(
                   label: _tr(context, 'Library'),

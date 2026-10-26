@@ -177,7 +177,7 @@ pub(crate) async fn resume_playback_session_v3(
     }))
 }
 
-async fn playback_session_snapshot_v3(
+pub(crate) async fn playback_session_snapshot_v3(
     state: &AppState,
     zone_id: &str,
 ) -> Result<PlaybackSessionSnapshotV3> {
@@ -306,10 +306,17 @@ async fn apply_session_action_v3(
             };
             if source.is_some() {
                 let detail = core_db::track_detail(state.pool(), track_id).await?;
-                anyhow::ensure!(
-                    detail.track.is_available,
-                    "选定歌曲当前不可用，原队列已保留"
-                );
+                if !detail.track.is_available {
+                    return Err(core_db::CollectionError {
+                        code: "track_unavailable",
+                        message: format!(
+                            "歌曲 {}（{}）当前没有在线副本，原队列已保留",
+                            detail.track.title, track_id
+                        ),
+                        current_revision: None,
+                    }
+                    .into());
+                }
                 if is_core_zone(zone_id) {
                     readable_track_source(state, track_id).await?;
                 }

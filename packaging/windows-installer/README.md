@@ -169,9 +169,10 @@ TCP `49330-49360` 用于 HTTP API、WebSocket 和音频流；UDP `5353` 用于 m
 - 防火墙规则 `IntMusic Core HTTP` 是否存在。
 - 客户端使用的端口是否是 Core 当前实际监听端口。
 
-服务注册、启动或健康检查失败时查看：
+启动器使用不查询资料库的 `/api/v1/health` 检查 Core 就绪状态。服务注册、启动或健康检查失败时查看：
 
 ```text
+%LOCALAPPDATA%\IntMusic\Logs\launcher.log
 C:\ProgramData\IntMusic\Core\install.log
 C:\ProgramData\IntMusic\Core\service.log
 ```

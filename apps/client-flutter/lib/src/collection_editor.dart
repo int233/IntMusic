@@ -775,10 +775,7 @@ class _CollectionEditorState extends State<_CollectionEditor> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
+              child: _ErrorBanner(message: _error!),
             ),
           Expanded(
             child: LayoutBuilder(

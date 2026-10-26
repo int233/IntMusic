@@ -28,45 +28,10 @@ class _TracksPage extends StatefulWidget {
 }
 
 class _TracksPageState extends State<_TracksPage> {
-  Timer? _scrollIdleTimer;
-  bool _deferArtwork = false;
   bool _selecting = false;
   final Set<int> _selectedTrackIds = <int>{};
   String _query = '';
   String _sort = 'title';
-
-  @override
-  void dispose() {
-    _scrollIdleTimer?.cancel();
-    super.dispose();
-  }
-
-  void _setDeferArtwork(bool value) {
-    if (_deferArtwork == value || !mounted) {
-      return;
-    }
-    setState(() => _deferArtwork = value);
-  }
-
-  bool _handleScrollNotification(ScrollNotification notification) {
-    if (notification is ScrollStartNotification ||
-        notification is ScrollUpdateNotification ||
-        notification is OverscrollNotification) {
-      _setDeferArtwork(true);
-      _scrollIdleTimer?.cancel();
-      _scrollIdleTimer = Timer(
-        const Duration(milliseconds: 180),
-        () => _setDeferArtwork(false),
-      );
-    } else if (notification is ScrollEndNotification) {
-      _scrollIdleTimer?.cancel();
-      _scrollIdleTimer = Timer(
-        const Duration(milliseconds: 120),
-        () => _setDeferArtwork(false),
-      );
-    }
-    return false;
-  }
 
   Object? _projectionKey;
   List<Map<String, dynamic>> _projectedTracks = [];
@@ -240,60 +205,56 @@ class _TracksPageState extends State<_TracksPage> {
                         : const Text('No tracks'),
                   )
                 : widget.viewMode == _LibraryViewMode.grid
-                ? NotificationListener<ScrollNotification>(
-                    onNotification: _handleScrollNotification,
-                    child: GridView.builder(
-                      key: const PageStorageKey('tracks-grid'),
-                      padding: const EdgeInsets.fromLTRB(22, 4, 22, 28),
-                      gridDelegate:
-                          const SliverGridDelegateWithMaxCrossAxisExtent(
-                            maxCrossAxisExtent: 230,
-                            mainAxisSpacing: 18,
-                            crossAxisSpacing: 18,
-                            childAspectRatio: 0.72,
-                          ),
-                      itemCount: tracks.length,
-                      itemBuilder: (context, index) {
-                        final track = (tracks[index] as Map)
-                            .cast<String, dynamic>();
-                        final id = _intValue(track['id']);
-                        final selected =
-                            id != null && _selectedTrackIds.contains(id);
-                        return _TrackCard(
-                          coreBaseUrl: widget.coreBaseUrl,
-                          track: track,
-                          deferArtwork: _deferArtwork,
-                          selectionMode: _selecting,
-                          selected: selected,
-                          onSelectionChanged: id == null
-                              ? null
-                              : () => setState(() {
-                                  if (selected) {
-                                    _selectedTrackIds.remove(id);
-                                  } else {
-                                    _selectedTrackIds.add(id);
-                                  }
-                                }),
-                          onOpen: id == null || _selecting
-                              ? null
-                              : () => unawaited(widget.onOpenTrack(id)),
-                          onPlay: id == null || _selecting
-                              ? null
-                              : () => unawaited(
-                                  _playDisplayedSong(
-                                    context,
-                                    id,
-                                    tracks,
-                                    widget.onPlayTrack,
-                                  ),
+                ? GridView.builder(
+                    key: const PageStorageKey('tracks-grid'),
+                    padding: const EdgeInsets.fromLTRB(22, 4, 22, 28),
+                    gridDelegate:
+                        const SliverGridDelegateWithMaxCrossAxisExtent(
+                          maxCrossAxisExtent: 230,
+                          mainAxisSpacing: 18,
+                          crossAxisSpacing: 18,
+                          childAspectRatio: 0.72,
+                        ),
+                    itemCount: tracks.length,
+                    itemBuilder: (context, index) {
+                      final track = (tracks[index] as Map)
+                          .cast<String, dynamic>();
+                      final id = _intValue(track['id']);
+                      final selected =
+                          id != null && _selectedTrackIds.contains(id);
+                      return _TrackCard(
+                        coreBaseUrl: widget.coreBaseUrl,
+                        track: track,
+                        selectionMode: _selecting,
+                        selected: selected,
+                        onSelectionChanged: id == null
+                            ? null
+                            : () => setState(() {
+                                if (selected) {
+                                  _selectedTrackIds.remove(id);
+                                } else {
+                                  _selectedTrackIds.add(id);
+                                }
+                              }),
+                        onOpen: id == null || _selecting
+                            ? null
+                            : () => unawaited(widget.onOpenTrack(id)),
+                        onPlay: id == null || _selecting
+                            ? null
+                            : () => unawaited(
+                                _playDisplayedSong(
+                                  context,
+                                  id,
+                                  tracks,
+                                  widget.onPlayTrack,
                                 ),
-                          onAddToPlaylist: id == null || _selecting
-                              ? null
-                              : () => unawaited(widget.onAddToPlaylist(id)),
-                          onToggleFavorite: widget.onToggleFavorite,
-                        );
-                      },
-                    ),
+                              ),
+                        onAddToPlaylist: id == null || _selecting
+                            ? null
+                            : () => unawaited(widget.onAddToPlaylist(id)),
+                        onToggleFavorite: widget.onToggleFavorite,
+                      );
+                    },
                   )
                 : LayoutBuilder(
                     builder: (context, constraints) {
@@ -304,83 +265,72 @@ class _TracksPageState extends State<_TracksPage> {
                           if (!compactList)
                             _TrackTableHeader(showAlbum: showAlbum),
                           Expanded(
-                            child: NotificationListener<ScrollNotification>(
-                              onNotification: _handleScrollNotification,
-                              child: ListView.builder(
-                                key: const PageStorageKey('tracks-list'),
-                                padding: const EdgeInsets.fromLTRB(
-                                  14,
-                                  0,
-                                  14,
-                                  20,
-                                ),
-                                scrollCacheExtent:
-                                    const ScrollCacheExtent.pixels(220),
-                                itemExtent: compactList
-                                    ? (useCompactAndroidRendering(context)
-                                          ? 65
-                                          : 89)
-                                    : 67,
-                                itemCount: tracks.length,
-                                itemBuilder: (context, index) {
-                                  final track = (tracks[index] as Map)
-                                      .cast<String, dynamic>();
-                                  final id = _intValue(track['id']);
-                                  final selected =
-                                      id != null &&
-                                      _selectedTrackIds.contains(id);
-                                  return DecoratedBox(
-                                    decoration: BoxDecoration(
-                                      border: Border(
-                                        bottom: BorderSide(
-                                          color: IntMusicTheme.of(
-                                            context,
-                                          ).stroke,
-                                        ),
+                            child: ListView.builder(
+                              key: const PageStorageKey('tracks-list'),
+                              padding: const EdgeInsets.fromLTRB(14, 0, 14, 20),
+                              scrollCacheExtent: const ScrollCacheExtent.pixels(
+                                220,
+                              ),
+                              itemExtent: compactList
+                                  ? (useCompactAndroidRendering(context)
+                                        ? 65
+                                        : 89)
+                                  : 67,
+                              itemCount: tracks.length,
+                              itemBuilder: (context, index) {
+                                final track = (tracks[index] as Map)
+                                    .cast<String, dynamic>();
+                                final id = _intValue(track['id']);
+                                final selected =
+                                    id != null &&
+                                    _selectedTrackIds.contains(id);
+                                return DecoratedBox(
+                                  decoration: BoxDecoration(
+                                    border: Border(
+                                      bottom: BorderSide(
+                                        color: IntMusicTheme.of(context).stroke,
                                       ),
                                     ),
-                                    child: _TrackTableRow(
-                                      coreBaseUrl: widget.coreBaseUrl,
-                                      track: track,
-                                      showAlbum: showAlbum,
-                                      compactLayout: compactList,
-                                      deferArtwork: _deferArtwork,
-                                      selectionMode: _selecting,
-                                      selected: selected,
-                                      onSelectionChanged: id == null
-                                          ? null
-                                          : () => setState(() {
-                                              if (selected) {
-                                                _selectedTrackIds.remove(id);
-                                              } else {
-                                                _selectedTrackIds.add(id);
-                                              }
-                                            }),
-                                      onTap: id == null || _selecting
-                                          ? null
-                                          : () => unawaited(
-                                              widget.onOpenTrack(id),
+                                  ),
+                                  child: _TrackTableRow(
+                                    coreBaseUrl: widget.coreBaseUrl,
+                                    track: track,
+                                    showAlbum: showAlbum,
+                                    compactLayout: compactList,
+                                    selectionMode: _selecting,
+                                    selected: selected,
+                                    onSelectionChanged: id == null
+                                        ? null
+                                        : () => setState(() {
+                                            if (selected) {
+                                              _selectedTrackIds.remove(id);
+                                            } else {
+                                              _selectedTrackIds.add(id);
+                                            }
+                                          }),
+                                    onTap: id == null || _selecting
+                                        ? null
+                                        : () =>
+                                              unawaited(widget.onOpenTrack(id)),
+                                    onPlay: id == null || _selecting
+                                        ? null
+                                        : () => unawaited(
+                                            _playDisplayedSong(
+                                              context,
+                                              id,
+                                              tracks,
+                                              widget.onPlayTrack,
                                             ),
-                                      onPlay: id == null || _selecting
-                                          ? null
-                                          : () => unawaited(
-                                              _playDisplayedSong(
-                                                context,
-                                                id,
-                                                tracks,
-                                                widget.onPlayTrack,
-                                              ),
-                                            ),
-                                      onAddToPlaylist: id == null || _selecting
-                                          ? null
-                                          : () => unawaited(
-                                              widget.onAddToPlaylist(id),
-                                            ),
-                                      onToggleFavorite: widget.onToggleFavorite,
-                                    ),
-                                  );
-                                },
-                              ),
+                                          ),
+                                    onAddToPlaylist: id == null || _selecting
+                                        ? null
+                                        : () => unawaited(
+                                            widget.onAddToPlaylist(id),
+                                          ),
+                                    onToggleFavorite: widget.onToggleFavorite,
+                                  ),
+                                );
+                              },
                             ),
                           ),
                         ],
@@ -457,7 +407,6 @@ class _TrackCard extends StatelessWidget {
   const _TrackCard({
     required this.coreBaseUrl,
     required this.track,
-    required this.deferArtwork,
     required this.onToggleFavorite,
     required this.onOpen,
     required this.onPlay,
@@ -469,7 +418,6 @@ class _TrackCard extends StatelessWidget {
 
   final String coreBaseUrl;
   final Map<String, dynamic> track;
-  final bool deferArtwork;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final VoidCallback? onOpen;
   final VoidCallback? onPlay;
@@ -510,7 +458,6 @@ class _TrackCard extends StatelessWidget {
                         size: size,
                         icon: Icons.music_note_outlined,
                         imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
-                        deferImage: deferArtwork,
                       ),
                     );
                   },
@@ -615,7 +562,6 @@ class _TrackTableRow extends StatelessWidget {
     required this.track,
     required this.showAlbum,
     required this.compactLayout,
-    required this.deferArtwork,
     required this.onToggleFavorite,
     required this.onTap,
     required this.onPlay,
@@ -629,7 +575,6 @@ class _TrackTableRow extends StatelessWidget {
   final Map<String, dynamic> track;
   final bool showAlbum;
   final bool compactLayout;
-  final bool deferArtwork;
   final Future<void> Function(Map<String, dynamic>) onToggleFavorite;
   final VoidCallback? onTap;
   final VoidCallback? onPlay;
@@ -674,7 +619,6 @@ class _TrackTableRow extends StatelessWidget {
                     size: useCompactAndroidRendering(context) ? 40 : 52,
                     icon: Icons.music_note_outlined,
                     imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
-                    deferImage: deferArtwork,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -757,7 +701,6 @@ class _TrackTableRow extends StatelessWidget {
                   size: 46,
                   icon: Icons.music_note_outlined,
                   imageUrl: _trackArtworkUrl(coreBaseUrl, track['id']),
-                  deferImage: deferArtwork,
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -982,8 +925,12 @@ class _TrackActionsState extends State<_TrackActions> {
       );
     }
     final actions = <Widget>[
-      if (widget.track['_display_members'] is List)
-        _SongGroupButton(track: widget.track),
+      SizedBox(
+        width: 48,
+        child: widget.track['_display_members'] is List
+            ? _SongGroupButton(track: widget.track)
+            : null,
+      ),
       _AppTooltip(
         message: favorite ? 'Unfavorite' : 'Favorite',
         child: IconButton(

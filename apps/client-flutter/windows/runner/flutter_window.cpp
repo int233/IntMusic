@@ -106,6 +106,33 @@ std::wstring Lower(std::wstring value) {
   return value;
 }
 
+std::string WideToUtf8(const wchar_t* value) {
+  const int size = WideCharToMultiByte(CP_UTF8, 0, value, -1, nullptr, 0,
+                                      nullptr, nullptr);
+  if (size <= 1) return {};
+  std::string result(size, '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value, -1, result.data(), size, nullptr, nullptr);
+  result.resize(size - 1);
+  return result;
+}
+
+flutter::EncodableMap DeviceIdentity() {
+  wchar_t guid[256] = {};
+  DWORD bytes = static_cast<DWORD>(sizeof(guid));
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography",
+                   L"MachineGuid", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                   nullptr, guid, &bytes) != ERROR_SUCCESS) {
+    guid[0] = L'\0';
+  }
+  wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+  GetComputerNameW(name, &length);
+  return flutter::EncodableMap{
+      {flutter::EncodableValue("stableId"), flutter::EncodableValue(WideToUtf8(guid))},
+      {flutter::EncodableValue("displayName"), flutter::EncodableValue(WideToUtf8(name))},
+  };
+}
+
 flutter::EncodableValue UnsupportedSystemVolume() {
   return flutter::EncodableValue(flutter::EncodableMap{
       {flutter::EncodableValue("supported"), flutter::EncodableValue(false)},
@@ -531,6 +558,10 @@ void FlutterWindow::ConfigurePlatformChannel() {
       &flutter::StandardMethodCodec::GetInstance());
   platform_channel_->SetMethodCallHandler(
       [this](const auto& call, auto result) {
+        if (call.method_name() == "getDeviceIdentity") {
+          result->Success(flutter::EncodableValue(DeviceIdentity()));
+          return;
+        }
         if (call.method_name() == "initialize") {
           AddTrayIcon();
           flutter::EncodableMap capabilities;

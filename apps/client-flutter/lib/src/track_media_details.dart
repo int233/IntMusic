@@ -1,129 +1,104 @@
 part of '../intmusic_client.dart';
 
-class _TrackLyricsCard extends StatelessWidget {
-  const _TrackLyricsCard({required this.lyrics});
-
+class _TrackLyricsCard extends StatefulWidget {
+  const _TrackLyricsCard({
+    super.key,
+    required this.lyrics,
+    required this.album,
+  });
   final Map<String, dynamic>? lyrics;
+  final String album;
+  @override
+  State<_TrackLyricsCard> createState() => _TrackLyricsCardState();
+}
 
+class _TrackLyricsCardState extends State<_TrackLyricsCard> {
+  bool _raw = false;
   @override
   Widget build(BuildContext context) {
     final tokens = IntMusicTheme.of(context);
-    final lyrics = this.lyrics;
+    final lyrics = widget.lyrics;
     final original = lyrics?['text']?.toString().trim() ?? '';
     final translation = lyrics?['translation']?.toString().trim() ?? '';
     final pronunciation = lyrics?['pronunciation']?.toString().trim() ?? '';
-    final badges = <String>[
-      if ((lyrics?['kind']?.toString() ?? '').isNotEmpty)
-        lyrics!['kind'].toString().toUpperCase(),
-      if ((lyrics?['language']?.toString() ?? '').isNotEmpty)
-        lyrics!['language'].toString().toUpperCase(),
-      if (_intValue(lyrics?['revision']) != null)
-        '${_tr(context, 'Revision')} ${lyrics!['revision']}',
-    ];
-    return _HomePanel(
-      title: _tr(context, 'Lyrics'),
-      trailing: badges.isEmpty
-          ? null
-          : Wrap(
-              spacing: 6,
-              children: badges
-                  .map(
-                    (badge) => _TrackMetaPill(
-                      icon: Icons.notes_outlined,
-                      label: badge,
-                    ),
-                  )
-                  .toList(growable: false),
-            ),
-      child: original.isEmpty
-          ? SizedBox(
-              width: double.infinity,
-              height: 130,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.lyrics_outlined,
-                    size: 34,
-                    color: tokens.textSecondary,
-                  ),
-                  const SizedBox(height: 9),
-                  Text(_tr(context, 'No embedded lyrics')),
-                ],
-              ),
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _LyricTextSection(
-                  label: _tr(context, 'Original lyrics'),
-                  text: original,
-                  emphasized: true,
-                ),
-                if (translation.isNotEmpty) ...[
-                  const SizedBox(height: 18),
-                  _LyricTextSection(
-                    label: _tr(context, 'Translation'),
-                    text: translation,
-                  ),
-                ],
-                if (pronunciation.isNotEmpty) ...[
-                  const SizedBox(height: 18),
-                  _LyricTextSection(
-                    label: _tr(context, 'Pronunciation'),
-                    text: pronunciation,
-                  ),
-                ],
-              ],
-            ),
-    );
-  }
-}
-
-class _LyricTextSection extends StatelessWidget {
-  const _LyricTextSection({
-    required this.label,
-    required this.text,
-    this.emphasized = false,
-  });
-
-  final String label;
-  final String text;
-  final bool emphasized;
-
-  @override
-  Widget build(BuildContext context) {
-    final tokens = IntMusicTheme.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: emphasized
-            ? tokens.accent.withValues(alpha: 0.055)
-            : tokens.surfaceRaised.withValues(alpha: 0.58),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: tokens.stroke),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+    Widget section(String label, String text, {bool primary = false}) {
+      final body = _raw
+          ? text
+          : _parseLyricLines(text).map((line) => line.text).join('\n');
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              label,
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: emphasized ? tokens.accent : tokens.textSecondary,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 10),
+            if (!primary) ...[
+              Text(label, style: TextStyle(color: tokens.textSecondary)),
+              const SizedBox(height: 8),
+            ],
             SelectableText(
-              text,
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                height: 1.65,
-                fontWeight: emphasized ? FontWeight.w600 : FontWeight.w400,
+              body,
+              key: primary ? const Key('song-lyrics-text') : null,
+              style: TextStyle(
+                fontSize: _raw
+                    ? 13
+                    : primary
+                    ? 18
+                    : 14,
+                height: 1.9,
+                color: tokens.textPrimary,
+                fontFamily: _raw ? 'monospace' : null,
               ),
             ),
           ],
         ),
+      );
+    }
+
+    return _SongDetailPanel(
+      title: '歌词',
+      trailing: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          ChoiceChip(
+            label: const Text('正文'),
+            selected: !_raw,
+            onSelected: (_) => setState(() => _raw = false),
+          ),
+          ChoiceChip(
+            label: const Text('原始文本'),
+            selected: _raw,
+            onSelected: (_) => setState(() => _raw = true),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '当前收录 · ${widget.album}',
+            style: TextStyle(color: tokens.textSecondary, fontSize: 12),
+          ),
+          const SizedBox(height: 18),
+          if (original.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 32),
+              child: Text('此收录暂无歌词'),
+            )
+          else ...[
+            section('原文', original, primary: true),
+            if (translation.isNotEmpty) section('译文', translation),
+            if (pronunciation.isNotEmpty) section('发音', pronunciation),
+          ],
+          if (original.isNotEmpty)
+            Text(
+              _joinParts([
+                lyrics?['kind']?.toString().toUpperCase(),
+                lyrics?['language'],
+                if (lyrics?['revision'] != null) '修订 ${lyrics!['revision']}',
+              ]),
+              style: TextStyle(color: tokens.textSecondary, fontSize: 12),
+            ),
+        ],
       ),
     );
   }

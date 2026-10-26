@@ -173,11 +173,7 @@ class _HomeLayoutEditorState extends State<_HomeLayoutEditor> {
           padding: EdgeInsets.all(16),
           child: Text('拖动调整顺序。区块显示数量不限制集合总数；布局在设备间同步，手机自动排成单列。'),
         ),
-        if (_error != null)
-          Text(
-            _error!,
-            style: TextStyle(color: Theme.of(context).colorScheme.error),
-          ),
+        if (_error != null) _ErrorBanner(message: _error!),
         Expanded(
           child: ReorderableListView.builder(
             buildDefaultDragHandles: false,

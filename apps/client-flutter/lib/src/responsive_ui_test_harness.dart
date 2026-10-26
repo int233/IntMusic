@@ -1,20 +1,47 @@
 part of '../intmusic_client.dart';
 
 @visibleForTesting
-Widget responsiveTrackDetailForTesting(Map<String, dynamic> detail) {
-  return _TrackInfoPage(
+Widget errorNoticeForTesting(String message) => _ErrorBanner(message: message);
+
+@visibleForTesting
+Widget errorHistoryForTesting() =>
+    const SingleChildScrollView(child: _ErrorHistoryPanel());
+
+@visibleForTesting
+Widget responsiveTrackDetailForTesting(
+  Map<String, dynamic> detail, {
+  List<dynamic> catalog = const [],
+  SongDisplayState? displayState,
+  Future<void> Function(int, String)? onMode,
+  Future<void> Function(int)? onOpen,
+  Future<void> Function(int)? onPlay,
+  Future<Map<String, dynamic>> Function(int)? loadMedia,
+  Map<String, dynamic> settings = const {},
+}) => _TrackActionScope(
+  onPlayNext: (_) async {},
+  onAddToQueue: (_) async {},
+  onPlayCollection: (_, _) async {},
+  onQueueCollection: (_, _) async {},
+  onDistributeCollection: (_) async {},
+  catalogTracks: catalog,
+  songDisplaySettings: settings,
+  displayState: displayState,
+  onSetDisplayMode: onMode,
+  child: _TrackInfoPage(
     coreBaseUrl: '',
     detail: detail,
     onClose: () {},
-    onPlayTrack: (_) async {},
+    onOpenTrack: onOpen ?? (_) async {},
+    onPlayTrack: onPlay ?? (_) async {},
     onOpenAlbum: (_) async {},
     onOpenArtist: (_) async {},
     onToggleFavorite: (_) async {},
     onAddToPlaylist: (_) async {},
     onEdit: () async {},
     onManageVersions: () async {},
-  );
-}
+    loadMedia: loadMedia,
+  ),
+);
 
 @visibleForTesting
 Widget responsivePlaylistDetailForTesting(Map<String, dynamic> detail) {
@@ -93,9 +120,12 @@ Widget responsiveQueueForTesting(
 }
 
 @visibleForTesting
-Widget responsiveTracksLibraryForTesting(List<Map<String, dynamic>> tracks) {
+Widget responsiveTracksLibraryForTesting(
+  List<Map<String, dynamic>> tracks, {
+  String coreBaseUrl = '',
+}) {
   return _TracksPage(
-    coreBaseUrl: '',
+    coreBaseUrl: coreBaseUrl,
     tracks: tracks,
     onOpenTrack: (_) async {},
     onPlayTrack: (_) async {},

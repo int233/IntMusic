@@ -70,6 +70,7 @@ where
         discovery_service,
         transcoder,
     );
+    status_cache::refresh_library_counts(&state).await?;
     state.inner.library_revision.store(
         core_db::sync_cursor(state.pool()).await?.max(1),
         Ordering::SeqCst,
@@ -79,6 +80,7 @@ where
         Ordering::SeqCst,
     );
     state.emit("core.ready", json!({ "api_prefix": API_PREFIX }));
+    status_cache::start_library_counts_monitor(state.clone());
     start_collection_worker(state.clone());
     start_renderer_expiry_monitor(state.clone());
     start_local_playback_monitor(state.clone());

@@ -126,14 +126,14 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Cruel Summer'), findsOneWidget);
-        expect(find.text('2版'), findsOneWidget);
+        expect(find.text('2收录'), findsOneWidget);
         expect(find.text('合并同名歌曲'), findsNothing);
         expect(find.text('所有展示属性'), findsNothing);
         expect(find.text('按展示属性排序'), findsNothing);
         await tester.tap(find.text('播放全部').first);
         await tester.pump();
         expect(played, [1]);
-        await tester.tap(find.text('2版'));
+        await tester.tap(find.text('2收录'));
         await tester.pumpAndSettle();
         expect(find.text('Lover'), findsOneWidget);
         expect(find.text('The Eras Tour'), findsOneWidget);
@@ -151,14 +151,14 @@ void main() {
         // The save is still pending: the existing page must already have split.
         expect(saved.isCompleted, isFalse);
         expect(find.text('Cruel Summer'), findsNWidgets(2));
-        expect(find.text('2版'), findsNothing);
+        expect(find.text('2收录'), findsNothing);
         saved.complete();
         await tester.pumpAndSettle();
         expect(find.text('Cruel Summer'), findsNWidgets(2));
         displayState.updateCatalog([song(1), song(2)], cursor: 2);
         await tester.pumpAndSettle();
         expect(find.text('Cruel Summer'), findsOneWidget);
-        expect(find.text('2版'), findsOneWidget);
+        expect(find.text('2收录'), findsOneWidget);
         // Even a stale detail page now merges again without rebuilding its data.
         await displayState.setMode(
           song(1),
@@ -167,7 +167,7 @@ void main() {
         );
         await tester.pumpAndSettle();
         expect(find.text('Cruel Summer'), findsOneWidget);
-        expect(find.text('2版'), findsOneWidget);
+        expect(find.text('2收录'), findsOneWidget);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
         displayState.dispose();

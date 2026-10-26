@@ -399,10 +399,7 @@ class _MetadataTagRulesPanelState extends State<_MetadataTagRulesPanel> {
           if (_error != null)
             Padding(
               padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                _error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
+              child: _ErrorBanner(message: _error!),
             ),
           const SizedBox(height: 12),
           Wrap(

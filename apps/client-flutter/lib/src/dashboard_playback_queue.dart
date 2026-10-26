@@ -84,6 +84,16 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
     }
     final zoneId = _activeZoneId();
     final items = _newPlaybackQueueItems(trackIds);
+    ClientLog.event(
+      'playback.queue.requested',
+      data: {
+        'zone_id': zoneId,
+        'track_id': trackId,
+        'queue_length': items.length,
+        'start_index': startIndex,
+        'collection_id': source?['collection_id'],
+      },
+    );
     final playback = await _postPlaybackSessionActionV3(zoneId, {
       'type': 'replace_queue_and_play',
       'source': ?source,

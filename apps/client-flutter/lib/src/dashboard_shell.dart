@@ -464,6 +464,7 @@ extension _DashboardShell on _CoreDashboardState {
           coreBaseUrl: _coreUrlController.text,
           detail: _trackDetailCache[trackId],
           onClose: _closeTrackDetail,
+          onOpenTrack: (id) => _openTrackDetail(id, addToHistory: false),
           onPlayTrack: _playTrack,
           onOpenAlbum: _openAlbumDetail,
           onOpenArtist: _openArtistByName,

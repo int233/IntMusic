@@ -100,6 +100,23 @@ class _IntMusicPlatform {
   final ValueNotifier<double> titlebarSafeInset = ValueNotifier(0);
   bool _initialized = false;
 
+  Future<Map<dynamic, dynamic>> deviceIdentity() async {
+    try {
+      return await _channel
+              .invokeMapMethod<dynamic, dynamic>('getDeviceIdentity')
+              .timeout(const Duration(seconds: 3)) ??
+          const {};
+    } on MissingPluginException {
+      return const {};
+    } on PlatformException catch (error) {
+      ClientLog.error('device.identity.native_failed', error);
+      return const {};
+    } on TimeoutException catch (error) {
+      ClientLog.error('device.identity.native_timeout', error);
+      return const {};
+    }
+  }
+
   Future<_PlatformCapabilities> initialize({
     required Future<void> Function(_PlatformCommand command) onCommand,
     required Future<void> Function(int positionMs) onSeek,
@@ -270,12 +287,14 @@ class _IntMusicPlatform {
     required String suggestedName,
     required String mimeType,
   }) async {
-    final saved = await _channel
-        .invokeMethod<bool>('saveFile', <String, dynamic>{
-          'sourcePath': sourcePath,
-          'suggestedName': suggestedName,
-          'mimeType': mimeType,
-        });
+    final saved = await _channel.invokeMethod<bool>(
+      'saveFile',
+      <String, dynamic>{
+        'sourcePath': sourcePath,
+        'suggestedName': suggestedName,
+        'mimeType': mimeType,
+      },
+    );
     return saved == true;
   }
 

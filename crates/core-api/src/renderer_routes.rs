@@ -400,13 +400,43 @@ pub(crate) async fn transfer_zone(
         ]));
     }
 
+    // Transfers and EOF/manual commands must not change either queue midway.
+    // A deterministic lock order also permits simultaneous opposite transfers.
+    let (first, second) = if source_zone_id < payload.target_zone_id {
+        (&source_zone_id, &payload.target_zone_id)
+    } else {
+        (&payload.target_zone_id, &source_zone_id)
+    };
+    let first_gate = state.playback_control_gate(first).await;
+    let second_gate = state.playback_control_gate(second).await;
+    let _first_guard = first_gate.lock().await;
+    let _second_guard = second_gate.lock().await;
+
     let source = playback_state_for_zone(&state, &source_zone_id).await?;
     let track_id = source
         .track_id
         .ok_or_else(|| anyhow::anyhow!("source zone {source_zone_id} has no active track"))?;
 
+    if is_core_zone(&payload.target_zone_id) {
+        readable_track_source(&state, track_id).await?;
+    } else {
+        if state
+            .inner
+            .renderers
+            .renderer_id_for_output(&payload.target_zone_id)
+            .await
+            .is_none()
+        {
+            return Err(anyhow::anyhow!("target output is not registered").into());
+        }
+    }
+    let source_session = playback_session_snapshot_v3(&state, &source_zone_id).await?;
+    playback_session_snapshot_v3(&state, &payload.target_zone_id).await?;
+    core_db::copy_playback_session_queue_v3(state.pool(), &source_zone_id, &payload.target_zone_id)
+        .await?;
+
     let mut states = vec![
-        play_track_on_zone(
+        play_track_on_zone_preserving_queue(
             &state,
             &payload.target_zone_id,
             track_id,
@@ -415,6 +445,19 @@ pub(crate) async fn transfer_zone(
         )
         .await?,
     ];
+    let queue = core_db::playback_queue(state.pool(), &payload.target_zone_id).await?;
+    state.emit("playback.queue_changed", &queue);
+    let target_session = playback_session_snapshot_v3(&state, &payload.target_zone_id).await?;
+    state.emit(
+        "playback.session_v3.changed",
+        json!({
+            "zone_id": payload.target_zone_id, "session_id": target_session.session_id,
+            "epoch": target_session.epoch, "revision": target_session.revision,
+        }),
+    );
+    info!(source_zone_id, target_zone_id = payload.target_zone_id,
+        queue_length = source_session.queue.len(), current_item_id = ?source_session.current_item_id,
+        "transferred complete playback queue");
     if payload.stop_source {
         states.push(
             stop_zone_internal_with_reason(

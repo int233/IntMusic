@@ -162,7 +162,7 @@ class _TrackMergeDialogState extends State<_TrackMergeDialog> {
                     _TrackMergeConflictPanel(conflicts: conflicts),
                     if (_error != null) ...[
                       const SizedBox(height: 12),
-                      _LibraryManagementError(message: _error!),
+                      _ErrorBanner(message: _error!),
                     ],
                   ],
                 ),

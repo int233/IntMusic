@@ -226,6 +226,7 @@ extension _DashboardPlaybackControls on _CoreDashboardState {
       _selectedZoneLabel = _zoneLabelById(targetZoneId);
       _applyPlayback(targetState, syncZone: false);
     });
+    await _refreshPlaybackSessionV3(zoneId: targetZoneId);
   }
 
   Future<void> _playCurrentEverywhere() async {

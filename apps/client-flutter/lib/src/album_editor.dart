@@ -258,15 +258,9 @@ class _AlbumEditorDialogState extends State<_AlbumEditorDialog> {
           children: [
             _toolbar(),
             if (_error != null)
-              MaterialBanner(
-                content: Text(_error!, maxLines: 4),
-                leading: const Icon(Icons.error_outline),
-                actions: [
-                  TextButton(
-                    onPressed: () => setState(() => _error = null),
-                    child: Text(_tr(context, 'Dismiss')),
-                  ),
-                ],
+              _ErrorBanner(
+                message: _error!,
+                onDismiss: () => setState(() => _error = null),
               ),
             Expanded(
               child: AnimatedSwitcher(

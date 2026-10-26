@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../logging/client_log.dart';
 
 abstract interface class AudioEngine {
   Stream<bool> get completed;
@@ -72,7 +73,10 @@ class RendererSession {
   bool _buffering = false;
   bool _advanced = false;
   double _volume = 1;
-  DateTime _lastProgress = DateTime.now();
+  final _clock = Stopwatch()..start();
+  Duration _lastProgress = Duration.zero;
+  Duration _lastWatchdogTick = Duration.zero;
+  bool _probing = false;
   Timer? _watchdog;
   Completer<void>? _started;
 
@@ -102,7 +106,7 @@ class RendererSession {
     _wantsPlay = true;
     _buffering = false;
     _advanced = false;
-    _lastProgress = DateTime.now();
+    _lastProgress = _clock.elapsed;
     _publish(RendererPhase.loading, positionMs: 0);
     final started = Completer<void>();
     _started = started;
@@ -135,7 +139,7 @@ class RendererSession {
           if (!_current(generation) || !_wantsPlay) return;
           final ms = position.inMilliseconds;
           if (ms > snapshot.positionMs) {
-            _lastProgress = DateTime.now();
+            _lastProgress = _clock.elapsed;
             _advanced = true;
             if (!started.isCompleted) started.complete();
           }
@@ -162,11 +166,23 @@ class RendererSession {
           _publish(RendererPhase.buffering);
         }),
       ]);
+      _lastWatchdogTick = _clock.elapsed;
       _watchdog = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (_current(generation) &&
-            _wantsPlay &&
-            DateTime.now().difference(_lastProgress) > stallTimeout) {
-          _fail('Audio decoder stopped advancing');
+        final now = _clock.elapsed;
+        final gap = now - _lastWatchdogTick;
+        _lastWatchdogTick = now;
+        if (!_current(generation) || !_wantsPlay) return;
+        // After process suspension, let queued decoder callbacks catch up.
+        if (gap > const Duration(seconds: 5)) {
+          _lastProgress = now;
+          ClientLog.event(
+            'renderer.watchdog.scheduling_gap',
+            data: {'gap_ms': gap.inMilliseconds},
+          );
+          return;
+        }
+        if (now - _lastProgress > stallTimeout) {
+          unawaited(_verifyProgress(generation, engine));
         }
       });
       await engine.setVolume(_volume);
@@ -175,6 +191,45 @@ class RendererSession {
     } catch (error) {
       if (_current(generation)) _fail(error.toString());
       rethrow;
+    }
+  }
+
+  Future<void> _verifyProgress(int generation, AudioEngine engine) async {
+    if (_probing) return;
+    _probing = true;
+    final observedProgress = _lastProgress;
+    try {
+      final position = await engine.currentPositionMs().timeout(
+        const Duration(seconds: 2),
+      );
+      if (!_current(generation) ||
+          !_wantsPlay ||
+          _lastProgress != observedProgress) {
+        return;
+      }
+      if (position != null && position > snapshot.positionMs) {
+        _lastProgress = _clock.elapsed;
+        _advanced = true;
+        if (_started?.isCompleted == false) _started!.complete();
+        _publish(
+          _buffering ? RendererPhase.buffering : RendererPhase.playing,
+          positionMs: position,
+        );
+        ClientLog.event(
+          'renderer.watchdog.progress_recovered',
+          data: {'position_ms': position},
+        );
+      } else {
+        _fail('Audio decoder stopped advancing');
+      }
+    } catch (error) {
+      if (_current(generation) &&
+          _wantsPlay &&
+          _lastProgress == observedProgress) {
+        _fail('Audio decoder progress probe failed: $error');
+      }
+    } finally {
+      _probing = false;
     }
   }
 
@@ -199,7 +254,7 @@ class RendererSession {
       throw StateError('No playable audio source loaded');
     }
     _wantsPlay = true;
-    _lastProgress = DateTime.now();
+    _lastProgress = _clock.elapsed;
     _publish(RendererPhase.loading);
     await _engine!.play();
   }
@@ -218,7 +273,7 @@ class RendererSession {
   }
 
   Future<void> seek(Duration position) async {
-    _lastProgress = DateTime.now();
+    _lastProgress = _clock.elapsed;
     await _engine?.seek(position);
     _publish(snapshot.phase, positionMs: position.inMilliseconds);
   }

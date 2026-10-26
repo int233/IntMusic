@@ -189,6 +189,15 @@ extension _DashboardRendererAudio on _CoreDashboardState {
     }
     final sequence = _intValue(command?['sequence']);
     if (sequence == null) throw StateError('Decoder has no command identity');
+    ClientLog.event(
+      'renderer.completion.requested',
+      data: {
+        'output_id': outputId,
+        'track_id': command?['track_id'],
+        'command_sequence': sequence,
+        'queue_length': _sessionAgent(outputId).items.length,
+      },
+    );
     final playback = await _postPlaybackSessionActionV3(outputId, {
       'type': 'complete',
       'command_sequence': sequence,

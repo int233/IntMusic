@@ -3,6 +3,7 @@ use super::*;
 pub fn build_router(state: AppState) -> Router {
     let api = Router::new()
         .route("/status", get(status))
+        .route("/health", get(health))
         .route("/diagnostics/clients", get(list_client_logs))
         .route(
             "/diagnostics/clients/{id}/logs",

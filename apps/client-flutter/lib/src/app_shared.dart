@@ -7,7 +7,6 @@ class _ArtworkTile extends StatelessWidget {
     required this.size,
     required this.icon,
     this.imageUrl,
-    this.deferImage = false,
   });
 
   final String title;
@@ -15,7 +14,6 @@ class _ArtworkTile extends StatelessWidget {
   final double size;
   final IconData icon;
   final String? imageUrl;
-  final bool deferImage;
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +77,7 @@ class _ArtworkTile extends StatelessWidget {
         ),
         child: ClipRRect(
           borderRadius: BorderRadius.circular(radius),
-          child: imageUrl == null || deferImage
+          child: imageUrl == null
               ? fallback
               : ValueListenableBuilder<int>(
                   valueListenable: artworkCacheCoordinator.retryRevision,
@@ -771,80 +769,6 @@ class _AnimatedPageHost extends StatelessWidget {
         );
       },
       child: KeyedSubtree(key: ValueKey(pageKey), child: child),
-    );
-  }
-}
-
-class _ErrorBanner extends StatefulWidget {
-  const _ErrorBanner({required this.message, this.onDismiss});
-
-  final VoidCallback? onDismiss;
-
-  final String message;
-
-  @override
-  State<_ErrorBanner> createState() => _ErrorBannerState();
-}
-
-class _ErrorBannerState extends State<_ErrorBanner> {
-  Timer? _timer;
-  bool _dismissed = false;
-  void _restart() {
-    _timer?.cancel();
-    _dismissed = false;
-    _timer = Timer(const Duration(seconds: 8), _dismiss);
-  }
-
-  void _dismiss() {
-    if (!mounted) return;
-    _timer?.cancel();
-    setState(() => _dismissed = true);
-    widget.onDismiss?.call();
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _restart();
-  }
-
-  @override
-  void didUpdateWidget(_ErrorBanner oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.message != widget.message) _restart();
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_dismissed) return const SizedBox.shrink();
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      color: const Color(0xff5b2b2b),
-      child: Row(
-        children: [
-          const Icon(Icons.error_outline),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              widget.message,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          IconButton(
-            tooltip: _tr(context, 'Close'),
-            onPressed: _dismiss,
-            icon: const Icon(Icons.close),
-          ),
-        ],
-      ),
     );
   }
 }

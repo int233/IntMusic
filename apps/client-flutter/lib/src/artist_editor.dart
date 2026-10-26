@@ -565,15 +565,9 @@ class _ArtistEditorDialogState extends State<_ArtistEditorDialog> {
           children: [
             _editorToolbar(),
             if (_error != null)
-              MaterialBanner(
-                content: Text(_error!, maxLines: 3),
-                leading: const Icon(Icons.error_outline),
-                actions: [
-                  TextButton(
-                    onPressed: () => setState(() => _error = null),
-                    child: Text(_tr(context, 'Dismiss')),
-                  ),
-                ],
+              _ErrorBanner(
+                message: _error!,
+                onDismiss: () => setState(() => _error = null),
               ),
             Expanded(
               child: AnimatedSwitcher(

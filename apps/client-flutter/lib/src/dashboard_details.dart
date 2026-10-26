@@ -233,7 +233,7 @@ extension _DashboardDetails on _CoreDashboardState {
     unawaited(_backgroundLibrarySync());
   }
 
-  Future<void> _openTrackDetail(int trackId) async {
+  Future<void> _openTrackDetail(int trackId, {bool addToHistory = true}) async {
     final projectedDetail =
         _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
     if (projectedDetail == null || !mounted) return;
@@ -250,7 +250,7 @@ extension _DashboardDetails on _CoreDashboardState {
     if (!mounted) return;
     _mutate(() {
       _trackDetailCache[trackId] = detail;
-      _navigateToInState(_AppRoute.track(trackId));
+      _navigateToInState(_AppRoute.track(trackId), addToHistory: addToHistory);
     });
     if (!_localPlaybackFallbackActive) unawaited(_refreshTrackDetail(trackId));
   }
@@ -548,27 +548,11 @@ extension _DashboardDetails on _CoreDashboardState {
       final devices =
           await _api.getBulkJson('/library-management/devices')
               as List<dynamic>;
-      return <Map<String, dynamic>>[
-        for (final value in devices)
-          if (value is Map)
-            for (final source
-                in ((_asMap(value)['sources'] as List?) ?? const <dynamic>[]))
-              if (source is Map &&
-                  _asMap(source)['state']?.toString() != 'retired' &&
-                  _intValue(_asMap(source)['root_id']) != null)
-                <String, dynamic>{
-                  'id': _intValue(_asMap(source)['root_id']).toString(),
-                  'device_id': _asMap(value)['device_id']?.toString(),
-                  'device_name':
-                      _asMap(value)['display_name']?.toString() ??
-                      unknownDeviceLabel,
-                  'source_name':
-                      _asMap(source)['display_name']?.toString() ??
-                      musicSourceLabel,
-                  'state': _asMap(source)['state']?.toString() ?? 'offline',
-                  'file_count': _intValue(_asMap(source)['file_count']) ?? 0,
-                },
-      ];
+      return collectionSourceOptionsFromDevices(
+        devices,
+        unknownDevice: unknownDeviceLabel,
+        unknownSource: musicSourceLabel,
+      );
     } catch (error) {
       await _ClientCacheStore.recordError(_coreUrlController.text, error);
       return const <Map<String, dynamic>>[];

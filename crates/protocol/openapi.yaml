@@ -253,9 +253,15 @@ paths:
       responses:
         "200":
           description: Catalog-fenced response; typed payloads and examples are documented in docs/collections.md and crates/protocol/src/collections.rs
+  /health:
+    get:
+      summary: Check Core readiness without waiting for database queries.
+      responses:
+        "200":
+          description: Core name, API version, server identity, and ready flag.
   /status:
     get:
-      summary: Return Core identity, catalog epoch, and library counts.
+      summary: Return Core identity, catalog epoch, and cached library counts refreshed in the background.
       responses:
         "200":
           description: Core status.

@@ -22,14 +22,17 @@ import 'package:sqflite/sqflite.dart' as mobile_sqlite;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'core/navigation_history.dart';
+import 'core/device_identity.dart';
 import 'core/connection_watchdog.dart';
 import 'core/artwork_cache_coordinator.dart';
 import 'core/json_values.dart';
 import 'core/library_sync.dart';
 import 'core/release_media.dart';
 import 'core/song_display.dart';
+import 'core/song_detail.dart';
 import 'core/track_library_projection.dart';
 import 'core/collections.dart';
+import 'core/collection_sources.dart';
 import 'core/serial_task_queue.dart';
 import 'core/logging/client_log.dart';
 import 'core/logging/log_uploader.dart';
@@ -46,6 +49,7 @@ import 'src/app_theme.dart';
 export 'core/network/core_api_client.dart' show CoreApiClient;
 
 part 'src/app_shared.dart';
+part 'src/error_notice.dart';
 part 'src/app_models.dart';
 part 'src/app_helpers.dart';
 part 'src/responsive_ui_test_harness.dart';
@@ -72,6 +76,7 @@ part 'src/library_management_auto_merge.dart';
 part 'src/library_management_devices.dart';
 part 'src/library_management_formatting.dart';
 part 'src/settings_page.dart';
+part 'src/settings_error_history.dart';
 part 'src/settings_distribution.dart';
 part 'src/settings_library.dart';
 part 'src/settings_pending_files.dart';
@@ -80,6 +85,7 @@ part 'src/song_display.dart';
 part 'src/search_page.dart';
 part 'src/detail_sheets.dart';
 part 'src/track_detail_sheet.dart';
+part 'src/song_editions_panel.dart';
 part 'src/track_media_details.dart';
 part 'src/track_availability.dart';
 part 'src/track_version_manager.dart';
@@ -103,6 +109,7 @@ part 'src/platform_integration.dart';
 part 'src/renderer_audio.dart';
 part 'src/dashboard_bootstrap.dart';
 part 'src/dashboard_diagnostics.dart';
+part 'src/dashboard_device_identity.dart';
 part 'src/dashboard_navigation.dart';
 part 'src/dashboard_artwork_cache.dart';
 part 'src/dashboard_catalog_identity.dart';
@@ -309,6 +316,8 @@ class _CoreDashboardState extends State<CoreDashboard>
   int _eventCursor = 0;
   bool _backgroundSyncBusy = false;
   bool _detailWarmupBusy = false;
+  int _detailWarmFailures = 0;
+  DateTime? _detailWarmRetryAt;
   bool _artworkWarmupBusy = false;
   bool _artworkWarmupRequested = false;
   bool _zoneRefreshBusy = false;
@@ -321,7 +330,12 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Map<String, int> _detailWarmTargetCursors = <String, int>{};
   bool _localPlaybackFallbackActive = false;
   final Set<int> _verifiedLocalTrackIds = <int>{};
-  String _logClientId = '';
+  ClientDeviceIdentity _deviceIdentity = ClientDeviceIdentity.resolve(
+    platform: Platform.operatingSystem,
+    native: const {},
+    fallbackId: ClientDeviceIdentity.newFallbackId(Platform.operatingSystem),
+  );
+  bool _clientLibraryDeviceBinding = false;
   bool _remoteLoggingEnabled = false;
   LogUploader? _logUploader;
   DateTime? _lastSlowFrameLog;
@@ -356,9 +370,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   int _pageTransitionDirection = 1;
 
   CoreApiClient get _api => CoreApiClient(_coreUrlController.text);
-  String get _clientId => _sanitizeRendererId(
-    'flutter-${Platform.operatingSystem}-${Platform.localHostname}',
-  );
+  String get _clientId => _deviceIdentity.id;
   String get _clientZonePrefix => 'renderer:$_clientId:';
   String get _clientOutputId => 'renderer:$_clientId:default';
 
@@ -387,14 +399,6 @@ class _CoreDashboardState extends State<CoreDashboard>
       duration: const Duration(milliseconds: 260),
       reverseDuration: const Duration(milliseconds: 190),
     );
-    _rendererAudioInitialization = widget.enableAudioRenderer
-        ? _initializeRendererAudio()
-        : Future<void>.sync(() {
-            _rendererAudioDevicesByOutput[_clientOutputId] = AudioDevice.auto();
-          });
-    _selectedZoneId = _clientOutputId;
-    _selectedZoneLabel = 'This device';
-    _clientAliasController.text = _defaultClientAlias();
     unawaited(_initializeAndRefresh());
   }
 

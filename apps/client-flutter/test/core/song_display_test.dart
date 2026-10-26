@@ -20,6 +20,31 @@ Map<String, dynamic> song(
 };
 
 void main() {
+  test('merged counts distinct editions, not copies or repeated rows', () {
+    final copy = {...song(3), 'release_identity_id': 1};
+    final grouped = projectSongList([
+      song(1),
+      copy,
+      song(2),
+      song(2),
+    ], mergeSameName: true);
+    expect((grouped.single['_display_members'] as List).length, 2);
+    expect(
+      projectSongList([
+        song(1),
+        copy,
+      ], mergeSameName: true).single.containsKey('_display_members'),
+      isFalse,
+    );
+    expect(projectSongList([song(1), song(1)], mergeSameName: false).length, 2);
+    expect(
+      projectSongList([
+        grouped.single,
+      ], mergeSameName: true).single.containsKey('_display_members'),
+      isFalse,
+    );
+  });
+
   test(
     'immediate edition edits survive stale snapshots and detail caches',
     () async {

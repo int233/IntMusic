@@ -1,7 +1,12 @@
 use super::*;
 
 pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<CoreStatus> {
-    let counts = core_db::library_counts(state.pool()).await?;
+    let counts = state
+        .inner
+        .library_counts
+        .read()
+        .map(|counts| counts.clone())
+        .unwrap_or_default();
     Ok(Json(CoreStatus {
         name: "IntMusic Local Music Core".to_string(),
         display_name: core_display_name(&state.config()),
@@ -17,6 +22,16 @@ pub(crate) async fn status(State(state): State<AppState>) -> ApiResult<CoreStatu
         library_revision: state.inner.library_revision.load(Ordering::SeqCst),
         database_path: state.inner.paths.database_file.display().to_string(),
         counts,
+    }))
+}
+
+/// Readiness checks must not wait for catalog statistics or database leases.
+pub(crate) async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "name": "IntMusic Local Music Core",
+        "api_version": "v1",
+        "server_id": state.inner.server_id,
+        "ready": true,
     }))
 }
 

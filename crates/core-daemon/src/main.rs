@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use core_config::{CoreConfig, CorePaths};
 use tracing_subscriber::{fmt, EnvFilter};
 
+#[cfg(any(windows, test))]
+mod service_logging;
+
 #[cfg(windows)]
 use chrono::Utc;
 #[cfg(windows)]
@@ -132,7 +135,6 @@ fn run_windows_service() -> Result<()> {
     let _ = status_handle_slot.set(status_handle);
 
     status_handle.set_service_status(service_status(ServiceState::StartPending, 0))?;
-    init_logging("info");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -188,7 +190,6 @@ fn service_status(state: ServiceState, exit_code: u32) -> ServiceStatus {
 }
 
 fn run_foreground(options: RunOptions) -> Result<()> {
-    init_logging("info");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -202,14 +203,14 @@ async fn run_core<S>(options: RunOptions, shutdown: S) -> Result<()>
 where
     S: std::future::Future<Output = ()> + Send + 'static,
 {
-    let paths = CorePaths::discover(options.config, options.data_dir)?;
+    let paths = CorePaths::discover(options.config.clone(), options.data_dir.clone())?;
     let config = CoreConfig::load_or_create(&paths)?;
-    init_logging(&config.logging.level);
+    init_logging(&config.logging.level, &options);
     let pool = core_api::initialize_database(&paths, &config).await?;
     core_api::serve_with_shutdown(config, paths, pool, shutdown).await
 }
 
-fn init_logging(level: &str) {
+fn init_logging(level: &str, _options: &RunOptions) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level))
         .add_directive("lofty=error".parse().expect("valid lofty log directive"))
@@ -219,6 +220,18 @@ fn init_logging(level: &str) {
                 .expect("valid symphonia log directive"),
         )
         .add_directive("rodio=warn".parse().expect("valid rodio log directive"));
+    #[cfg(windows)]
+    if _options.service {
+        if let Some(root) = _options
+            .config
+            .as_deref()
+            .and_then(|p| p.parent())
+            .or_else(|| _options.data_dir.as_deref().and_then(|p| p.parent()))
+        {
+            service_logging::initialize(filter, root.join("service.log"));
+            return;
+        }
+    }
     let _ = fmt().with_env_filter(filter).try_init();
 }
 

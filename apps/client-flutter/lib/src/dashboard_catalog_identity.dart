@@ -137,6 +137,8 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
     _searchResultCache.clear();
     _detailRefreshScopes.clear();
     _detailWarmAfterIds.clear();
+    _detailWarmFailures = 0;
+    _detailWarmRetryAt = null;
     _detailWarmTargetCursors.clear();
     _offlineLibrary = _OfflineLibrarySnapshot(
       serverId: serverId,

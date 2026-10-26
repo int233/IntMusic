@@ -153,7 +153,7 @@ class _CollectionSettingsPanelState extends State<_CollectionSettingsPanel> {
                     }
                   },
           ),
-          if (_error != null) Text(_error!),
+          if (_error != null) _ErrorBanner(message: _error!),
           if (widget.store.settings['management_enabled'] == true)
             for (final item in widget.store.items.where(
               (i) => i['system_key'] != null,
@@ -245,6 +245,7 @@ class _CollectionBlockState extends State<_CollectionBlock> {
   Future<void> _play({
     List<int>? ids,
     int? startId,
+    int? startReleaseId,
     bool shuffle = false,
   }) async {
     final page = widget.store.pages[widget.id];
@@ -280,14 +281,30 @@ class _CollectionBlockState extends State<_CollectionBlock> {
       if (!mounted) return;
       final displayed = _displayTracks(context, tracks);
       if (displayed.isEmpty) throw StateError('当前展示条件下没有歌曲');
-      if (shuffle) displayed.shuffle();
-      var start = startId;
-      if (start != null && !displayed.any((t) => t['id'] == start)) {
-        start = null;
+      JsonMap? selected;
+      if (startId != null) {
+        selected = displayed.where((t) => t['id'] == startId).firstOrNull;
+        selected ??= displayed.where((t) {
+          if (startReleaseId == null) return false;
+          return t['release_identity_id'] == startReleaseId ||
+              ((t['_display_members'] as List?) ?? const []).any(
+                (member) =>
+                    (member as Map)['release_identity_id'] == startReleaseId,
+              );
+        }).firstOrNull;
+        if (selected == null) throw StateError('所选歌曲已不在当前播放结果中，请刷新集合');
+        if (widget.store.online && selected['is_available'] == false) {
+          throw StateError('所选歌曲当前没有在线副本，请检查来源设备');
+        }
       }
+      final playable = displayed
+          .where((t) => !widget.store.online || t['is_available'] != false)
+          .toList();
+      if (playable.isEmpty) throw StateError('当前集合没有在线可播放的歌曲');
+      if (shuffle) playable.shuffle();
       await widget.onPlay(
-        start ?? displayed.first['id'] as int,
-        displayed,
+        (selected ?? playable.first)['id'] as int,
+        playable,
         source,
       );
     } catch (e) {
@@ -417,10 +434,7 @@ class _CollectionBlockState extends State<_CollectionBlock> {
             '${page?['result_total'] ?? summary['result_total'] ?? 0} 项${!widget.store.online ? ' · 离线缓存' : ''}',
           ),
           if (_error != null || page?['error'] != null)
-            Text(
-              _error ?? page!['error'].toString(),
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
+            _ErrorBanner(message: _error ?? page!['error'].toString()),
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
@@ -518,7 +532,12 @@ class _CollectionBlockState extends State<_CollectionBlock> {
         onPlay: (item) {
           if (type == 'track') {
             unawaited(
-              _play(startId: _collectionMap(item['data'])['id'] as int),
+              _play(
+                startId: _collectionMap(item['data'])['id'] as int,
+                startReleaseId: _intValue(
+                  _collectionMap(item['data'])['release_identity_id'],
+                ),
+              ),
             );
           } else {
             unawaited(_play(ids: [item['entity_id'] as int]));
@@ -534,6 +553,17 @@ class _CollectionBlockState extends State<_CollectionBlock> {
           ((page?['result_total'] as num? ?? 0) > raw.length);
       final slivers = <Widget>[
         SliverToBoxAdapter(child: header),
+        if (widget.fullPage && layout == 'list' && type == 'track')
+          PinnedHeaderSliver(
+            child: _CollectionTrackHeader(
+              selecting: _selecting,
+              availability:
+                  ((widget.section?['track_columns'] as List?) ??
+                          ['availability'])
+                      .contains('availability'),
+              removable: summary['system_key'] == null && widget.store.online,
+            ),
+          ),
         ...content,
         if (items.isEmpty && !_loading && layout != 'card')
           const SliverToBoxAdapter(
@@ -749,4 +779,41 @@ List<Widget> _collectionResultSlivers(
   return [
     SliverList.builder(itemCount: items.length, itemBuilder: (c, i) => tile(i)),
   ];
+}
+
+class _CollectionTrackHeader extends StatelessWidget {
+  const _CollectionTrackHeader({
+    required this.selecting,
+    required this.availability,
+    required this.removable,
+  });
+  final bool selecting, availability, removable;
+  @override
+  Widget build(BuildContext context) => Container(
+    key: const Key('collection-track-header'),
+    height: 40,
+    color: IntMusicTheme.of(context).canvas,
+    padding: const EdgeInsets.symmetric(horizontal: 14),
+    child: LayoutBuilder(
+      builder: (context, constraints) => Row(
+        children: [
+          if (selecting) const SizedBox(width: 48),
+          if (constraints.maxWidth >= 532)
+            const SizedBox(width: 84, child: Text('#')),
+          if (constraints.maxWidth >= 532) const SizedBox(width: 12),
+          const Expanded(child: Text('曲目')),
+          if (constraints.maxWidth >= 532) ...[
+            if (availability)
+              const SizedBox(width: 132, child: Center(child: Text('可用性'))),
+            const SizedBox(width: 4),
+            const SizedBox(width: 48, child: Center(child: Text('收录'))),
+            SizedBox(
+              width: removable ? 192 : 144,
+              child: const Center(child: Text('操作')),
+            ),
+          ],
+        ],
+      ),
+    ),
+  );
 }

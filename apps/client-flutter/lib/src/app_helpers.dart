@@ -318,14 +318,6 @@ IconData _historyEventIcon(Object? eventType) {
   };
 }
 
-String _sanitizeRendererId(String value) {
-  return value
-      .toLowerCase()
-      .replaceAll(RegExp(r'[^a-z0-9_-]+'), '-')
-      .replaceAll(RegExp(r'-+'), '-')
-      .replaceAll(RegExp(r'^-|-$'), '');
-}
-
 String _searchSubtitle(Map<String, dynamic> item, _ResultKind kind) {
   return switch (kind) {
     _ResultKind.track => _joinParts([

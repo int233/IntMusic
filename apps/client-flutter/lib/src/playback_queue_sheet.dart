@@ -115,15 +115,19 @@ class _QueueSheetState extends State<_QueueSheet> {
     });
   }
 
-  List<Map<String, dynamic>> _groups() => projectSongList([
-    for (var i = 0; i < _items.length; i++)
-      {
-        ...(widget.displayState?.project(_asMap(_items[i]['track'])) ??
-            _asMap(_items[i]['track'])),
-        '_queue_item_id': _items[i]['id'],
-        '_queue_index': i,
-      },
-  ], mergeSameName: widget.mergeSameName);
+  List<Map<String, dynamic>> _groups() => projectSongList(
+    [
+      for (var i = 0; i < _items.length; i++)
+        {
+          ...(widget.displayState?.project(_asMap(_items[i]['track'])) ??
+              _asMap(_items[i]['track'])),
+          '_queue_item_id': _items[i]['id'],
+          '_queue_index': i,
+        },
+    ],
+    mergeSameName: widget.mergeSameName,
+    preserveOccurrences: true,
+  );
 
   Widget _groupedQueue(
     BuildContext context,

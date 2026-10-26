@@ -283,6 +283,117 @@ async fn eof_advances_the_owning_output_once_and_keeps_duplicate_occurrences() {
 }
 
 #[tokio::test]
+async fn output_transfer_keeps_full_queue_policy_and_advances_at_eof() {
+    for stop_source in [true, false] {
+        let (state, dir) = state().await;
+        let source_zone = "renderer:mac:a";
+        let target_zone = "renderer:mac:b";
+        let initial = start(&state, source_zone).await;
+        let old_target = start(&state, target_zone).await;
+        let source = protocol::CollectionQueueSource {
+            collection_id: 3,
+            result_version: "favorites-batch".into(),
+            plan_id: "favorites-plan".into(),
+            name: "我喜欢".into(),
+        };
+        core_db::replace_playback_queue_v3(
+            state.pool(),
+            source_zone,
+            &initial.queue,
+            Some(initial.queue[1].item_id),
+            Some(&source),
+        )
+        .await
+        .unwrap();
+        let mode = PlaybackSessionModeV3 {
+            repeat: PlaybackRepeatModeV3::All,
+            shuffle: true,
+            stop_after_current: false,
+        };
+        core_db::update_playback_session_mode_v3(state.pool(), source_zone, mode)
+            .await
+            .unwrap();
+        let before = playback_session_snapshot_v3(&state, source_zone)
+            .await
+            .unwrap();
+        let _ = transfer_zone(
+            State(state.clone()),
+            Path(source_zone.into()),
+            Json(protocol::ZoneTransferRequest {
+                target_zone_id: target_zone.into(),
+                stop_source,
+            }),
+        )
+        .await
+        .unwrap();
+        let transferred = playback_session_snapshot_v3(&state, target_zone)
+            .await
+            .unwrap();
+        assert_eq!(transferred.queue, before.queue);
+        assert_eq!(transferred.current_item_id, before.current_item_id);
+        assert_eq!(transferred.queue_source, Some(source));
+        assert_eq!(transferred.mode, mode);
+        assert_eq!(transferred.shuffle_seed, before.shuffle_seed);
+        assert!(transferred.epoch > old_target.epoch);
+        assert_eq!(transferred.transport, PlaybackTransportState::Loading);
+        let source_after = playback_session_snapshot_v3(&state, source_zone)
+            .await
+            .unwrap();
+        assert_eq!(source_after.queue, before.queue);
+        assert_eq!(
+            source_after.transport == PlaybackTransportState::Stopped,
+            stop_source
+        );
+
+        let QueueAdvanceV3::Select(expected) = next_item(&transferred, true) else {
+            panic!("queue should continue")
+        };
+        let eof = command(
+            &state,
+            target_zone,
+            PlaybackSessionActionV3::Complete {
+                command_sequence: transferred.command_sequence.unwrap(),
+            },
+        )
+        .await;
+        let ack = submit(&state, target_zone, eof.clone()).await;
+        assert_eq!(ack.status, PlaybackCommandStatusV3::Applied);
+        assert_eq!(ack.snapshot.unwrap().current_item_id, Some(expected));
+        assert_eq!(
+            submit(&state, target_zone, eof).await.status,
+            PlaybackCommandStatusV3::Duplicate
+        );
+        let source_final = playback_session_snapshot_v3(&state, source_zone)
+            .await
+            .unwrap();
+        assert_eq!(source_final.current_item_id, before.current_item_id);
+        cleanup(state, dir).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_output_transfer_preserves_both_queues() {
+    let (state, dir) = state().await;
+    let before = start(&state, "renderer:mac:a").await;
+    let result = transfer_zone(
+        State(state.clone()),
+        Path("renderer:mac:a".into()),
+        Json(protocol::ZoneTransferRequest {
+            target_zone_id: "renderer:missing:a".into(),
+            stop_source: true,
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+    let after = playback_session_snapshot_v3(&state, "renderer:mac:a")
+        .await
+        .unwrap();
+    assert_eq!(after.queue, before.queue);
+    assert_eq!(after.transport, before.transport);
+    cleanup(state, dir).await;
+}
+
+#[tokio::test]
 async fn stopped_report_never_means_eof_and_current_removal_updates_audio() {
     let (state, dir) = state().await;
     let zone = "renderer:mac:a";
