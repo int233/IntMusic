@@ -84,6 +84,24 @@ Map<String, dynamic> releaseFixture() => {
 
 void main() {
   test(
+    'cached media uses current device presence instead of a saved heartbeat expiry',
+    () {
+      final media = projectMediaPresence(releaseFixture(), (_) => true);
+      final copy =
+          (media['variants'] as List)[1]['replicas'][0] as Map<String, dynamic>;
+      expect(replicaPresence(copy, coreConnected: true), 'available');
+      expect(replicaPresence(copy, coreConnected: false), 'offline');
+      final offline = projectMediaPresence(releaseFixture(), (_) => false);
+      expect(
+        replicaPresence(
+          (offline['variants'] as List)[1]['replicas'][0],
+          coreConnected: true,
+        ),
+        'offline',
+      );
+    },
+  );
+  test(
     'album cards combine encodings and devices, never distinct editions',
     () {
       final groups = groupReleaseMedia(releaseFixture());

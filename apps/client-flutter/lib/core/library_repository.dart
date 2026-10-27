@@ -1,7 +1,13 @@
-part of '../intmusic_client.dart';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:sqflite_common/sqlite_api.dart';
+import 'json_values.dart';
+import 'logging/client_log.dart';
+import 'network/core_api_client.dart';
+import 'storage/client_cache_database.dart';
 
-class _ClientCacheSnapshot {
-  const _ClientCacheSnapshot({
+class LibraryProjection {
+  const LibraryProjection({
     required this.serverId,
     required this.catalogEpoch,
     required this.cursor,
@@ -28,120 +34,16 @@ class _ClientCacheSnapshot {
   bool get isEmpty => values.isEmpty;
 }
 
-class _ClientCacheStore {
-  static const _databaseVersion = 1;
-  static Database? _database;
-  static Future<void> _writeQueue = Future<void>.value();
+class ClientLibraryRepository {
+  ClientLibraryRepository(this._database);
+  final ClientLibraryDatabase _database;
+  Future<void> _writeQueue = Future<void>.value();
+  Future<Database> _open() => _database.open();
+  String _normalizedCoreUrl(String value) => _database.keyForEndpoint(value);
 
-  static DatabaseFactory _factory() {
-    if (Platform.isAndroid || Platform.isIOS) {
-      return mobile_sqlite.databaseFactory;
-    }
-    sqfliteFfiInit();
-    return databaseFactoryFfi;
-  }
-
-  static Future<Database> _open() async {
-    final current = _database;
-    if (current != null && current.isOpen) return current;
-    final support = await getApplicationSupportDirectory();
-    final cacheDirectory = Directory(
-      '${support.path}${Platform.pathSeparator}cache',
-    );
-    await cacheDirectory.create(recursive: true);
-    final database = await _factory().openDatabase(
-      '${cacheDirectory.path}${Platform.pathSeparator}client-cache-v2.sqlite3',
-      options: OpenDatabaseOptions(
-        version: _databaseVersion,
-        onConfigure: configureClientCacheDatabase,
-        onCreate: (database, _) async {
-          await database.execute('''
-            CREATE TABLE cache_entries (
-              core_url TEXT NOT NULL,
-              server_id TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              entity_key TEXT NOT NULL,
-              payload TEXT NOT NULL,
-              updated_at INTEGER NOT NULL,
-              PRIMARY KEY (core_url, kind, entity_key)
-            )
-          ''');
-          await database.execute('''
-            CREATE TABLE sync_state (
-              core_url TEXT PRIMARY KEY,
-              server_id TEXT NOT NULL,
-              catalog_epoch TEXT,
-              cursor INTEGER NOT NULL DEFAULT 0,
-              event_cursor INTEGER NOT NULL DEFAULT 0,
-              last_sync_at INTEGER,
-              last_error TEXT
-            )
-          ''');
-          await database.execute('''
-            CREATE TABLE search_index (
-              core_url TEXT NOT NULL,
-              kind TEXT NOT NULL,
-              entity_id INTEGER NOT NULL,
-              title TEXT NOT NULL,
-              subtitle TEXT NOT NULL,
-              terms TEXT NOT NULL,
-              payload TEXT NOT NULL,
-              PRIMARY KEY (core_url, kind, entity_id)
-            )
-          ''');
-          await database.execute('''
-            CREATE INDEX idx_search_index_core_kind
-            ON search_index(core_url, kind)
-          ''');
-          await _createCatalogEntitiesTable(database);
-          await _createDetailWarmStateTable(database);
-        },
-      ),
-    );
-    _database = database;
-    return database;
-  }
-
-  static String _normalizedCoreUrl(String value) =>
-      value.trim().replaceAll(RegExp(r'/+$'), '');
-
-  static Future<void> _createDetailWarmStateTable(DatabaseExecutor database) =>
-      database.execute('''
-    CREATE TABLE IF NOT EXISTS detail_warm_state (
-      core_url TEXT NOT NULL,
-      server_id TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      target_cursor INTEGER NOT NULL,
-      after_id INTEGER NOT NULL DEFAULT 0,
-      complete INTEGER NOT NULL DEFAULT 0,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (core_url, kind)
-    )
-  ''');
-
-  static Future<void> _createCatalogEntitiesTable(
-    DatabaseExecutor database,
-  ) async {
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS catalog_entities (
-        core_url TEXT NOT NULL,
-        server_id TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        entity_id INTEGER NOT NULL,
-        payload TEXT NOT NULL,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY (core_url, kind, entity_id)
-      )
-    ''');
-    await database.execute('''
-      CREATE INDEX IF NOT EXISTS idx_catalog_entities_core_kind
-      ON catalog_entities(core_url, kind)
-    ''');
-  }
-
-  static Future<_ClientCacheSnapshot> load(String coreUrl) async {
+  Future<LibraryProjection> load(String coreUrl) async {
     try {
-      final normalized = _normalizedCoreUrl(coreUrl);
+      final normalized = await _database.resolveEndpoint(coreUrl);
       final database = await _open();
       final stateRows = await database.query(
         'sync_state',
@@ -167,11 +69,10 @@ class _ClientCacheStore {
         whereArgs: <Object?>[normalized],
         orderBy: 'kind, entity_id',
       );
-      final decoded = await Isolate.run(() {
-        final result = _decodeRows(rows);
-        _decodeCatalogRows(catalogRows, result.values);
-        return result;
-      });
+      final decoded = await compute(_decodeLibraryRows, (
+        rows: rows,
+        catalog: catalogRows,
+      ));
       final values = decoded.values;
       final trackDetails = decoded.trackDetails;
       final albumDetails = decoded.albumDetails;
@@ -192,7 +93,7 @@ class _ClientCacheStore {
               _intValue(row['target_cursor']) ?? cursor;
         }
       }
-      return _ClientCacheSnapshot(
+      return LibraryProjection(
         serverId: serverId,
         catalogEpoch: catalogEpoch,
         cursor: cursor,
@@ -204,8 +105,9 @@ class _ClientCacheStore {
         pendingDetailRefresh: pendingDetailRefresh,
         pendingDetailTargetCursors: pendingDetailTargetCursors,
       );
-    } catch (_) {
-      return const _ClientCacheSnapshot(
+    } catch (error, stack) {
+      ClientLog.error('library.local.load_failed', error, stackTrace: stack);
+      return const LibraryProjection(
         serverId: null,
         catalogEpoch: null,
         cursor: 0,
@@ -281,13 +183,16 @@ class _ClientCacheStore {
     }
   }
 
-  static Future<void> replaceSnapshot(
+  Future<void> replaceSnapshot(
     String coreUrl,
     Map<String, dynamic> snapshot,
-  ) {
-    final normalized = _normalizedCoreUrl(coreUrl);
+  ) async {
     final serverId = snapshot['server_id']?.toString() ?? '';
     final catalogEpoch = snapshot['catalog_epoch']?.toString() ?? '';
+    if (serverId.isEmpty || catalogEpoch.isEmpty) {
+      throw StateError('Missing catalog identity');
+    }
+    final normalized = 'catalog:$serverId:$catalogEpoch';
     final cursor = _intValue(snapshot['cursor']) ?? 0;
     final catalogValues = <String, List<dynamic>>{
       'albums': (snapshot['albums'] as List?) ?? const <dynamic>[],
@@ -298,18 +203,19 @@ class _ClientCacheStore {
     final values = <String, dynamic>{
       'playback_history':
           (snapshot['playback_history'] as List?) ?? const <dynamic>[],
-      'playback_stats': _asMap(snapshot['playback_stats']),
+      'playback_stats': jsonObjectOrEmpty(snapshot['playback_stats']),
       'library_roots':
           (snapshot['library_roots'] as List?) ?? const <dynamic>[],
       'client_library_roots':
           (snapshot['client_library_roots'] as List?) ?? const <dynamic>[],
       'client_file_bindings':
           (snapshot['client_file_bindings'] as List?) ?? const <dynamic>[],
-      'settings': _asMap(snapshot['settings']),
+      'settings': jsonObjectOrEmpty(snapshot['settings']),
       'generated_at': snapshot['generated_at']?.toString(),
-      if (snapshot['status'] is Map) 'status': _asMap(snapshot['status']),
+      if (snapshot['status'] is Map)
+        'status': jsonObjectOrEmpty(snapshot['status']),
       if (snapshot['diagnostics'] is Map)
-        'diagnostics': _asMap(snapshot['diagnostics']),
+        'diagnostics': jsonObjectOrEmpty(snapshot['diagnostics']),
     };
     _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
       final database = await _open();
@@ -443,13 +349,38 @@ class _ClientCacheStore {
         for (final playlist in catalogValues['collections']!) {
           _addSearchInsert(batch, normalized, 'playlist', playlist);
         }
+        batch.insert('core_endpoints', {
+          'url': CoreApiClient.normalizeBaseUrl(coreUrl),
+          'library_key': normalized,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
         await batch.commit(noResult: true);
       });
+      _database.rememberEndpoint(coreUrl, normalized);
     });
     return _writeQueue;
   }
 
-  static Future<void> updateEventCursor(
+  Future<void> advanceCursor(
+    String coreUrl,
+    String serverId,
+    String epoch,
+    int cursor,
+  ) {
+    final key = _normalizedCoreUrl(coreUrl);
+    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
+      final db = await _open();
+      await db.update(
+        'sync_state',
+        {'cursor': cursor},
+        where:
+            'core_url = ? AND server_id = ? AND catalog_epoch = ? AND cursor < ?',
+        whereArgs: [key, serverId, epoch, cursor],
+      );
+    });
+    return _writeQueue;
+  }
+
+  Future<void> updateEventCursor(
     String coreUrl,
     String serverId,
     String? catalogEpoch,
@@ -491,29 +422,6 @@ class _ClientCacheStore {
           DateTime.now().millisecondsSinceEpoch,
         ],
       );
-    });
-    return _writeQueue;
-  }
-
-  static Future<void> clear(String coreUrl) {
-    final normalized = _normalizedCoreUrl(coreUrl);
-    _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
-      final database = await _open();
-      await database.transaction((transaction) async {
-        for (final table in const <String>[
-          'cache_entries',
-          'catalog_entities',
-          'search_index',
-          'detail_warm_state',
-          'sync_state',
-        ]) {
-          await transaction.delete(
-            table,
-            where: 'core_url = ?',
-            whereArgs: <Object?>[normalized],
-          );
-        }
-      });
     });
     return _writeQueue;
   }
@@ -585,7 +493,7 @@ class _ClientCacheStore {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
   }
 
-  static Future<void> putDetail(
+  Future<void> putDetail(
     String coreUrl,
     String serverId,
     String kind,
@@ -597,7 +505,7 @@ class _ClientCacheStore {
     });
   }
 
-  static Future<void> putDetails(
+  Future<void> putDetails(
     String coreUrl,
     String serverId,
     String kind,
@@ -624,7 +532,7 @@ class _ClientCacheStore {
     return _writeQueue;
   }
 
-  static Future<void> putOverviewValues(
+  Future<void> putOverviewValues(
     String coreUrl,
     String serverId,
     Map<String, dynamic> values,
@@ -677,7 +585,7 @@ class _ClientCacheStore {
     return _writeQueue;
   }
 
-  static Future<void> invalidateDetails(String coreUrl, String kind) {
+  Future<void> invalidateDetails(String coreUrl, String kind) {
     final normalized = _normalizedCoreUrl(coreUrl);
     _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
       final database = await _open();
@@ -690,7 +598,7 @@ class _ClientCacheStore {
     return _writeQueue;
   }
 
-  static Future<void> markDetailsForRefresh(
+  Future<void> markDetailsForRefresh(
     String coreUrl,
     String serverId,
     int cursor,
@@ -719,7 +627,7 @@ class _ClientCacheStore {
     return _writeQueue;
   }
 
-  static Future<void> updateDetailWarmProgress(
+  Future<void> updateDetailWarmProgress(
     String coreUrl,
     String kind,
     int afterId, {
@@ -743,7 +651,7 @@ class _ClientCacheStore {
     return _writeQueue;
   }
 
-  static Future<Map<String, dynamic>> search(
+  Future<Map<String, dynamic>> search(
     String coreUrl,
     String query, {
     int limit = 120,
@@ -809,7 +717,7 @@ class _ClientCacheStore {
     return result;
   }
 
-  static Future<void> recordError(String coreUrl, Object error) async {
+  Future<void> recordError(String coreUrl, Object error) async {
     try {
       final database = await _open();
       await database.update(
@@ -846,3 +754,14 @@ class _DecodedCacheRows {
   final Map<int, Map<String, dynamic>> albumDetails;
   final Map<int, Map<String, dynamic>> artistDetails;
 }
+
+_DecodedCacheRows _decodeLibraryRows(
+  ({List<Map<String, Object?>> rows, List<Map<String, Object?>> catalog}) data,
+) {
+  final result = ClientLibraryRepository._decodeRows(data.rows);
+  ClientLibraryRepository._decodeCatalogRows(data.catalog, result.values);
+  return result;
+}
+
+int? _intValue(Object? value) =>
+    value is num ? value.toInt() : int.tryParse(value?.toString() ?? '');

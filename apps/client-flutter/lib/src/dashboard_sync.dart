@@ -36,8 +36,14 @@ extension _DashboardSync on _CoreDashboardState {
     }
   }
 
-  Future<void> _activateLocalPlaybackFallback() async {
-    if (_localPlaybackFallbackActive) return;
+  Future<void> _activateLocalPlaybackFallback() =>
+      _localPlaybackTransition ??= _activateLocalPlayback().whenComplete(
+        () => _localPlaybackTransition = null,
+      );
+
+  Future<void> _activateLocalPlayback() async {
+    final alreadyLocal = _localPlaybackFallbackActive;
+    _coreLibraryOnline = false;
     await _rendererAudioInitialization;
     final previousActiveOutput = _clientOutputForZone(_activeZoneId());
     for (final task in const <String>[
@@ -51,8 +57,14 @@ extension _DashboardSync on _CoreDashboardState {
       _taskScheduler.cancel(task);
     }
     _eventReconnectTimer?.cancel();
-    await _eventSocket?.close();
+    final socket = _eventSocket;
     _eventSocket = null;
+    await socket?.close();
+    _collections.markUnavailable();
+    if (alreadyLocal) {
+      _scheduleCoreReconnect(resetBackoff: true);
+      return;
+    }
     await _failoverActiveCoreStreams('offline_transition');
     final offlineZones = await _buildOfflineRendererZones();
     final offlineSelectedOutput =
@@ -189,7 +201,7 @@ extension _DashboardSync on _CoreDashboardState {
     if (resetBackoff) {
       _offlineReconnectFailures = 0;
     }
-    if (!_localPlaybackFallbackActive || !mounted) {
+    if (_coreLibraryOnline || !mounted) {
       return;
     }
     const delays = <Duration>[
@@ -201,7 +213,7 @@ extension _DashboardSync on _CoreDashboardState {
     ];
     final delay = delays[min(_offlineReconnectFailures, delays.length - 1)];
     _offlineReconnectTimer = Timer(delay, () async {
-      if (!mounted || !_localPlaybackFallbackActive || _offlineReconnectBusy) {
+      if (!mounted || _coreLibraryOnline || _offlineReconnectBusy) {
         _scheduleCoreReconnect();
         return;
       }
@@ -225,7 +237,7 @@ extension _DashboardSync on _CoreDashboardState {
         );
       } finally {
         _offlineReconnectBusy = false;
-        if (_localPlaybackFallbackActive && mounted) {
+        if (!_coreLibraryOnline && mounted) {
           _offlineReconnectFailures += 1;
           _scheduleCoreReconnect();
         }
@@ -246,6 +258,8 @@ extension _DashboardSync on _CoreDashboardState {
       throw StateError('Not an IntMusic core: ${_coreUrlController.text}');
     }
     if (!isCurrent()) return;
+    await api.probeLibraryService(timeout: const Duration(seconds: 3));
+    if (!isCurrent()) return;
     await _saveCoreUrlPreference();
     if (!isCurrent()) return;
     final coreUrl = api.baseUrl;
@@ -256,7 +270,6 @@ extension _DashboardSync on _CoreDashboardState {
     );
     if (!isCurrent()) return;
     _rendererRegisteredCoreUrl = coreUrl;
-    _status = status;
     final wasOffline = _localPlaybackFallbackActive;
     final continuingOutputId = wasOffline
         ? _offlineOutputForZone(_playback?['zone_id']?.toString())
@@ -265,14 +278,6 @@ extension _DashboardSync on _CoreDashboardState {
         continuingOutputId != null &&
         _rendererLocalFileByOutput[continuingOutputId] == true &&
         _rendererLoadedTrackByOutput[continuingOutputId] != null;
-    if (wasOffline) {
-      await _finishOfflinePlayback('reconnected');
-      artworkCacheCoordinator.retryFailedImages();
-    }
-    _localPlaybackFallbackActive = false;
-    _refreshTrackAvailabilityProjection();
-    _offlineReconnectTimer?.cancel();
-    _offlineReconnectFailures = 0;
     _startRendererHeartbeat();
     _startRendererPositionReporter();
     _startZoneRefresh();
@@ -309,51 +314,43 @@ extension _DashboardSync on _CoreDashboardState {
           .catchError((_) => const <String, dynamic>{}),
     ]);
     if (!isCurrent()) return;
-    _status = status;
     _outputs = results[0] as List<dynamic>;
     _zones = results[1] as List<dynamic>;
     _diagnostics = _asMap(results[2]);
     final settings = _asMap(results[3]);
-    _serverSettings = _asMap(settings['server']);
-    _serverAliasController.text =
-        _serverSettings?['alias']?.toString() ??
-        status['display_name']?.toString() ??
-        'Core local';
-    _playbackStats = _asMap(results[4]);
-    _playbackHistory = results[5] as List<dynamic>;
-    _favoriteSettings = _asMap(settings['favorites']);
-    _metadataSettings = _asMap(settings['metadata']);
-    _songDisplaySettings = _asMap(settings['song_display']);
     _transcodingStatus = _asMap(results[6]);
     if (syncSnapshot != null) {
-      await _ClientCacheStore.replaceSnapshot(coreUrl, {
+      await _clientLibrary.replaceSnapshot(coreUrl, {
         ...syncSnapshot,
         'status': status,
         'diagnostics': _diagnostics,
       });
       if (!isCurrent()) return;
-      _applySyncSnapshot(
-        syncSnapshot,
-        status: status,
-        diagnostics: _diagnostics,
-      );
+      await _publishCommittedLibrary(coreUrl, status);
       await _markPendingDetailRefresh();
     } else {
       await _persistOverviewValues(<String, dynamic>{
         'status': status,
         'diagnostics': _diagnostics,
-        'playback_stats': _playbackStats,
-        'playback_history': _playbackHistory,
+        'playback_stats': results[4],
+        'playback_history': results[5],
         'settings': settings,
       });
+      await _publishCommittedLibrary(coreUrl, status);
     }
+    if (!isCurrent()) return;
+    _serverAliasController.text =
+        _serverSettings?['alias']?.toString() ??
+        status['display_name']?.toString() ??
+        'Core local';
+    _status = status;
     _offlineLibrary.serverId = status['server_id']?.toString();
     _offlineLibrary.catalogEpoch = status['catalog_epoch']?.toString();
     var flushedOfflineMutations = false;
     try {
       flushedOfflineMutations = await _flushOfflineMutations();
     } catch (error) {
-      await _ClientCacheStore.recordError(coreUrl, error);
+      await _clientLibrary.recordError(coreUrl, error);
     }
     if (flushedOfflineMutations) {
       unawaited(_backgroundLibrarySync());
@@ -393,7 +390,36 @@ extension _DashboardSync on _CoreDashboardState {
       );
     }
     await _OfflineLibraryStore.save(_offlineLibrary);
+    if (!isCurrent()) return;
+    _collections.configure(api, status);
+    _collections.updateCatalog(_tracks);
+    await _collections.ready;
+    _collections.setNetworkAvailable(true);
+    await _collections.refresh();
+    if (!isCurrent()) return;
+    ClientLog.event(
+      'library.local.sync_committed',
+      data: {
+        'tracks': _tracks.length,
+        'albums': _albums.length,
+        'artists': _artists.length,
+        'collections_complete': _collections.complete,
+        'local_files': _offlineLibrary.copies.length,
+      },
+    );
+    if (wasOffline && !continuingLocally) {
+      await _finishOfflinePlayback('reconnected');
+      artworkCacheCoordinator.retryFailedImages();
+    }
+    _coreLibraryOnline = true;
+    // A restored connection updates library data; it does not replace the
+    // decoder or the queue that continued playing during the interruption.
+    _localPlaybackFallbackActive = continuingLocally;
+    _refreshTrackAvailabilityProjection();
+    _offlineReconnectTimer?.cancel();
+    _offlineReconnectFailures = 0;
     _keepSelectedZoneValid();
+    if (continuingLocally) await _adoptRunningLocalPlayback();
     _syncPlaybackFromSelectedZone();
     await _refreshPlaybackQueue();
     _scheduleActiveTrackDetailLoad(_playback);
@@ -446,6 +472,15 @@ extension _DashboardSync on _CoreDashboardState {
             CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
       throw StateError('Core connection changed during synchronization');
     }
+    if (result.snapshot == null && result.cursor > _cacheCursor) {
+      await _clientLibrary.advanceCursor(
+        api.baseUrl,
+        status['server_id'].toString(),
+        status['catalog_epoch'].toString(),
+        result.cursor,
+      );
+      _cacheCursor = result.cursor;
+    }
     _detailRefreshScopes.addAll(result.detailKinds);
     return result.snapshot;
   }
@@ -465,19 +500,28 @@ extension _DashboardSync on _CoreDashboardState {
   }
 
   Future<void> _refreshHistoryCache() async {
-    if (_localPlaybackFallbackActive ||
+    if (!_coreLibraryOnline ||
         _cacheServerId == null ||
         _clientLibrarySyncingRootIds.isNotEmpty) {
       return;
     }
+    final api = _api;
+    final server = _cacheServerId;
+    final epoch = _cacheCatalogEpoch;
     try {
       final values = await Future.wait<dynamic>([
-        _api.getJson('/playback/history?limit=250'),
-        _api.getJson('/playback/stats?top_limit=50'),
-        _api.getJson('/settings'),
+        api.getJson('/playback/history?limit=250'),
+        api.getJson('/playback/stats?top_limit=50'),
+        api.getJson('/settings'),
       ]);
+      if (!_sameCatalog(api, server, epoch)) return;
       final settings = _asMap(values[2]);
-      if (mounted) {
+      await _persistOverviewValues(<String, dynamic>{
+        'playback_history': values[0],
+        'playback_stats': values[1],
+        'settings': settings,
+      });
+      if (_sameCatalog(api, server, epoch)) {
         _mutate(() {
           _playbackHistory = values[0] as List<dynamic>;
           _playbackStats = _asMap(values[1]);
@@ -487,19 +531,14 @@ extension _DashboardSync on _CoreDashboardState {
           _songDisplaySettings = _asMap(settings['song_display']);
         });
       }
-      await _persistOverviewValues(<String, dynamic>{
-        'playback_history': values[0],
-        'playback_stats': values[1],
-        'settings': settings,
-      });
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
     }
   }
 
   Future<void> _backgroundLibrarySync({bool force = false}) async {
     if (_backgroundSyncBusy ||
-        _localPlaybackFallbackActive ||
+        !_coreLibraryOnline ||
         _clientLibrarySyncingRootIds.isNotEmpty ||
         _rendererRegisteredCoreUrl == null) {
       return;
@@ -516,7 +555,7 @@ extension _DashboardSync on _CoreDashboardState {
 
   Future<void> _backgroundLibrarySyncNow({required bool force}) async {
     if (!mounted ||
-        _localPlaybackFallbackActive ||
+        !_coreLibraryOnline ||
         _clientLibrarySyncingRootIds.isNotEmpty) {
       return;
     }
@@ -534,19 +573,24 @@ extension _DashboardSync on _CoreDashboardState {
         status,
         _coreUrlController.text.trim(),
       );
-      try {
-        await _flushOfflineMutations();
-      } catch (error) {
-        // A rejected/offline mutation must not prevent downloading the catalog.
-        await _ClientCacheStore.recordError(coreUrl, error);
+      if (!catalogReset) {
+        try {
+          await _flushOfflineMutations();
+        } catch (error) {
+          // A rejected/offline mutation must not prevent downloading the catalog.
+          await _clientLibrary.recordError(coreUrl, error);
+        }
       }
       final snapshot = await _fetchSyncSnapshot(
         status,
         api: api,
         force: force || catalogReset,
       );
-      if (snapshot == null) return;
-      await _ClientCacheStore.replaceSnapshot(coreUrl, {
+      if (snapshot == null) {
+        unawaited(_adoptRunningLocalPlayback());
+        return;
+      }
+      await _clientLibrary.replaceSnapshot(coreUrl, {
         ...snapshot,
         'status': status,
         'diagnostics': _diagnostics,
@@ -555,25 +599,53 @@ extension _DashboardSync on _CoreDashboardState {
           coreUrl != CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
         return;
       }
-      _mutate(() {
-        _applySyncSnapshot(snapshot, status: status, diagnostics: _diagnostics);
-        _error = null;
-      });
+      await _publishCommittedLibrary(coreUrl, status);
+      if (mounted) _mutate(() => _error = null);
       await _markPendingDetailRefresh();
       unawaited(_warmDetailCache());
-    } catch (error) {
-      await _ClientCacheStore.recordError(coreUrl, error);
-    } finally {
+      unawaited(_adoptRunningLocalPlayback());
       if (catalogReset && _clientLibraryRoots.isNotEmpty && mounted) {
         unawaited(_rebindLocalLibraryAfterCatalogReset());
       }
+    } catch (error) {
+      await _clientLibrary.recordError(coreUrl, error);
     }
+  }
+
+  Future<void> _publishCommittedLibrary(
+    String coreUrl,
+    Map<String, dynamic> status,
+  ) async {
+    final saved = await _clientLibrary.load(coreUrl);
+    if (saved.isEmpty ||
+        saved.serverId != status['server_id'] ||
+        saved.catalogEpoch != status['catalog_epoch']) {
+      throw StateError(
+        'The committed local library could not be read; keeping the previous projection',
+      );
+    }
+    if (!mounted ||
+        coreUrl != CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
+      return;
+    }
+    _mutate(
+      () => _applySyncSnapshot(
+        {
+          ...saved.values,
+          'server_id': saved.serverId,
+          'catalog_epoch': saved.catalogEpoch,
+          'cursor': saved.cursor,
+        },
+        status: status,
+        diagnostics: _diagnostics,
+      ),
+    );
   }
 
   Future<void> _warmDetailCache() async {
     if (_detailWarmRetryAt?.isAfter(DateTime.now()) == true) return;
     if (_detailWarmupBusy ||
-        _localPlaybackFallbackActive ||
+        !_coreLibraryOnline ||
         _cacheServerId == null ||
         _clientLibrarySyncingRootIds.isNotEmpty) {
       return;
@@ -596,7 +668,7 @@ extension _DashboardSync on _CoreDashboardState {
         _detailWarmTargetCursors[kind] = targetCursor;
         bool canContinue() =>
             mounted &&
-            !_localPlaybackFallbackActive &&
+            _coreLibraryOnline &&
             _cacheServerId == serverId &&
             _cacheCatalogEpoch == epoch &&
             api.baseUrl ==
@@ -627,18 +699,13 @@ extension _DashboardSync on _CoreDashboardState {
               final id = _intValue(value['id']);
               final detail = _asMap(value['detail']);
               if (id == null || detail.isEmpty) continue;
-              target[id] = detail;
               batch[id] = detail;
             }
-            await _ClientCacheStore.putDetails(
-              api.baseUrl,
-              serverId,
-              kind,
-              batch,
-            );
+            await _clientLibrary.putDetails(api.baseUrl, serverId, kind, batch);
             if (!canContinue()) return;
+            target.addAll(batch);
             _detailWarmAfterIds[kind] = next;
-            await _ClientCacheStore.updateDetailWarmProgress(
+            await _clientLibrary.updateDetailWarmProgress(
               api.baseUrl,
               kind,
               next,
@@ -670,18 +737,18 @@ extension _DashboardSync on _CoreDashboardState {
         Duration(seconds: min(180, 3 * (1 << _detailWarmFailures))),
       );
       retryPending = true;
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
     } finally {
       _detailWarmupBusy = false;
       if (retryPending &&
           _detailRefreshScopes.isNotEmpty &&
-          !_localPlaybackFallbackActive) {
+          _coreLibraryOnline) {
         unawaited(
           Future<void>.delayed(
             Duration(seconds: min(180, 3 * (1 << _detailWarmFailures))),
             () {
               if (mounted &&
-                  !_localPlaybackFallbackActive &&
+                  _coreLibraryOnline &&
                   _clientLibrarySyncingRootIds.isEmpty) {
                 unawaited(_warmDetailCache());
               }
@@ -699,7 +766,7 @@ extension _DashboardSync on _CoreDashboardState {
       _detailWarmAfterIds[kind] = 0;
       _detailWarmTargetCursors[kind] = _cacheCursor;
     }
-    await _ClientCacheStore.markDetailsForRefresh(
+    await _clientLibrary.markDetailsForRefresh(
       _coreUrlController.text,
       serverId,
       _cacheCursor,
@@ -725,7 +792,11 @@ extension _DashboardSync on _CoreDashboardState {
     if (!isCurrent() || library.outbox.isEmpty) return false;
     var flushedAny = false;
     while (isCurrent() && library.outbox.isNotEmpty) {
-      final batch = library.outbox.take(100).toList(growable: false);
+      final batch = library.outbox
+          .where((m) => m.trackId > 0)
+          .take(100)
+          .toList(growable: false);
+      if (batch.isEmpty) break;
       final result = _asMap(
         await api.postJson('/client-sync/mutations', <String, dynamic>{
           'device_id': _clientId,

@@ -34,6 +34,16 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
         'offline': _localPlaybackFallbackActive,
       },
     );
+    if (_coreLibraryOnline &&
+        _localPlaybackFallbackActive &&
+        trackId > 0 &&
+        await _availableOfflineCopy(trackId) == null) {
+      await _playTrackFromCollection(trackId, _tracks);
+      return;
+    }
+    if (trackId < 0 && !_localPlaybackFallbackActive) {
+      await _activateLocalPlaybackFallback();
+    }
     if (_localPlaybackFallbackActive) {
       final trackIds = _tracks
           .map((track) => _intValue((track as Map)['id']))
@@ -65,11 +75,25 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
     List<dynamic> sourceTracks, {
     Map<String, dynamic>? source,
   }) async {
+    if (_coreLibraryOnline &&
+        _localPlaybackFallbackActive &&
+        trackId > 0 &&
+        await _availableOfflineCopy(trackId) == null) {
+      await _finishOfflinePlayback('remote_source_selected');
+      _localPlaybackFallbackActive = false;
+    }
+    if (trackId < 0 && !_localPlaybackFallbackActive) {
+      await _activateLocalPlaybackFallback();
+    }
     final trackIds = sourceTracks
         .map((track) => _intValue((track as Map)['id']))
         .whereType<int>()
+        .where((id) => _localPlaybackFallbackActive || id > 0)
         .toList(growable: false);
     final startIndex = trackIds.indexOf(trackId);
+    if (trackId < 0 && !_localPlaybackFallbackActive) {
+      await _activateLocalPlaybackFallback();
+    }
     if (_localPlaybackFallbackActive) {
       await _playOfflineTrack(
         trackId,
@@ -101,6 +125,14 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
       'start_item_id': items[startIndex]['item_id'],
       'position_ms': 0,
     }, commandId: _beginPlaybackIntent(zoneId, 'play_collection'));
+    if (_localPlaybackFallbackActive) {
+      await _playOfflineTrack(
+        trackId,
+        sourceTrackIds: trackIds,
+        queueSource: source,
+      );
+      return;
+    }
     if (mounted && playback != null) {
       _mutatePlayback(() => _applyPlayback(playback));
     }
@@ -115,7 +147,10 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
       await _playOfflineTrack(trackId);
       return _playback;
     }
-    if (!await _refreshPlaybackSessionV3(zoneId: zoneId)) return null;
+    if (!await _refreshPlaybackSessionV3(zoneId: zoneId)) {
+      if (_localPlaybackFallbackActive) await _playOfflineTrack(trackId);
+      return null;
+    }
     final agent =
         _playbackAgentsByOutput[_clientOutputForZone(zoneId) ?? zoneId]!;
     final matches = agent.items.where((item) => item.trackId == trackId);
@@ -227,6 +262,13 @@ extension _DashboardPlaybackQueue on _CoreDashboardState {
     );
     for (final candidate in candidates) {
       final copy = await _availableOfflineCopy(candidate.trackId);
+      if (copy == null && _coreLibraryOnline && candidate.trackId > 0) {
+        final source = _queueItems()
+            .map((item) => _asMap(item['track']))
+            .toList();
+        await _playTrackFromCollection(candidate.trackId, source);
+        return true;
+      }
       if (copy == null) {
         ClientLog.event(
           'playback.agent.candidate_skipped',

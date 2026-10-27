@@ -300,7 +300,18 @@ extension _DashboardShell on _CoreDashboardState {
               _playTrackFromCollection(id, tracks, source: source),
           onToggleFavorite: _toggleFavorite,
           coreBaseUrl: _coreUrlController.text,
-          status: _status,
+          status: {
+            ...?_status,
+            'counts': {
+              ...jsonObjectOrEmpty(_status?['counts']),
+              'tracks': _tracks.length,
+              'albums': _albums.length,
+              'artists': _artists.length,
+              'files':
+                  jsonObjectOrEmpty(_status?['counts'])['files'] ??
+                  _offlineLibrary.copies.length,
+            },
+          },
           playback: _playback,
           trackDetail: _activeTrackDetail,
           zones: _zones,
@@ -462,7 +473,20 @@ extension _DashboardShell on _CoreDashboardState {
         final trackId = _currentRoute.entityId;
         return _TrackInfoPage(
           coreBaseUrl: _coreUrlController.text,
-          detail: _trackDetailCache[trackId],
+          coreOnline: _coreLibraryOnline,
+          loadMedia: (id) async => projectMediaPresence(
+            jsonObjectOrEmpty(_trackDetailCache[id]?['media']),
+            _libraryDeviceIsOnline,
+          ),
+          detail: _trackDetailCache[trackId] == null
+              ? null
+              : {
+                  ..._trackDetailCache[trackId]!,
+                  'media': projectMediaPresence(
+                    jsonObjectOrEmpty(_trackDetailCache[trackId]?['media']),
+                    _libraryDeviceIsOnline,
+                  ),
+                },
           onClose: _closeTrackDetail,
           onOpenTrack: (id) => _openTrackDetail(id, addToHistory: false),
           onPlayTrack: _playTrack,

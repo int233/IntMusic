@@ -126,6 +126,9 @@ pub enum CollectionEntity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionItem {
     pub entity_id: i64,
+    /// Ordered release identities selected by the playback rules of this batch.
+    #[serde(default)]
+    pub playback_track_ids: Vec<i64>,
     #[serde(flatten)]
     pub entity: CollectionEntity,
     pub reason: String,

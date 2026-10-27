@@ -34,6 +34,7 @@ class CatalogIdentity {
 typedef LibrarySyncResult = ({
   Map<String, dynamic>? snapshot,
   Set<String> detailKinds,
+  int cursor,
 });
 
 Future<LibrarySyncResult> fetchLibrarySnapshot({
@@ -59,10 +60,30 @@ Future<LibrarySyncResult> fetchLibrarySnapshot({
     if (response['requires_snapshot'] == false &&
         response['cursor'] == cursor &&
         changes.isEmpty) {
-      return (snapshot: null, detailKinds: kinds);
+      return (snapshot: null, detailKinds: kinds, cursor: cursor);
     }
+    // Collection membership/layout has its own durable synchronizer. A fully
+    // covered sequence of those changes does not require downloading every song.
+    var collectionOnly = changes.isNotEmpty;
+    var expected = cursor;
+    for (final change in changes) {
+      if (change is! Map ||
+          change['cursor'] != ++expected ||
+          !const {'collections', 'home'}.contains(change['scope'])) {
+        collectionOnly = false;
+        break;
+      }
+    }
+    if (collectionOnly && response['cursor'] == expected) {
+      return (snapshot: null, detailKinds: kinds, cursor: expected);
+    }
+    var previousChange = cursor;
     for (final change in changes.whereType<Map>()) {
       final value = change['cursor'];
+      if (value is! int || value != previousChange + 1) {
+        kinds.addAll(libraryDetailKinds);
+      }
+      if (value is int) previousChange = value;
       if (value is int && value > coveredCursor) coveredCursor = value;
       final reason = change['reason']?.toString().toLowerCase() ?? '';
       switch (change['scope']) {
@@ -114,7 +135,7 @@ Future<LibrarySyncResult> fetchLibrarySnapshot({
   // A snapshot can include changes beyond the limited change page (or writes
   // concurrent with it). Their scopes are unknown, so refresh every detail.
   if (nextCursor != coveredCursor) kinds.addAll(libraryDetailKinds);
-  return (snapshot: snapshot, detailKinds: kinds);
+  return (snapshot: snapshot, detailKinds: kinds, cursor: nextCursor);
 }
 
 /// Returns false on suspension without declaring the unfinished scope complete.

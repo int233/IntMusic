@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:intmusic_client/core/collections.dart';
+import 'package:intmusic_client/core/storage/client_cache_database.dart';
 import 'package:intmusic_client/core/network/core_api_client.dart';
 
 JsonMap collectionSong(int id) => {
@@ -21,18 +22,23 @@ JsonMap collectionSong(int id) => {
 };
 
 class CollectionFixture {
-  CollectionFixture(this.server, {this.count = 240});
+  CollectionFixture(this.server, {this.count = 240, this.database});
+  final ClientLibraryDatabase? database;
   final HttpServer server;
   final int count;
   late final api = CoreApiClient(
     'http://${server.address.address}:${server.port}',
   );
-  late final store = CollectionStore(persist: false);
+  late final store = CollectionStore(
+    persist: database != null,
+    database: database,
+  );
   final requests = <String>[];
   int revision = 1;
   String version = 'v1';
   String epoch = 'epoch';
   bool breakPage = false;
+  bool unavailable = false;
   Completer<void>? pausePage;
   Completer<void>? pageStarted;
   JsonMap definition = {
@@ -118,6 +124,11 @@ class CollectionFixture {
       try {
         final path = request.uri.path.replaceFirst('/api/v1', '');
         requests.add('${request.method} $path');
+        if (unavailable) {
+          request.response.statusCode = 500;
+          await request.response.close();
+          return;
+        }
         JsonMap body = {};
         if (request.method == 'POST' || request.method == 'PATCH') {
           body = Map<String, dynamic>.from(
@@ -236,10 +247,14 @@ class CollectionFixture {
     await server.close(force: true);
   }
 
-  static Future<CollectionFixture> create({int count = 240}) async {
+  static Future<CollectionFixture> create({
+    int count = 240,
+    ClientLibraryDatabase? database,
+  }) async {
     final f = CollectionFixture(
       await HttpServer.bind(InternetAddress.loopbackIPv4, 0),
       count: count,
+      database: database,
     );
     await f.start();
     return f;
@@ -268,7 +283,7 @@ void main() {
       final f = await CollectionFixture.create();
       addTearDown(f.close);
       await Future.wait([f.store.load(1, count: 6), f.store.load(1, count: 6)]);
-      expect(f.requests.where((p) => p == 'GET /collections/1').length, 1);
+      expect(f.requests.where((p) => p == 'GET /collections/1').length, 2);
       final page = await f.store.load(1, count: 240);
       expect((page['items'] as List).length, 240);
       expect(page['next_offset'], null);
@@ -352,8 +367,11 @@ void main() {
       addTearDown(f.close);
       await f.store.load(1, count: 6);
       f.breakPage = true;
-      await expectLater(f.store.load(1, count: 240), throwsStateError);
-      expect((f.store.pages[1]!['items'] as List).length, 6);
+      await expectLater(
+        f.store.load(1, count: 240, fresh: true),
+        throwsStateError,
+      );
+      expect((f.store.pages[1]!['items'] as List).length, 240);
     },
   );
   test(
@@ -363,7 +381,7 @@ void main() {
       addTearDown(f.close);
       f.pausePage = Completer();
       f.pageStarted = Completer();
-      final read = f.store.load(1);
+      final read = f.store.load(1, fresh: true);
       final rejected = expectLater(read, throwsStateError);
       await f.pageStarted!.future;
       f.epoch = 'replacement';

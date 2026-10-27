@@ -85,8 +85,32 @@ String replicaPresence(
   if (copy['source_kind'] == 'core') {
     return copy['presence_state'] == 'available' ? 'available' : 'missing';
   }
+  if (copy['device_online'] is bool) {
+    return copy['device_online'] == true ? 'available' : 'offline';
+  }
   final until = DateTime.tryParse(copy['online_until']?.toString() ?? '');
   return until != null && until.isAfter(now ?? DateTime.now())
       ? 'available'
       : 'offline';
 }
+
+Map<String, dynamic> projectMediaPresence(
+  Map<String, dynamic> media,
+  bool Function(String?) deviceOnline,
+) => {
+  ...media,
+  'variants': [
+    for (final raw in media['variants'] as List? ?? [])
+      {
+        ...Map<String, dynamic>.from(raw as Map),
+        'replicas': [
+          for (final copy in raw['replicas'] as List? ?? [])
+            {
+              ...Map<String, dynamic>.from(copy as Map),
+              if (copy['source_kind'] != 'core')
+                'device_online': deviceOnline(copy['device_id']?.toString()),
+            },
+        ],
+      },
+  ],
+};

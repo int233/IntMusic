@@ -1,5 +1,7 @@
 part of '../intmusic_client.dart';
 
+final _localFileTrackProjections = Expando<Map<String, dynamic>>();
+
 class _OfflineTrackCopy {
   const _OfflineTrackCopy({
     required this.trackId,
@@ -48,6 +50,8 @@ class _OfflineTrackCopy {
   final int playCount;
 
   String get copyKey => '$rootExternalId\u0000$fileExternalId';
+  Map<String, dynamic> get trackProjection =>
+      _localFileTrackProjections[this] ??= localFileTrack(toJson());
 
   _OfflineTrackCopy copyWith({
     int? trackId,
@@ -151,7 +155,7 @@ class _OfflineLibrarySnapshot {
     for (final value in (json['copies'] as List?) ?? const []) {
       if (value is! Map) continue;
       final copy = _OfflineTrackCopy.fromJson(value.cast<String, dynamic>());
-      if (copy.trackId > 0 &&
+      if (copy.trackId != 0 &&
           copy.rootExternalId.isNotEmpty &&
           copy.fileExternalId.isNotEmpty) {
         copies[copy.copyKey] = copy;
@@ -163,7 +167,7 @@ class _OfflineLibrarySnapshot {
       final mutation = _OfflineMutation.fromJson(value.cast<String, dynamic>());
       if (mutation.id.isNotEmpty &&
           mutation.kind.isNotEmpty &&
-          mutation.trackId > 0) {
+          mutation.trackId != 0) {
         outbox.add(mutation);
       }
     }
@@ -240,37 +244,82 @@ class _OfflineLibrarySnapshot {
 
 class _OfflineLibraryStore {
   static Future<void> _writeQueue = Future<void>.value();
-
-  static Future<File> _snapshotFile() async {
-    final directory = await getApplicationSupportDirectory();
-    final storage = Directory(
-      '${directory.path}${Platform.pathSeparator}offline',
-    );
-    await storage.create(recursive: true);
-    return File('${storage.path}${Platform.pathSeparator}library-v2.json');
-  }
+  static Map<String, _OfflineTrackCopy> _savedCopies = {};
 
   static Future<_OfflineLibrarySnapshot> load() async {
     try {
-      final file = await _snapshotFile();
-      if (!await file.exists()) return _OfflineLibrarySnapshot();
-      final value = jsonDecode(await file.readAsString());
-      return value is Map
-          ? _OfflineLibrarySnapshot.fromJson(value.cast<String, dynamic>())
-          : _OfflineLibrarySnapshot();
-    } catch (_) {
+      var value = await ClientLibraryDatabase.shared.readDocument(
+        'device',
+        'media-index',
+      );
+      // Import the existing file index once; original audio is never modified.
+      if (value == null) {
+        final support = await getApplicationSupportDirectory();
+        final previous = File('${support.path}/offline/library-v2.json');
+        if (await previous.exists()) {
+          value = _asMap(jsonDecode(await previous.readAsString()));
+        }
+      }
+      if (value == null) return _OfflineLibrarySnapshot();
+      final copies = value['copies'] is List
+          ? value['copies'] as List
+          : await ClientLibraryDatabase.shared.readDocuments('device-file');
+      final snapshot = _OfflineLibrarySnapshot.fromJson({
+        ...value,
+        'copies': copies,
+      });
+      _savedCopies = {};
+      if (value['copies'] is List) {
+        await save(snapshot);
+      } else {
+        _savedCopies = Map.of(snapshot.copies);
+      }
+      return snapshot;
+    } catch (error, stack) {
+      ClientLog.error('library.media.read_failed', error, stackTrace: stack);
       return _OfflineLibrarySnapshot();
     }
   }
 
   static Future<void> save(_OfflineLibrarySnapshot snapshot) {
-    final encoded = jsonEncode(snapshot.toJson());
+    // Persist only changed file rows, rather than rewriting thousands of files
+    // after every 20-file scan batch on a small Android device.
+    final copies = Map<String, _OfflineTrackCopy>.of(snapshot.copies);
+    final metadata = jsonEncode({
+      'version': 2,
+      'server_id': snapshot.serverId,
+      'catalog_epoch': snapshot.catalogEpoch,
+      'outbox': snapshot.outbox.map((m) => m.toJson()).toList(),
+    });
     _writeQueue = _writeQueue.catchError((_) {}).then((_) async {
-      final file = await _snapshotFile();
-      final temporary = File('${file.path}.tmp');
-      await temporary.writeAsString(encoded, flush: true);
-      // Rename replaces the destination without a delete-before-rename gap.
-      await temporary.rename(file.path);
+      final db = await ClientLibraryDatabase.shared.open();
+      await db.transaction((tx) async {
+        final batch = tx.batch();
+        for (final entry in copies.entries) {
+          if (identical(entry.value, _savedCopies[entry.key])) continue;
+          batch.insert('local_documents', {
+            'namespace': 'device-file',
+            'document_key': entry.key,
+            'payload': jsonEncode(entry.value.toJson()),
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+        }
+        for (final key in _savedCopies.keys.where(
+          (key) => !copies.containsKey(key),
+        )) {
+          batch.delete(
+            'local_documents',
+            where: 'namespace = ? AND document_key = ?',
+            whereArgs: ['device-file', key],
+          );
+        }
+        batch.insert('local_documents', {
+          'namespace': 'device',
+          'document_key': 'media-index',
+          'payload': metadata,
+        }, conflictAlgorithm: ConflictAlgorithm.replace);
+        await batch.commit(noResult: true);
+      });
+      _savedCopies = copies;
     });
     return _writeQueue;
   }

@@ -43,7 +43,21 @@ extension _DashboardDeviceIdentity on _CoreDashboardState {
     }
     final key =
         'intmusic.client_library.owner.${_cacheServerId ?? _api.baseUrl}';
-    if (preferences.getString(key) == _clientId) return;
+    final hasUnboundFiles = _offlineLibrary.copies.values.any(
+      (copy) => copy.trackId < 0,
+    );
+    final needsIndexRepair = _clientLibraryRoots.any(
+      (root) =>
+          _offlineLibrary.copies.values
+              .where((copy) => copy.rootExternalId == root.externalId)
+              .length <
+          root.fileCount,
+    );
+    if (preferences.getString(key) == _clientId &&
+        !hasUnboundFiles &&
+        !needsIndexRepair) {
+      return;
+    }
     _clientLibraryDeviceBinding = true;
     try {
       await _clientLibrarySyncQueue.run(() async {});

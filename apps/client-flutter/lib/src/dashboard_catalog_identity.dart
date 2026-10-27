@@ -3,7 +3,6 @@ part of '../intmusic_client.dart';
 extension _DashboardCatalogIdentity on _CoreDashboardState {
   void _reconcileOfflineCopyBindings(List<dynamic> bindings) {
     if (_offlineLibrary.copies.isEmpty) return;
-    final boundKeys = <String>{};
     var changed = false;
     for (final value in bindings) {
       if (value is! Map) continue;
@@ -19,27 +18,81 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
         continue;
       }
       final key = '$rootExternalId\u0000$externalId';
-      boundKeys.add(key);
       final copy = _offlineLibrary.copies[key];
       if (copy == null ||
           (copy.trackId == trackId && copy.mediaVariantId == mediaVariantId)) {
         continue;
       }
+      _remapLocalTrackId(copy.trackId, trackId);
       _offlineLibrary.copies[key] = copy.copyWith(
         trackId: trackId,
         mediaVariantId: mediaVariantId,
       );
       changed = true;
     }
-    _offlineLibrary.copies.removeWhere((key, copy) {
-      // A live scan may have uploaded new bindings after this snapshot began.
-      final removed =
-          !_clientLibrarySyncingRootIds.contains(copy.rootExternalId) &&
-          !boundKeys.contains(key);
-      changed |= removed;
-      return removed;
-    });
+    // Absence from a remote snapshot is not evidence that a local file vanished.
+    // Only a completed local scan can remove local file records.
     if (changed) unawaited(_OfflineLibraryStore.save(_offlineLibrary));
+  }
+
+  void _remapLocalTrackId(int previous, int current) {
+    if (previous == current) return;
+    if (_verifiedLocalTrackIds.remove(previous)) {
+      _verifiedLocalTrackIds.add(current);
+    }
+    if (_knownLocalTrackIds.remove(previous)) _knownLocalTrackIds.add(current);
+    for (var i = 0; i < _offlineLibrary.outbox.length; i++) {
+      final mutation = _offlineLibrary.outbox[i];
+      if (mutation.trackId == previous) {
+        _offlineLibrary.outbox[i] = _OfflineMutation(
+          id: mutation.id,
+          kind: mutation.kind,
+          trackId: current,
+          occurredAt: mutation.occurredAt,
+          payload: mutation.payload,
+        );
+      }
+    }
+    if (_playback?['track_id'] == previous) {
+      _playback = {..._playback!, 'track_id': current};
+    }
+    if (_activeTrackDetailId == previous) _activeTrackDetailId = current;
+    for (final output in _rendererLoadedTrackByOutput.keys.toList()) {
+      if (_rendererLoadedTrackByOutput[output] == previous) {
+        _rendererLoadedTrackByOutput[output] = current;
+      }
+    }
+    for (final output in _rendererPlaybackByOutput.keys.toList()) {
+      final playback = _rendererPlaybackByOutput[output]!;
+      if (playback['track_id'] == previous) {
+        _rendererPlaybackByOutput[output] = {...playback, 'track_id': current};
+      }
+    }
+    final detail = _trackDetailCache.remove(previous);
+    if (detail != null) {
+      _trackDetailCache[current] = {
+        ...detail,
+        'track': {..._asMap(detail['track']), 'id': current},
+      };
+    }
+    if (_currentRoute.kind == _AppRouteKind.track &&
+        _currentRoute.entityId == previous) {
+      _navigateToInState(_AppRoute.track(current), addToHistory: false);
+    }
+    if (_playbackQueue != null) {
+      _playbackQueue = {
+        ..._playbackQueue!,
+        'items': _queueItems().map((item) {
+          final track = _asMap(item['track']);
+          return track['id'] == previous
+              ? {
+                  ...item,
+                  'track': {...track, 'id': current},
+                }
+              : item;
+        }).toList(),
+      };
+    }
   }
 
   Future<bool> _adoptCatalogIdentity(
@@ -77,75 +130,25 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
             _offlineLibrary.outbox.isNotEmpty) &&
         (_offlineLibrary.serverId != serverId ||
             _offlineLibrary.catalogEpoch != catalogEpoch);
-    if (!serverChanged && !epochChanged && !offlineIdentityChanged) {
-      _cacheServerId = serverId;
-      _cacheCatalogEpoch = catalogEpoch;
-      _offlineLibrary.serverId = serverId;
-      _offlineLibrary.catalogEpoch = catalogEpoch;
-      return false;
-    }
-
-    ClientLog.event(
-      'catalog.epoch_reset',
-      message: 'Discarding cached logical IDs and rebuilding local bindings.',
-      data: <String, Object?>{
-        'previous_server_id': knownServerId,
-        'server_id': serverId,
-        'previous_catalog_epoch': knownCatalogEpoch,
-        'catalog_epoch': catalogEpoch,
-      },
-    );
-    await _ClientCacheStore.clear(coreUrl);
-    try {
-      await _artworkCacheManager.emptyCache();
-    } catch (error, stackTrace) {
-      ClientLog.error(
-        'catalog.artwork_cache_clear_failed',
-        error,
-        stackTrace: stackTrace,
+    final changed = serverChanged || epochChanged || offlineIdentityChanged;
+    if (!changed &&
+        knownServerId == serverId &&
+        knownCatalogEpoch == catalogEpoch) {
+      await ClientLibraryDatabase.shared.bindCatalog(
+        coreUrl,
+        serverId,
+        catalogEpoch,
       );
     }
-    if (!mounted ||
-        CoreApiClient.normalizeBaseUrl(coreUrl) !=
-            CoreApiClient.normalizeBaseUrl(_coreUrlController.text)) {
-      throw StateError('Core connection changed during catalog reset');
+    if (changed) {
+      ClientLog.event(
+        'catalog.replacement_pending',
+        message:
+            'Keeping the last committed library until its replacement is saved.',
+        data: {'server_id': serverId, 'catalog_epoch': catalogEpoch},
+      );
     }
-    _cacheServerId = serverId;
-    _cacheCatalogEpoch = catalogEpoch;
-    _cacheCursor = 0;
-    _eventCursor = 0;
-    _albums = const <dynamic>[];
-    _artists = const <dynamic>[];
-    _tracks = const <dynamic>[];
-    _songDisplayState.reset();
-    _collections.reset();
-    _playbackHistory = const <dynamic>[];
-    _playbackStats = null;
-    _playbackQueue = null;
-    _playbackAgentsByOutput.clear();
-    _pendingPlaybackCommandsV3.clear();
-    for (final output in _audioPlayers.keys.toList()) {
-      await _disposeRendererPlayer(output);
-    }
-    _playback = null;
-    _activeTrackDetail = null;
-    _activeTrackDetailId = null;
-    _trackDetailCache.clear();
-    _albumDetailCache.clear();
-    _artistDetailCache.clear();
-    _trackAvailabilityById.clear();
-    _searchResultCache.clear();
-    _detailRefreshScopes.clear();
-    _detailWarmAfterIds.clear();
-    _detailWarmFailures = 0;
-    _detailWarmRetryAt = null;
-    _detailWarmTargetCursors.clear();
-    _offlineLibrary = _OfflineLibrarySnapshot(
-      serverId: serverId,
-      catalogEpoch: catalogEpoch,
-    );
-    await _OfflineLibraryStore.save(_offlineLibrary);
-    return true;
+    return changed;
   }
 
   Future<void> _rebindLocalLibraryAfterCatalogReset() async {
@@ -154,7 +157,7 @@ extension _DashboardCatalogIdentity on _CoreDashboardState {
       data: <String, Object?>{'root_count': _clientLibraryRoots.length},
     );
     await _syncAllClientLibraryRoots(refreshAfter: false);
-    if (_localPlaybackFallbackActive || !mounted) return;
+    if (!_coreLibraryOnline || !mounted) return;
     await _backgroundLibrarySync(force: true);
     ClientLog.event(
       'catalog.local_rebind_finished',

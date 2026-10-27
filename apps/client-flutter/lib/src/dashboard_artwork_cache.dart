@@ -2,7 +2,7 @@ part of '../intmusic_client.dart';
 
 extension _DashboardArtworkCache on _CoreDashboardState {
   Future<void> _warmOfflineArtworkCache() async {
-    if (_localPlaybackFallbackActive ||
+    if (!_coreLibraryOnline ||
         _cacheServerId == null ||
         _clientLibrarySyncingRootIds.isNotEmpty) {
       return;
@@ -16,7 +16,7 @@ extension _DashboardArtworkCache on _CoreDashboardState {
       do {
         _artworkWarmupRequested = false;
         final serverId = _cacheServerId;
-        if (serverId == null || _localPlaybackFallbackActive) return;
+        if (serverId == null || !_coreLibraryOnline) return;
         final localTrackIds = _offlineLibrary.distinctTracks
             .map((copy) => copy.trackId)
             .where((id) => id > 0)
@@ -65,7 +65,7 @@ extension _DashboardArtworkCache on _CoreDashboardState {
         var nextIndex = 0;
         Future<void> worker() async {
           while (nextIndex < entries.length &&
-              !_localPlaybackFallbackActive &&
+              _coreLibraryOnline &&
               _clientLibrarySyncingRootIds.isEmpty &&
               _cacheServerId == serverId) {
             final entry = entries[nextIndex++];
@@ -92,7 +92,7 @@ extension _DashboardArtworkCache on _CoreDashboardState {
             (_) => worker(),
           ),
         );
-      } while (_artworkWarmupRequested && !_localPlaybackFallbackActive);
+      } while (_artworkWarmupRequested && _coreLibraryOnline);
     } finally {
       _artworkWarmupBusy = false;
     }

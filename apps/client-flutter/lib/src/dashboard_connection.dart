@@ -19,9 +19,7 @@ extension _DashboardConnection on _CoreDashboardState {
       });
     } catch (error) {
       _zoneRefreshFailures += 1;
-      if (!_localPlaybackFallbackActive &&
-          _zoneRefreshFailures >= 3 &&
-          _offlineLibrary.copies.isNotEmpty) {
+      if (_coreLibraryOnline && _zoneRefreshFailures >= 2) {
         await _confirmCoreUnavailable(error);
       }
     } finally {
@@ -30,20 +28,14 @@ extension _DashboardConnection on _CoreDashboardState {
   }
 
   Future<void> _confirmCoreUnavailable(Object zoneError) async {
-    if (_coreOfflineProbeBusy || _localPlaybackFallbackActive || !mounted) {
+    if (_coreOfflineProbeBusy || !_coreLibraryOnline || !mounted) {
       return;
     }
     _coreOfflineProbeBusy = true;
     try {
-      final status = _asMap(await _api.getCriticalJson('/status'));
-      if (_isIntMusicCoreStatus(status)) {
-        _zoneRefreshFailures = 0;
-        _coreReachabilityFailures = 0;
-        ClientLog.event(
-          'core.transport.probe_recovered',
-          data: <String, Object?>{'trigger': zoneError.toString()},
-        );
-      }
+      await _api.probeLibraryService();
+      _zoneRefreshFailures = 0;
+      _coreReachabilityFailures = 0;
     } catch (error, stackTrace) {
       _coreReachabilityFailures += 1;
       ClientLog.error(
@@ -56,7 +48,7 @@ extension _DashboardConnection on _CoreDashboardState {
           'zone_error': zoneError.toString(),
         },
       );
-      if (_coreReachabilityFailures >= 3 && _eventSocket == null && mounted) {
+      if (mounted) {
         await _activateLocalPlaybackFallback();
       }
     } finally {

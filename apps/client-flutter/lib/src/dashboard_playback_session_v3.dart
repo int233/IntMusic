@@ -2,6 +2,102 @@ part of '../intmusic_client.dart';
 
 /// One revisioned protocol for queue display, control, retry and decoder EOF.
 extension _DashboardPlaybackSessionV3 on _CoreDashboardState {
+  Future<void> _adoptRunningLocalPlayback() async {
+    if (!_coreLibraryOnline ||
+        !_localPlaybackFallbackActive ||
+        _localPlaybackAdoptionBusy ||
+        _playbackQueue == null) {
+      return;
+    }
+    final socket = _eventSocket;
+    if (socket == null) return;
+    final output = _offlineOutputForZone();
+    final player = await _audioPlayers[output];
+    if (player == null || _rendererLocalFileByOutput[output] != true) return;
+    final generation = player.snapshot.generation;
+    final phase = player.snapshot.phase;
+    final originalQueue = _playbackQueue!;
+    final track = _rendererLoadedTrackByOutput[output];
+    _localPlaybackAdoptionBusy = true;
+    try {
+      final result = await adoptLocalPlayback(
+        api: _api,
+        outputId: output,
+        deviceId: _clientId,
+        queue: originalQueue,
+        positionMs: await player.currentPositionMs() ?? 0,
+        paused: player.snapshot.phase == RendererPhase.paused,
+        newCommandId: _newPlaybackCommandId,
+      );
+      if (result == null ||
+          !mounted ||
+          !_coreLibraryOnline ||
+          _eventSocket != socket ||
+          player.snapshot.generation != generation ||
+          player.snapshot.phase != phase ||
+          _rendererLoadedTrackByOutput[output] != track) {
+        return;
+      }
+      final items = _queueItems();
+      if (items.length != result.agent.items.length ||
+          _playbackQueue?['current_index'] != originalQueue['current_index'] ||
+          _playbackQueue?['mode'] != originalQueue['mode']) {
+        return;
+      }
+      for (var index = 0; index < items.length; index++) {
+        if (items[index]['id'] != result.agent.items[index].itemId ||
+            _asMap(items[index]['track'])['id'] !=
+                result.agent.items[index].trackId) {
+          return;
+        }
+      }
+      await _finishOfflinePlayback('reconnected');
+      final sequence = _intValue(result.snapshot['command_sequence']) ?? 0;
+      if (sequence <= 0) {
+        throw StateError(
+          'Core did not provide the adopted decoder command identity',
+        );
+      }
+      _playbackAgentsByOutput[output] = result.agent;
+      _rendererActiveCommandByOutput[output] = {
+        'target_output_id': output,
+        'track_id': track,
+        'sequence': sequence,
+        'action': 'play',
+        'position_ms': result.snapshot['position_ms'],
+      };
+      _rendererCommandSequences.record(output, sequence, isTransport: true);
+      _playbackStateSequenceByZone[output] = sequence;
+      _localPlaybackFallbackActive = false;
+      _projectSessionQueue(output, result.agent);
+      _refreshTrackAvailabilityProjection();
+      for (final pending in _pendingPlaybackCommandsV3.values.toList()) {
+        if (_clientOutputForZone(pending['zone_id']?.toString() ?? '') ==
+            output) {
+          await _forgetPendingPlaybackCommandV3(
+            pending['command_id'].toString(),
+          );
+        }
+      }
+      await _reportRendererStateSafely(
+        player.snapshot.transport,
+        outputId: output,
+      );
+      ClientLog.event(
+        'playback.local_session.adopted',
+        data: {'track_id': track, 'queue_length': result.agent.items.length},
+      );
+    } catch (error, stack) {
+      ClientLog.error(
+        'playback.local_session.adoption_failed',
+        error,
+        stackTrace: stack,
+      );
+    } finally {
+      _localPlaybackAdoptionBusy = false;
+    }
+  }
+
   static const Duration _pendingPlaybackCommandTtl = Duration(seconds: 30);
 
   Future<void> _playQueueItem(String itemId, int trackId) async {
@@ -78,7 +174,8 @@ extension _DashboardPlaybackSessionV3 on _CoreDashboardState {
         error,
         stackTrace: stack,
       );
-      if (mounted) {
+      if (_coreLibraryOnline) await _confirmCoreUnavailable(error);
+      if (mounted && !_localPlaybackFallbackActive) {
         _mutate(() => _error = 'Playback connection unavailable: $error');
       }
       return false;
@@ -194,7 +291,12 @@ extension _DashboardPlaybackSessionV3 on _CoreDashboardState {
           stackTrace: stack,
           data: {'zone_id': zoneId, 'command_id': id, 'action': action['type']},
         );
-        if (mounted) _mutate(() => _error = 'Playback command failed: $error');
+        if (_coreLibraryOnline && error is! StateError) {
+          await _confirmCoreUnavailable(error);
+        }
+        if (mounted && !_localPlaybackFallbackActive) {
+          _mutate(() => _error = 'Playback command failed: $error');
+        }
         if (!_pendingPlaybackCommandsV3.containsKey(id)) return null;
         // An uncertain response never invokes another endpoint or invents a
         // playing state. Retry exactly this envelope and idempotency key.

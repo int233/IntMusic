@@ -112,13 +112,23 @@ class _HomePage extends StatelessWidget {
               ],
             ),
           ),
+          if (store.loading && !store.complete)
+            const LinearProgressIndicator(minHeight: 2),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final sections = ((store.layout['sections'] as List?) ?? [])
-                    .map(_asMap)
-                    .where((s) => s['hidden'] != true)
-                    .toList();
+                final sections =
+                    ((store.layout['sections'] as List?) ??
+                            const [
+                              {
+                                'id': 'library',
+                                'builtin': 'library',
+                                'width': 'wide',
+                              },
+                            ])
+                        .map(_asMap)
+                        .where((s) => s['hidden'] != true)
+                        .toList();
                 final width = max(0.0, constraints.maxWidth - 40);
                 return SingleChildScrollView(
                   padding: const EdgeInsets.all(20),

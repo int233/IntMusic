@@ -2,9 +2,15 @@ part of '../intmusic_client.dart';
 
 extension _DashboardRendererCommands on _CoreDashboardState {
   Future<void> _refreshSettingsCache() async {
+    if (!_coreLibraryOnline) return;
+    final api = _api;
+    final server = _cacheServerId;
+    final epoch = _cacheCatalogEpoch;
     try {
-      final settings = _asMap(await _api.getJson('/settings'));
-      if (mounted) {
+      final settings = _asMap(await api.getJson('/settings'));
+      if (!_sameCatalog(api, server, epoch)) return;
+      await _persistOverviewValues({'settings': settings});
+      if (_sameCatalog(api, server, epoch)) {
         _mutate(() {
           _serverSettings = _asMap(settings['server']);
           _favoriteSettings = _asMap(settings['favorites']);
@@ -12,9 +18,8 @@ extension _DashboardRendererCommands on _CoreDashboardState {
           _songDisplaySettings = _asMap(settings['song_display']);
         });
       }
-      await _persistOverviewValues({'settings': settings});
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
     }
   }
 

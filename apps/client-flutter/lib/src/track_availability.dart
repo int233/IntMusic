@@ -2,6 +2,9 @@ part of '../intmusic_client.dart';
 
 extension _DashboardTrackAvailability on _CoreDashboardState {
   void _refreshTrackAvailabilityProjection() {
+    _knownLocalTrackIds
+      ..clear()
+      ..addAll(_offlineLibrary.copies.values.map((copy) => copy.trackId));
     final ids = <int>{..._trackDetailCache.keys};
     for (final value in _tracks.whereType<Map>()) {
       final id = _intValue(value['id']);
@@ -158,6 +161,8 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
     final signature = _availabilityPresenceSignature();
     if (signature == _trackAvailabilityPresenceSignature) return;
     _refreshTrackAvailabilityProjection();
+    // Presence changes affect cached detail/source cards as well as transport.
+    _mutate(() {});
   }
 
   void _decoratePlaybackQueueAvailability() {
@@ -186,7 +191,7 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
 
   String _availabilityPresenceSignature() {
     final values = <String>[
-      _localPlaybackFallbackActive ? 'offline' : 'online',
+      _coreLibraryOnline ? 'online' : 'offline',
       for (final zone in _zones.whereType<Map>())
         if (zone['is_online'] != false) 'z:${zone['id']}',
       for (final output in _outputs.whereType<Map>())
@@ -197,8 +202,8 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
 
   Map<String, dynamic> _availabilityForTrack(int trackId) {
     final detail = _trackDetailCache[trackId];
-    final localCopyKnown = _offlineLibrary.track(trackId) != null;
-    final localAvailable = _localPlaybackFallbackActive
+    final localCopyKnown = _knownLocalTrackIds.contains(trackId);
+    final localAvailable = !_coreLibraryOnline
         ? _verifiedLocalTrackIds.contains(trackId)
         : localCopyKnown;
     final replicas = <Map<String, dynamic>>[];
@@ -241,7 +246,7 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
                 : deviceId);
       allSources.add(source);
       if (replica['availability_state']?.toString() != 'ready') continue;
-      final reachable = _localPlaybackFallbackActive
+      final reachable = !_coreLibraryOnline
           ? source == '__this_device__' && localAvailable
           : source == '__core__' ||
                 source == '__this_device__' ||
@@ -258,7 +263,7 @@ extension _DashboardTrackAvailability on _CoreDashboardState {
 
     final state = availableSources.isNotEmpty
         ? 'available'
-        : replicas.isEmpty && !_localPlaybackFallbackActive
+        : replicas.isEmpty && _coreLibraryOnline
         ? 'checking'
         : 'unavailable';
     return <String, dynamic>{

@@ -17,7 +17,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
         if (mounted) _mutate(() => _error = null);
       } catch (error) {
         connected = false;
-        await _ClientCacheStore.recordError(_coreUrlController.text, error);
+        await _clientLibrary.recordError(_coreUrlController.text, error);
         if (mounted) {
           _mutate(() {
             _rendererStatus = 'Using cached library';
@@ -33,13 +33,7 @@ extension _DashboardBootstrap on _CoreDashboardState {
           }) ??
           false;
     }
-    if (connected != true && _eventSocket == null) {
-      if (_offlineLibrary.copies.isNotEmpty) {
-        await _activateLocalPlaybackFallback();
-      } else {
-        _scheduleEventReconnect();
-      }
-    }
+    if (connected != true) await _activateLocalPlaybackFallback();
   }
 
   Future<void> _initializeAndRefresh() async {
@@ -56,12 +50,19 @@ extension _DashboardBootstrap on _CoreDashboardState {
           });
     await _loadSavedCoreUrl();
     await _loadClientCache();
+    _mergeLocalFileProjection();
+    _collections.configure(_api, _status);
+    _collections.updateCatalog(_tracks);
+    await _collections.ready;
     await _rendererAudioInitialization;
+    // Reading and local playback are available before the first network attempt.
+    await _activateLocalPlaybackFallback();
+    unawaited(_repairLocalFileIndex());
     await _refreshAll();
   }
 
   Future<void> _loadClientCache() async {
-    final cached = await _ClientCacheStore.load(_coreUrlController.text);
+    final cached = await _clientLibrary.load(_coreUrlController.text);
     if (!mounted) return;
     _eventCursor = cached.eventCursor;
     if (cached.isEmpty) return;
@@ -73,6 +74,20 @@ extension _DashboardBootstrap on _CoreDashboardState {
         catalogEpoch: cached.catalogEpoch,
       );
       _cacheCursor = cached.cursor;
+      if (_offlineLibrary.serverId != cached.serverId ||
+          _offlineLibrary.catalogEpoch != cached.catalogEpoch) {
+        for (final entry in _offlineLibrary.copies.entries.toList()) {
+          final localId = localLibraryId('file:${entry.key}');
+          _remapLocalTrackId(entry.value.trackId, localId);
+          _offlineLibrary.copies[entry.key] = entry.value.copyWith(
+            trackId: localId,
+            mediaVariantId: 0,
+          );
+        }
+      }
+      _reconcileOfflineCopyBindings(
+        (cached.values['client_file_bindings'] as List?) ?? [],
+      );
       _applyCachedValues(cached.values);
       _trackDetailCache.addAll(cached.trackDetails);
       _albumDetailCache.addAll(cached.albumDetails);
@@ -90,8 +105,10 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _albums = (values['albums'] as List?) ?? _albums;
     _artists = (values['artists'] as List?) ?? _artists;
     _tracks = (values['tracks'] as List?) ?? _tracks;
+    _mergeLocalFileProjection();
     _tracks = projectPendingFavorites(_tracks, _pendingFavoriteStates);
     _songDisplayState.updateCatalog(_tracks, cursor: _cacheCursor);
+    _collections.updateCatalog(_tracks);
     _outputs = (values['outputs'] as List?) ?? _outputs;
     _zones = ((values['zones'] as List?) ?? _zones)
         .whereType<Map>()
@@ -139,6 +156,36 @@ extension _DashboardBootstrap on _CoreDashboardState {
   }) {
     final nextServerId = snapshot['server_id']?.toString();
     final nextCatalogEpoch = snapshot['catalog_epoch']?.toString();
+    if (_cacheServerId != nextServerId ||
+        _cacheCatalogEpoch != nextCatalogEpoch) {
+      _trackDetailCache.clear();
+      _albumDetailCache.clear();
+      _artistDetailCache.clear();
+      _detailWarmAfterIds.clear();
+      _detailWarmTargetCursors.clear();
+      _detailRefreshScopes.clear();
+      for (final entry in _offlineLibrary.copies.entries.toList()) {
+        final localId = localLibraryId('file:${entry.key}');
+        _remapLocalTrackId(entry.value.trackId, localId);
+        _offlineLibrary.copies[entry.key] = entry.value.copyWith(
+          trackId: localId,
+          mediaVariantId: 0,
+        );
+      }
+    }
+    if (_cacheServerId != nextServerId ||
+        _cacheCatalogEpoch != nextCatalogEpoch) {
+      for (final mutation in _offlineLibrary.outbox.toList()) {
+        if (mutation.trackId > 0) {
+          _remapLocalTrackId(
+            mutation.trackId,
+            localLibraryId(
+              'unbound:$_cacheServerId:$_cacheCatalogEpoch:${mutation.trackId}',
+            ),
+          );
+        }
+      }
+    }
     _cacheServerId = nextServerId;
     _cacheCatalogEpoch = nextCatalogEpoch;
     artworkCacheCoordinator.registerServer(
@@ -150,8 +197,6 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _albums = (snapshot['albums'] as List?) ?? const <dynamic>[];
     _artists = (snapshot['artists'] as List?) ?? const <dynamic>[];
     _tracks = (snapshot['tracks'] as List?) ?? const <dynamic>[];
-    _tracks = projectPendingFavorites(_tracks, _pendingFavoriteStates);
-    _songDisplayState.updateCatalog(_tracks, cursor: _cacheCursor);
     _playbackHistory =
         (snapshot['playback_history'] as List?) ?? const <dynamic>[];
     _playbackStats = _asMap(snapshot['playback_stats']);
@@ -161,6 +206,13 @@ extension _DashboardBootstrap on _CoreDashboardState {
     _reconcileOfflineCopyBindings(
       (snapshot['client_file_bindings'] as List?) ?? const <dynamic>[],
     );
+    _mergeLocalFileProjection();
+    _tracks = projectPendingFavorites(_tracks, _pendingFavoriteStates);
+    _songDisplayState.updateCatalog(_tracks, cursor: _cacheCursor);
+    _collections.updateCatalog(_tracks);
+    _offlineLibrary.serverId = nextServerId;
+    _offlineLibrary.catalogEpoch = nextCatalogEpoch;
+    _collections.updateCatalog(_tracks);
     final settings = _asMap(snapshot['settings']);
     _serverSettings = _asMap(settings['server']);
     _favoriteSettings = _asMap(settings['favorites']);
@@ -183,6 +235,61 @@ extension _DashboardBootstrap on _CoreDashboardState {
     if (status != null) _status = status;
     if (diagnostics != null) _diagnostics = diagnostics;
   }
+
+  void _mergeLocalFileProjection() {
+    final tracks = <int, Map<String, dynamic>>{
+      for (final raw in _tracks.whereType<Map>())
+        if (_intValue(raw['id']) != null && raw['local_file'] != true)
+          _intValue(raw['id'])!: _asMap(raw),
+    };
+    final albums = <int, Map<String, dynamic>>{
+      for (final raw in _albums.whereType<Map>())
+        if ((_intValue(raw['id']) ?? -1) > 0)
+          _intValue(raw['id'])!: _asMap(raw),
+    };
+    final artists = <int, Map<String, dynamic>>{
+      for (final raw in _artists.whereType<Map>())
+        if ((_intValue(raw['id']) ?? -1) > 0)
+          _intValue(raw['id'])!: _asMap(raw),
+    };
+    for (final copy in _offlineLibrary.distinctTracks) {
+      if (tracks.containsKey(copy.trackId)) continue;
+      final track = copy.trackProjection;
+      tracks[copy.trackId] = track;
+      final albumId = track['album_id'] as int;
+      final album = albums.putIfAbsent(
+        albumId,
+        () => {
+          'id': albumId,
+          'title': track['album_title'],
+          'artist_display': track['artist_display'],
+          'track_count': 0,
+          'year': track['year'],
+        },
+      );
+      album['track_count'] = (album['track_count'] as int? ?? 0) + 1;
+      final names = track['artists'] as List;
+      final artistIds = track['artist_ids'] as List;
+      for (var index = 0; index < names.length; index++) {
+        final name = names[index];
+        final id = artistIds[index] as int;
+        final artist = artists.putIfAbsent(
+          id,
+          () => {'id': id, 'name': name, 'track_count': 0},
+        );
+        artist['track_count'] = (artist['track_count'] as int? ?? 0) + 1;
+      }
+    }
+    _tracks = tracks.values.toList();
+    _albums = albums.values.toList();
+    _artists = artists.values.toList();
+  }
+
+  bool _sameCatalog(CoreApiClient api, String? server, String? epoch) =>
+      mounted &&
+      api.baseUrl == CoreApiClient.normalizeBaseUrl(_coreUrlController.text) &&
+      server == _cacheServerId &&
+      epoch == _cacheCatalogEpoch;
 
   Set<int> _entityIds(List<dynamic> values) => <int>{
     for (final value in values)

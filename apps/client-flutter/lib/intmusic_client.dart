@@ -18,8 +18,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sqflite/sqflite.dart' as mobile_sqlite;
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqflite_common/sqlite_api.dart';
 
 import 'core/navigation_history.dart';
 import 'core/device_identity.dart';
@@ -27,6 +26,9 @@ import 'core/connection_watchdog.dart';
 import 'core/artwork_cache_coordinator.dart';
 import 'core/json_values.dart';
 import 'core/library_sync.dart';
+import 'core/library_repository.dart';
+import 'core/local_library_projection.dart';
+import 'core/local_playback_adoption.dart';
 import 'core/release_media.dart';
 import 'core/song_display.dart';
 import 'core/song_detail.dart';
@@ -102,7 +104,6 @@ part 'src/lyric_timeline_editor.dart';
 part 'src/core_discovery.dart';
 part 'src/client_library.dart';
 part 'src/offline_library.dart';
-part 'src/client_cache.dart';
 part 'src/distribution.dart';
 part 'src/i18n.dart';
 part 'src/platform_integration.dart';
@@ -215,7 +216,8 @@ class _CoreDashboardState extends State<CoreDashboard>
     text: 'http://127.0.0.1:49330',
   );
   final _searchController = TextEditingController();
-  final _collections = CollectionStore();
+  final _collections = CollectionStore(backgroundSync: false);
+  final _clientLibrary = ClientLibraryRepository(ClientLibraryDatabase.shared);
   final _serverAliasController = TextEditingController();
   final _clientAliasController = TextEditingController();
   final _libraryRootController = TextEditingController();
@@ -328,8 +330,12 @@ class _CoreDashboardState extends State<CoreDashboard>
   final Set<String> _detailRefreshScopes = <String>{};
   final Map<String, int> _detailWarmAfterIds = <String, int>{};
   final Map<String, int> _detailWarmTargetCursors = <String, int>{};
+  bool _coreLibraryOnline = false;
   bool _localPlaybackFallbackActive = false;
+  Future<void>? _localPlaybackTransition;
+  bool _localPlaybackAdoptionBusy = false;
   final Set<int> _verifiedLocalTrackIds = <int>{};
+  final Set<int> _knownLocalTrackIds = <int>{};
   ClientDeviceIdentity _deviceIdentity = ClientDeviceIdentity.resolve(
     platform: Platform.operatingSystem,
     native: const {},

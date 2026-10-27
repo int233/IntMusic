@@ -211,6 +211,9 @@ extension _DashboardZoneState on _CoreDashboardState {
 
   Future<void> _selectZone(Map<String, dynamic> zone) async {
     final zoneId = zone['id']?.toString() ?? 'local';
+    if (_coreLibraryOnline && _clientOutputForZone(zoneId) == null) {
+      _localPlaybackFallbackActive = false;
+    }
     _mutatePlayback(() {
       _selectedZoneId = zoneId;
       _selectedZoneLabel = _zoneDisplayName(zone);
@@ -368,6 +371,10 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   void _syncPlaybackFromZone(Map<String, dynamic> zone) {
+    if (_localPlaybackFallbackActive &&
+        _clientOutputForZone(zone['id']?.toString() ?? '') != null) {
+      return;
+    }
     final playback = _playbackFromZone(zone);
     if (_acceptIncomingPlayback(playback)) {
       _applyPlayback(playback, syncZone: false);
@@ -521,44 +528,29 @@ extension _DashboardZoneState on _CoreDashboardState {
   }
 
   Future<void> _loadActiveTrackDetail(int trackId) async {
+    if (!mounted) return;
     var cached =
         _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
-    if (_localPlaybackFallbackActive) {
-      final copy = await _availableOfflineCopy(trackId);
-      final path = copy == null
-          ? null
-          : _offlineCopyPath(copy, _clientLibraryRoots);
-      if (!mounted || cached == null || _activeTrackDetailId != trackId) {
-        return;
-      }
-      if (copy != null && path != null) {
-        cached = _detailWithLocalCopy(cached, copy, path);
-      }
+    if (cached != null && _activeTrackDetailId == trackId) {
+      _mutatePlayback(() => _activeTrackDetail = cached);
+      _syncSystemPlayback();
+    }
+    final copy = await _availableOfflineCopy(trackId);
+    final path = copy == null
+        ? null
+        : _offlineCopyPath(copy, _clientLibraryRoots);
+    if (!mounted || _activeTrackDetailId != trackId) return;
+    if (cached != null && copy != null && path != null) {
+      cached = _detailWithLocalCopy(cached, copy, path);
       _mutatePlayback(() {
         _activeTrackDetail = cached;
         _trackDetailCache[trackId] = cached!;
       });
       _syncSystemPlayback();
-      return;
     }
-    if (cached != null && _activeTrackDetailId == trackId) {
-      _activeTrackDetail = cached;
-      if (mounted) _mutatePlayback(() {});
-      _syncSystemPlayback();
-    }
-    try {
-      final detail = _asMap(await _api.getJson('/tracks/$trackId'));
-      if (!mounted || _activeTrackDetailId != trackId) {
-        return;
-      }
-      _mutatePlayback(() {
-        _activeTrackDetail = detail;
-        _trackDetailCache[trackId] = detail;
-      });
-      unawaited(_persistDetail('track', trackId, detail));
-      _syncSystemPlayback();
-    } catch (_) {
-      // Track detail loading is secondary to playback control.
+    if (_coreLibraryOnline && trackId > 0) {
+      await _refreshTrackDetail(trackId);
+      if (mounted && _activeTrackDetailId == trackId) _syncSystemPlayback();
     }
   }
 }

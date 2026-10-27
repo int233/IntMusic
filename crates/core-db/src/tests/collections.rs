@@ -195,6 +195,13 @@ async fn album_playback_scope_is_separate_and_snapshots_freeze_members() {
     .await
     .unwrap();
     assert_eq!(plan.tracks.len(), 2);
+    assert_eq!(
+        p.items[0].playback_track_ids,
+        plan.tracks
+            .iter()
+            .map(|t| t.release_identity_id.unwrap())
+            .collect::<Vec<_>>()
+    );
     p.definition.playback.filter = Some(field("favorite", "eq", json!(true)));
     let updated = save_collection(
         &pool,
@@ -207,6 +214,7 @@ async fn album_playback_scope_is_separate_and_snapshots_freeze_members() {
     )
     .await
     .unwrap();
+    let offline_ids = updated.items[0].playback_track_ids.clone();
     let limited = collection_play_plan(
         &pool,
         p.collection.id,
@@ -219,6 +227,14 @@ async fn album_playback_scope_is_separate_and_snapshots_freeze_members() {
     .await
     .unwrap();
     assert_eq!(limited.tracks.len(), 1);
+    assert_eq!(
+        offline_ids,
+        limited
+            .tracks
+            .iter()
+            .map(|t| t.release_identity_id.unwrap())
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         collection_play_plan(
             &pool,

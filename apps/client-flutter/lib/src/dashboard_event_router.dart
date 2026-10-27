@@ -56,6 +56,20 @@ extension _DashboardEventRouter on _CoreDashboardState {
           if (!_isClientOutputId(targetOutputId)) {
             return;
           }
+          // Observe receipts while the local decoder owns playback. The
+          // adopted transport acknowledgement can precede a trailing volume
+          // command; forgetting that receipt creates a false sequence gap.
+          if (_localPlaybackFallbackActive) {
+            final sequence = _intValue(command['sequence']);
+            if (sequence != null && sequence > 0) {
+              _rendererCommandSequences.record(
+                targetOutputId!,
+                sequence,
+                isTransport: false,
+              );
+            }
+            return;
+          }
           final issuedAt = _rendererCommandIssuedAt(command);
           final ageMs = issuedAt == null
               ? null
@@ -85,6 +99,11 @@ extension _DashboardEventRouter on _CoreDashboardState {
                 eventType == 'playback.position') &&
             payload is Map) {
           final playback = payload.cast<String, dynamic>();
+          if (_localPlaybackFallbackActive &&
+              _clientOutputForZone(playback['zone_id']?.toString() ?? '') !=
+                  null) {
+            return;
+          }
           if (!_acceptIncomingPlayback(playback)) {
             return;
           }
@@ -158,12 +177,12 @@ extension _DashboardEventRouter on _CoreDashboardState {
   }
 
   void _acknowledgeCoreEventCursor(int cursor) {
-    if (cursor <= _eventCursor) return;
+    if (!_coreLibraryOnline || cursor <= _eventCursor) return;
     _eventCursor = cursor;
     final serverId = _cacheServerId ?? _status?['server_id']?.toString();
     if (serverId == null || serverId.isEmpty) return;
     unawaited(
-      _ClientCacheStore.updateEventCursor(
+      _clientLibrary.updateEventCursor(
         _coreUrlController.text,
         serverId,
         _cacheCatalogEpoch ?? _status?['catalog_epoch']?.toString(),

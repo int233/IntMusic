@@ -68,6 +68,48 @@ void main() {
   });
 
   test(
+    'fully covered collection changes avoid redownloading the song catalog',
+    () async {
+      var calls = 0;
+      final result = await sync((_) async {
+        calls++;
+        return response({
+          'cursor': 12,
+          'requires_snapshot': true,
+          'changes': [
+            {'cursor': 11, 'scope': 'collections'},
+            {'cursor': 12, 'scope': 'home'},
+          ],
+        });
+      });
+      expect(calls, 1);
+      expect(result.snapshot, isNull);
+      expect(result.cursor, 12);
+    },
+  );
+
+  test(
+    'a journal gap cannot hide an earlier song change behind collection changes',
+    () async {
+      var calls = 0;
+      final result = await sync((path) async {
+        calls++;
+        return path.contains('/changes')
+            ? response({
+                'cursor': 12,
+                'changes': [
+                  {'cursor': 12, 'scope': 'collections'},
+                ],
+              })
+            : response({'cursor': 12});
+      });
+      expect(calls, 2);
+      expect(result.snapshot, isNotNull);
+      expect(result.detailKinds, libraryDetailKinds);
+    },
+  );
+
+  test(
     'a write between empty changes and cursor reads is not skipped',
     () async {
       final paths = <String>[];

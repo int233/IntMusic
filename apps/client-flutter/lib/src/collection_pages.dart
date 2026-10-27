@@ -35,19 +35,25 @@ class _CollectionsPage extends StatelessWidget {
                 ],
               ),
             ),
+            if (store.loading && !store.complete)
+              const LinearProgressIndicator(minHeight: 2),
             if (!store.online)
               const Padding(
                 padding: EdgeInsets.all(12),
-                child: Text('离线缓存：连接 Core 后可编辑'),
+                child: Text('显示本机资料，连接 Core 后同步更新'),
               ),
             Expanded(
               child: ListView(
                 children: [
                   for (final item in user) _tile(context, item),
                   if (user.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(24),
-                      child: Text('还没有集合。可以逐项添加，也可以设置自动筛选。'),
+                    Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Text(
+                        store.hasSnapshot
+                            ? '还没有集合。可以逐项添加，也可以设置自动筛选。'
+                            : '集合尚未同步到本机，连接 Core 后会自动保存。',
+                      ),
                     ),
                   if (store.settings['management_enabled'] == true) ...[
                     const Padding(
@@ -269,14 +275,12 @@ class _CollectionBlockState extends State<_CollectionBlock> {
           );
         }
       } else {
-        if (_collectionMap(page['collection'])['entity_type'] != 'track' ||
-            page['next_offset'] != null) {
-          throw StateError('此集合的完整歌曲尚未缓存，请连接 Core 后播放');
-        }
-        tracks = (page['items'] as List)
-            .where((v) => ids == null || ids.contains((v as Map)['entity_id']))
-            .map((v) => (v as Map)['data'])
-            .toList();
+        final plan = widget.store.localPlayPlan(
+          widget.id,
+          version,
+          entityIds: ids,
+        );
+        tracks = plan['tracks'] as List;
       }
       if (!mounted) return;
       final displayed = _displayTracks(context, tracks);

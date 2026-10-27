@@ -38,7 +38,9 @@ extension _DashboardDetails on _CoreDashboardState {
       _albumDetailCache[albumId] = detail;
       _navigateToInState(_AppRoute.album(albumId));
     });
-    if (!_localPlaybackFallbackActive) unawaited(_refreshAlbumDetail(albumId));
+    if (_coreLibraryOnline && albumId > 0) {
+      unawaited(_refreshAlbumDetail(albumId));
+    }
   }
 
   Map<String, dynamic>? _albumDetailFromOverview(int albumId) {
@@ -55,17 +57,22 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _refreshAlbumDetail(int albumId) async {
+    final api = _api;
+    final server = _cacheServerId;
+    final epoch = _cacheCatalogEpoch;
     try {
-      final detail = _asMap(await _api.getJson('/albums/$albumId'));
-      _albumDetailCache[albumId] = detail;
+      final detail = _asMap(await api.getJson('/albums/$albumId'));
+      if (!_sameCatalog(api, server, epoch)) return;
       await _persistDetail('album', albumId, detail);
+      if (!_sameCatalog(api, server, epoch)) return;
+      _albumDetailCache[albumId] = detail;
       if (mounted) {
         _mutate(
           () => _decorateDetailTrackAvailability(_albumDetailCache, albumId),
         );
       }
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
     }
   }
 
@@ -123,7 +130,7 @@ extension _DashboardDetails on _CoreDashboardState {
       _artistDetailCache[artistId] = detail;
       _navigateToInState(_AppRoute.artist(artistId));
     });
-    if (!_localPlaybackFallbackActive) {
+    if (_coreLibraryOnline && artistId > 0) {
       unawaited(_refreshArtistDetail(artistId));
     }
   }
@@ -162,6 +169,17 @@ extension _DashboardDetails on _CoreDashboardState {
   Map<String, dynamic>? _artistDetailFromOverview(int artistId) {
     final artist = _findEntity(_artists, artistId);
     if (artist == null) return null;
+    final name = artist['name']?.toString().trim().toLowerCase() ?? '';
+    final tracks = _tracks.whereType<Map>().where((track) {
+      final names = (track['artists'] as List? ?? []).map(
+        (v) => v.toString().trim().toLowerCase(),
+      );
+      return names.contains(name) ||
+          (track['artist_display']?.toString().toLowerCase() ?? '')
+              .split(RegExp(r'\s*[,;/&、，]\s*'))
+              .contains(name);
+    }).toList();
+    final albumIds = tracks.map((t) => t['album_id']).toSet();
     return <String, dynamic>{
       'artist': artist,
       'profile': <String, dynamic>{
@@ -173,23 +191,31 @@ extension _DashboardDetails on _CoreDashboardState {
       },
       'assets': const <dynamic>[],
       'visuals': const <dynamic>[],
-      'albums': const <dynamic>[],
-      'tracks': const <dynamic>[],
+      'albums': _albums
+          .whereType<Map>()
+          .where((a) => albumIds.contains(a['id']))
+          .toList(),
+      'tracks': tracks,
     };
   }
 
   Future<void> _refreshArtistDetail(int artistId) async {
+    final api = _api;
+    final server = _cacheServerId;
+    final epoch = _cacheCatalogEpoch;
     try {
-      final detail = _asMap(await _api.getJson('/artists/$artistId'));
-      _artistDetailCache[artistId] = detail;
+      final detail = _asMap(await api.getJson('/artists/$artistId'));
+      if (!_sameCatalog(api, server, epoch)) return;
       await _persistDetail('artist', artistId, detail);
+      if (!_sameCatalog(api, server, epoch)) return;
+      _artistDetailCache[artistId] = detail;
       if (mounted) {
         _mutate(
           () => _decorateDetailTrackAvailability(_artistDetailCache, artistId),
         );
       }
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
     }
   }
 
@@ -238,7 +264,7 @@ extension _DashboardDetails on _CoreDashboardState {
         _trackDetailCache[trackId] ?? _trackDetailFromOverview(trackId);
     if (projectedDetail == null || !mounted) return;
     var detail = projectedDetail;
-    if (_localPlaybackFallbackActive) {
+    {
       final copy = await _availableOfflineCopy(trackId);
       final path = copy == null
           ? null
@@ -252,7 +278,9 @@ extension _DashboardDetails on _CoreDashboardState {
       _trackDetailCache[trackId] = detail;
       _navigateToInState(_AppRoute.track(trackId), addToHistory: addToHistory);
     });
-    if (!_localPlaybackFallbackActive) unawaited(_refreshTrackDetail(trackId));
+    if (_coreLibraryOnline && trackId > 0) {
+      unawaited(_refreshTrackDetail(trackId));
+    }
   }
 
   Map<String, dynamic> _detailWithLocalCopy(
@@ -260,7 +288,7 @@ extension _DashboardDetails on _CoreDashboardState {
     _OfflineTrackCopy copy,
     String path,
   ) {
-    return <String, dynamic>{
+    final result = <String, dynamic>{
       ...detail,
       'track': <String, dynamic>{
         ..._asMap(detail['track']),
@@ -289,6 +317,13 @@ extension _DashboardDetails on _CoreDashboardState {
         'duration_ms': copy.metadata['duration_ms'],
       },
     };
+    if (result['media'] is! Map) {
+      result['media'] = localFileMedia(
+        _asMap(result['track']),
+        _asMap(result['_client_local_copy']),
+      );
+    }
+    return result;
   }
 
   Map<String, dynamic>? _trackDetailFromOverview(int trackId) {
@@ -311,16 +346,21 @@ extension _DashboardDetails on _CoreDashboardState {
   }
 
   Future<void> _refreshTrackDetail(int trackId) async {
+    final api = _api;
+    final server = _cacheServerId;
+    final epoch = _cacheCatalogEpoch;
     try {
-      final detail = _asMap(await _api.getJson('/tracks/$trackId'));
-      _trackDetailCache[trackId] = detail;
+      final detail = _asMap(await api.getJson('/tracks/$trackId'));
+      if (!_sameCatalog(api, server, epoch)) return;
       await _persistDetail('track', trackId, detail);
+      if (!_sameCatalog(api, server, epoch)) return;
+      _trackDetailCache[trackId] = detail;
       if (_activeTrackDetailId == trackId) _activeTrackDetail = detail;
       if (mounted) {
         _mutate(() => _refreshTrackAvailabilityForTrack(trackId));
       }
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
     }
   }
 
@@ -337,7 +377,7 @@ extension _DashboardDetails on _CoreDashboardState {
     await Future.wait(
       const <String>['track', 'album', 'artist'].map(
         (kind) =>
-            _ClientCacheStore.invalidateDetails(_coreUrlController.text, kind),
+            _clientLibrary.invalidateDetails(_coreUrlController.text, kind),
       ),
     );
   }
@@ -437,9 +477,7 @@ extension _DashboardDetails on _CoreDashboardState {
       case 'artist':
         await _openArtistDetail(id);
       case 'genre':
-        final detail = await _run<JsonMap>(
-          () async => _asMap(await _api.getJson('/genres/$id')),
-        );
+        final detail = _collections.localGenreDetail(id);
         if (detail == null || !mounted) return;
         await _showPanelDialog<void>(
           maxWidth: 1100,
@@ -515,7 +553,7 @@ extension _DashboardDetails on _CoreDashboardState {
   ) {
     final serverId = _cacheServerId ?? _status?['server_id']?.toString();
     if (serverId == null || serverId.isEmpty) return Future<void>.value();
-    return _ClientCacheStore.putDetail(
+    return _clientLibrary.putDetail(
       _coreUrlController.text,
       serverId,
       kind,
@@ -554,7 +592,7 @@ extension _DashboardDetails on _CoreDashboardState {
         unknownSource: musicSourceLabel,
       );
     } catch (error) {
-      await _ClientCacheStore.recordError(_coreUrlController.text, error);
+      await _clientLibrary.recordError(_coreUrlController.text, error);
       return const <Map<String, dynamic>>[];
     }
   }
@@ -710,7 +748,7 @@ extension _DashboardDetails on _CoreDashboardState {
   Future<void> _persistOverviewValues(Map<String, dynamic> values) {
     final serverId = _cacheServerId ?? _status?['server_id']?.toString();
     if (serverId == null || serverId.isEmpty) return Future<void>.value();
-    return _ClientCacheStore.putOverviewValues(
+    return _clientLibrary.putOverviewValues(
       _coreUrlController.text,
       serverId,
       values,

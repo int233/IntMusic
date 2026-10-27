@@ -1,6 +1,57 @@
 part of '../intmusic_client.dart';
 
 @visibleForTesting
+Future<Map<String, dynamic>> playDeviceFileForTesting(
+  String path,
+  RendererSession player,
+) async {
+  final file = File(path);
+  final copy = _OfflineTrackCopy(
+    trackId: localLibraryId('unbound-device-file'),
+    mediaVariantId: 0,
+    rootExternalId: 'test-root',
+    fileExternalId: file.uri.pathSegments.last,
+    relativePath: file.uri.pathSegments.last,
+    extension: 'flac',
+    sizeBytes: await file.length(),
+    modifiedAt: DateTime.now().toUtc(),
+    metadata: {'title': 'Local song', 'duration_ms': 180000},
+  );
+  final state = _CoreDashboardState();
+  state._offlineLibrary = _OfflineLibrarySnapshot.fromJson(
+    _OfflineLibrarySnapshot(copies: {copy.copyKey: copy}).toJson(),
+  );
+  state._clientLibraryRoots = [
+    _ClientLibraryRoot(
+      externalId: 'test-root',
+      path: file.parent.path,
+      displayName: 'Music',
+    ),
+  ];
+  state._localPlaybackFallbackActive = true;
+  state._selectedZoneId = state._clientOutputId;
+  state._audioPlayers[state._clientOutputId] = Future.value(player);
+  state._mergeLocalFileProjection();
+  try {
+    await state._playOfflineTrack(copy.trackId, sourceTrackIds: [copy.trackId]);
+    return state._rendererPlaybackByOutput[state._clientOutputId] ?? {};
+  } finally {
+    state._collections.dispose();
+    state._songDisplayState.dispose();
+    state._playbackRevision.dispose();
+    for (final controller in [
+      state._coreUrlController,
+      state._searchController,
+      state._serverAliasController,
+      state._clientAliasController,
+      state._libraryRootController,
+    ]) {
+      controller.dispose();
+    }
+  }
+}
+
+@visibleForTesting
 Widget errorNoticeForTesting(String message) => _ErrorBanner(message: message);
 
 @visibleForTesting

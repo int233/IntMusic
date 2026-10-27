@@ -6,6 +6,28 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:intmusic_client/intmusic_client.dart';
 
 void main() {
+  test('cached status cannot mask an unavailable database service', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final subscription = server.listen((request) async {
+      if (request.uri.path.endsWith('/status')) {
+        request.response.write('{"ready":true}');
+      } else {
+        request.response.statusCode = 500;
+      }
+      await request.response.close();
+    });
+    final client = CoreApiClient('http://127.0.0.1:${server.port}');
+    addTearDown(() async {
+      client.close();
+      await subscription.cancel();
+      await server.close(force: true);
+    });
+    expect(await client.getJson('/status'), {'ready': true});
+    await expectLater(
+      client.probeLibraryService(),
+      throwsA(isA<HttpException>()),
+    );
+  });
   tearDown(CoreApiClient.closeAll);
 
   test('normalizes and reuses clients for the same Core endpoint', () {

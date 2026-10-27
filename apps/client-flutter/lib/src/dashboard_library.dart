@@ -79,6 +79,17 @@ extension _DashboardLibrary on _CoreDashboardState {
     }
   }
 
+  Future<void> _repairLocalFileIndex() async {
+    for (final root in List<_ClientLibraryRoot>.of(_clientLibraryRoots)) {
+      final indexed = _offlineLibrary.copies.values
+          .where((copy) => copy.rootExternalId == root.externalId)
+          .length;
+      if (indexed == 0 || indexed < root.fileCount) {
+        await _syncClientLibraryRoot(root.externalId, refreshAfter: false);
+      }
+    }
+  }
+
   Future<void> _syncAllClientLibraryRoots({bool refreshAfter = true}) async {
     for (final root in List<_ClientLibraryRoot>.of(_clientLibraryRoots)) {
       await _syncClientLibraryRoot(root.externalId, refreshAfter: false);
@@ -144,6 +155,8 @@ extension _DashboardLibrary on _CoreDashboardState {
       final scanId =
           '${DateTime.now().toUtc().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
       var accepted = 0;
+      Object? uploadError;
+      var canUpload = _coreLibraryOnline;
       var batch = <Map<String, dynamic>>[];
       var inspectionPaths = <String>[];
       var manifestBatchTarget = 20;
@@ -164,25 +177,43 @@ extension _DashboardLibrary on _CoreDashboardState {
             'complete': complete,
           },
         );
-        final result = _asMap(
-          await api.postLibrarySyncJson(
-            '/client-library/manifests',
-            <String, dynamic>{
-              'device_id': _clientId,
-              'device_name': _clientAlias(),
-              'platform': Platform.operatingSystem,
-              'root': <String, dynamic>{
-                'external_id': root.externalId,
-                'display_name': root.displayName,
-                'path_hint': root.path,
+        if (!canUpload) {
+          batch = <Map<String, dynamic>>[];
+          return;
+        }
+        Map<String, dynamic> result;
+        try {
+          result = _asMap(
+            await api.postLibrarySyncJson(
+              '/client-library/manifests',
+              <String, dynamic>{
+                'device_id': _clientId,
+                'device_name': _clientAlias(),
+                'platform': Platform.operatingSystem,
+                'root': <String, dynamic>{
+                  'external_id': root.externalId,
+                  'display_name': root.displayName,
+                  'path_hint': root.path,
+                },
+                'scan_id': scanId,
+                'batch_id': '$scanId:$sequence',
+                'complete': complete,
+                'files': sentBatch,
               },
-              'scan_id': scanId,
-              'batch_id': '$scanId:$sequence',
-              'complete': complete,
-              'files': sentBatch,
-            },
-          ),
-        );
+            ),
+          );
+        } catch (error, stack) {
+          // Upload failure does not interrupt local indexing.
+          canUpload = false;
+          uploadError = error;
+          batch = <Map<String, dynamic>>[];
+          ClientLog.error(
+            'library.manifest.upload_failed',
+            error,
+            stackTrace: stack,
+          );
+          return;
+        }
         checkSession();
         final elapsed = stopwatch.elapsed;
         manifestBatchTarget = switch (elapsed.inSeconds) {
@@ -202,7 +233,7 @@ extension _DashboardLibrary on _CoreDashboardState {
             'complete': complete,
           },
         );
-        accepted += _intValue(result['accepted_files']) ?? sentBatch.length;
+
         final bindings = <String, Map<String, dynamic>>{
           for (final value in ((result['bindings'] as List?) ?? const []))
             if (value is Map && value['external_id'] != null)
@@ -217,6 +248,9 @@ extension _DashboardLibrary on _CoreDashboardState {
             continue;
           }
           seenExternalIds.add(externalId);
+          final previous =
+              _offlineLibrary.copies['${root.externalId}\u0000$externalId'];
+          if (previous != null) _remapLocalTrackId(previous.trackId, trackId);
           _offlineLibrary.upsert(
             _OfflineTrackCopy(
               trackId: trackId,
@@ -237,6 +271,7 @@ extension _DashboardLibrary on _CoreDashboardState {
             ),
           );
         }
+        await _OfflineLibraryStore.save(_offlineLibrary);
         batch = <Map<String, dynamic>>[];
       }
 
@@ -248,6 +283,45 @@ extension _DashboardLibrary on _CoreDashboardState {
           rootPath: root.path,
           filePaths: paths,
         );
+        for (final file in inspected) {
+          final external = file['external_id'].toString();
+          final key = '${root.externalId}\u0000$external';
+          final previous = _offlineLibrary.copies[key];
+          seenExternalIds.add(external);
+          _offlineLibrary.upsert(
+            _OfflineTrackCopy(
+              trackId: previous?.trackId ?? localLibraryId('file:$key'),
+              mediaVariantId: previous?.mediaVariantId ?? 0,
+              rootExternalId: root.externalId,
+              fileExternalId: external,
+              relativePath: file['relative_path']?.toString() ?? external,
+              extension: file['extension']?.toString() ?? '',
+              sizeBytes: _intValue(file['size_bytes']) ?? 0,
+              modifiedAt:
+                  DateTime.tryParse(file['modified_at']?.toString() ?? '') ??
+                  DateTime.now().toUtc(),
+              metadata: _asMap(file['metadata']),
+              isFavorite: previous?.isFavorite ?? false,
+              playCount: previous?.playCount ?? 0,
+            ),
+          );
+        }
+        _verifiedLocalTrackIds.addAll(
+          inspected.map((file) {
+            final key = '${root.externalId}\u0000${file['external_id']}';
+            return _offlineLibrary.copies[key]!.trackId;
+          }),
+        );
+        accepted += inspected.length;
+        await _OfflineLibraryStore.save(_offlineLibrary);
+        if (mounted) {
+          _mutate(() {
+            _mergeLocalFileProjection();
+            _songDisplayState.updateCatalog(_tracks, cursor: _cacheCursor);
+            _collections.updateCatalog(_tracks);
+            _refreshTrackAvailabilityProjection();
+          });
+        }
         batch.addAll(inspected);
         if (batch.length >= manifestBatchTarget) {
           await sendBatch(complete: false);
@@ -272,12 +346,18 @@ extension _DashboardLibrary on _CoreDashboardState {
       _offlineLibrary.retainRootFiles(root.externalId, seenExternalIds);
       await _OfflineLibraryStore.save(_offlineLibrary);
       final updated = root.copyWith(
-        lastSyncedAt: DateTime.now().toUtc(),
+        lastSyncedAt: canUpload ? DateTime.now().toUtc() : root.lastSyncedAt,
         fileCount: accepted,
-        clearError: true,
+        clearError: uploadError == null,
+        lastError: uploadError?.toString(),
       );
       if (mounted) {
-        _mutate(() => _replaceClientLibraryRoot(updated));
+        _mutate(() {
+          _replaceClientLibraryRoot(updated);
+          _mergeLocalFileProjection();
+          _collections.updateCatalog(_tracks);
+          _refreshTrackAvailabilityProjection();
+        });
       } else {
         _replaceClientLibraryRoot(updated);
       }
@@ -419,26 +499,22 @@ extension _DashboardLibrary on _CoreDashboardState {
       'artists': filter(_artists, const ['name', 'sort_name']),
       'collections': _collections.search(query, limit: limit),
     };
-    return _ClientCacheStore.search(
-      _coreUrlController.text,
-      query,
-      limit: limit,
-    ).then((cached) {
-      final cachedCount =
-          const <String>[
-            'tracks',
-            'albums',
-            'artists',
-            'collections',
-          ].fold<int>(
-            0,
-            (count, key) => count + ((cached[key] as List?)?.length ?? 0),
-          );
-      return {
-        ...(cachedCount == 0 ? memoryResult : cached),
-        'collections': _collections.search(query, limit: limit),
-      };
-    });
+    return _clientLibrary
+        .search(_coreUrlController.text, query, limit: limit)
+        .then((cached) {
+          return {
+            'query': query,
+            for (final key in ['tracks', 'albums', 'artists'])
+              key: <Object?, Map<String, dynamic>>{
+                for (final raw in [
+                  ...cached[key] as List,
+                  ...memoryResult[key] as List,
+                ])
+                  (raw as Map)['id']: _asMap(raw),
+              }.values.take(limit).toList(),
+            'collections': _collections.search(query, limit: limit),
+          };
+        });
   }
 
   void _onSearchChanged(String value) {

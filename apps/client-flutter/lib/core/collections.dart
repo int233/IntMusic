@@ -1,10 +1,9 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:crypto/crypto.dart';
-import 'package:path_provider/path_provider.dart';
+import 'storage/client_cache_database.dart';
+import 'logging/client_log.dart';
 import 'network/core_api_client.dart';
 
 typedef JsonMap = Map<String, dynamic>;
@@ -31,7 +30,16 @@ JsonMap emptyCollection([String type = 'track']) => {
 /// Collections, layout and immutable result pages share a fenced catalog identity.
 /// The player receives an explicit plan; refreshing this store never edits it.
 class CollectionStore extends ChangeNotifier {
-  CollectionStore({this.persist = true});
+  CollectionStore({
+    this.persist = true,
+    bool backgroundSync = true,
+    ClientLibraryDatabase? database,
+  }) : _networkAvailable = backgroundSync,
+       _database = database ?? ClientLibraryDatabase.shared;
+  bool _networkAvailable;
+  final ClientLibraryDatabase _database;
+  Future<void> _hydration = Future.value();
+  final Map<int, JsonMap> _tracksByRelease = {};
   final bool persist;
   CoreApiClient? _api;
   String? _identity, _server, _epoch;
@@ -40,6 +48,16 @@ class CollectionStore extends ChangeNotifier {
   bool _disposed = false;
   bool _backgrounded = false;
   bool supported = false, online = false, loading = false;
+  bool hasSnapshot = false;
+  bool get complete =>
+      hasSnapshot &&
+      items.every((item) {
+        final page = pages[item['id']];
+        return page != null &&
+            page['result_version'] == item['result_version'] &&
+            page['next_offset'] == null &&
+            _hasPlaybackMembers(page);
+      });
   String? error;
   List<JsonMap> items = [];
   JsonMap settings = {}, schema = {}, layout = {};
@@ -52,6 +70,12 @@ class CollectionStore extends ChangeNotifier {
   bool _refreshAgain = false;
   Future<void> _cacheWrites = Future.value();
   String? get identity => _identity;
+  bool _hasPlaybackMembers(JsonMap page) =>
+      (page['items'] as List? ?? []).every(
+        (item) =>
+            item['entity_type'] == 'track' ||
+            item['playback_track_ids'] is List,
+      );
   JsonMap? summary(int id) => items.where((v) => v['id'] == id).firstOrNull;
   List<JsonMap> search(String query, {int limit = 120}) {
     final terms = query
@@ -96,47 +120,83 @@ class CollectionStore extends ChangeNotifier {
     final server = status?['server_id']?.toString();
     final epoch = status?['catalog_epoch']?.toString();
     final identity = supports && server != null && epoch != null
-        ? '${api.baseUrl}|$server|$epoch'
+        ? 'catalog:$server:$epoch'
         : null;
-    if (_identity == identity && supported == supports) return;
+    // A missing network status must not discard a previously loaded library.
+    if (identity == null) return;
+    if (_identity == identity) {
+      _api = api;
+      return;
+    }
     reset();
     supported = supports;
-    if (identity == null) return;
     _api = api;
     _identity = identity;
     _server = server;
     _epoch = epoch;
     final generation = _generation;
-    unawaited(Future.microtask(() => _start(generation)));
+    _hydration = _restore(generation);
+    unawaited(_start(generation));
   }
 
-  Future<void> _start(int generation) async {
-    if (!_current(generation)) return;
-    if (persist) {
-      try {
-        final file = await _cacheFile(_identity!);
-        if (!_current(generation)) return;
-        if (await file.exists()) {
-          final data = _map(jsonDecode(await file.readAsString()));
-          if (!_current(generation)) return;
-          items = (data['items'] as List).map(_map).toList();
-          settings = _map(data['settings']);
-          schema = _map(data['schema']);
-          layout = _map(data['layout']);
-          pages.addAll(
-            _map(data['pages']).map((k, v) => MapEntry(int.parse(k), _map(v))),
-          );
-          _notify();
-        }
-      } catch (_) {
-        /* Cache failure does not block the current Core. */
-      }
+  Future<void> get ready => _hydration;
+  Future<void> get persisted => _cacheWrites;
+
+  void updateCatalog(List<dynamic> tracks) {
+    _tracksByRelease.clear();
+    for (final raw in tracks.whereType<Map>()) {
+      final track = _map(raw);
+      final release = track['release_identity_id'];
+      if (release is int) _tracksByRelease[release] = track;
     }
-    if (!_current(generation)) return;
-    _timer = Timer.periodic(
+  }
+
+  void markUnavailable() => setNetworkAvailable(false);
+
+  void setNetworkAvailable(bool available) {
+    if (_networkAvailable == available) return;
+    _networkAvailable = available;
+    if (!available) {
+      _timer?.cancel();
+      _timer = null;
+      online = false;
+      _notify();
+    } else if (supported && _api != null) {
+      _startTimer();
+    }
+  }
+
+  void _startTimer() {
+    _timer ??= Timer.periodic(
       const Duration(seconds: 30),
       (_) => unawaited(refresh()),
     );
+  }
+
+  Future<void> _restore(int generation) async {
+    if (!persist) return;
+    try {
+      final data = await _database.readDocument('collections', _identity!);
+      if (!_current(generation) || data == null) return;
+      hasSnapshot = true;
+      items = (data['items'] as List).map(_map).toList();
+      settings = _map(data['settings']);
+      schema = _map(data['schema']);
+      layout = _map(data['layout']);
+      pages.addAll(
+        _map(data['pages']).map((k, v) => MapEntry(int.parse(k), _map(v))),
+      );
+      _notify();
+    } catch (e, stack) {
+      ClientLog.error('library.collections.read_failed', e, stackTrace: stack);
+      error = e.toString();
+    }
+  }
+
+  Future<void> _start(int generation) async {
+    await _hydration;
+    if (!_current(generation) || !_networkAvailable) return;
+    _startTimer();
     await refresh();
   }
 
@@ -148,7 +208,11 @@ class CollectionStore extends ChangeNotifier {
   }
 
   Future<void> refresh() {
-    if (_disposed || _backgrounded || !supported || _api == null) {
+    if (_disposed ||
+        _backgrounded ||
+        !_networkAvailable ||
+        !supported ||
+        _api == null) {
       return Future.value();
     }
     if (_refresh != null) {
@@ -168,6 +232,8 @@ class CollectionStore extends ChangeNotifier {
   }
 
   Future<void> _refreshData(int generation) async {
+    await _hydration;
+    if (!_current(generation)) return;
     final mutation = _mutation;
     final api = _api!;
     loading = true;
@@ -179,6 +245,7 @@ class CollectionStore extends ChangeNotifier {
         api.getJson('/collections/rule-schema'),
         api.getJson('/home-layout'),
       ]);
+      if (!_networkAvailable) return;
       final maps = values.map(_map).toList();
       for (final data in maps) {
         _check(data, generation);
@@ -187,7 +254,16 @@ class CollectionStore extends ChangeNotifier {
         _refreshAgain = true;
         return;
       }
-      items = (maps[0]['items'] as List).map(_map).toList();
+      final nextItems = (maps[0]['items'] as List).map(_map).toList();
+      await _persistState(
+        items: nextItems,
+        settings: maps[1],
+        schema: maps[2],
+        layout: maps[3],
+      );
+      if (!_current(generation) || mutation != _mutation) return;
+      hasSnapshot = true;
+      items = nextItems;
       settings = maps[1];
       schema = maps[2];
       layout = maps[3];
@@ -197,24 +273,28 @@ class CollectionStore extends ChangeNotifier {
       pages.removeWhere((id, _) => !ids.contains(id));
       _demand.removeWhere((id, _) => !ids.contains(id));
       _notify();
-      // Read only requested result sets. Multiple home sections reuse one batch.
-      await Future.wait(
-        _demand.keys.toList().map((id) async {
-          if (pages[id]?['result_version'] != summary(id)?['result_version']) {
-            try {
-              await load(id, count: _demand[id] ?? 50, fresh: true);
-            } catch (e) {
-              if (_current(generation)) error = e.toString();
-            }
-          }
-        }),
-      );
-      if (!_current(generation)) return;
-      _saveCache();
-    } catch (e) {
+      // Cache complete immutable batches, including collections never opened.
+      // Serial reads bound CPU, memory and Core database demand on small clients.
+      for (final item in items.toList()) {
+        if (!_current(generation)) return;
+        final id = item['id'] as int;
+        final cached = pages[id];
+        if (cached == null ||
+            cached['result_version'] != item['result_version'] ||
+            cached['next_offset'] != null ||
+            !_hasPlaybackMembers(cached)) {
+          await load(id, count: 0x7fffffff, fresh: true);
+        }
+      }
+    } catch (e, stack) {
       if (_current(generation)) {
         online = false;
         error = e.toString();
+        ClientLog.error(
+          'library.collections.sync_failed',
+          e,
+          stackTrace: stack,
+        );
       }
     } finally {
       if (_current(generation)) {
@@ -225,8 +305,12 @@ class CollectionStore extends ChangeNotifier {
   }
 
   Future<JsonMap> load(int id, {int count = 50, bool fresh = false}) async {
+    await _hydration;
     final generation = _generation;
     _demand[id] = max(count, _demand[id] ?? 0);
+    final available = pages[id];
+    if ((!fresh || !_networkAvailable) && available != null) return available;
+    if (!_networkAvailable) throw StateError('集合尚未同步到本机');
     final pending = _reads[id];
     if (pending != null) {
       await pending;
@@ -235,9 +319,8 @@ class CollectionStore extends ChangeNotifier {
     final cached = pages[id];
     if (!fresh &&
         cached != null &&
-        (cached['result_version'] == summary(id)?['result_version'] ||
-            !online) &&
-        ((cached['items'] as List).length >= count ||
+        (!online ||
+            (cached['items'] as List).length >= count ||
             cached['next_offset'] == null)) {
       return cached;
     }
@@ -302,6 +385,9 @@ class CollectionStore extends ChangeNotifier {
         throw StateError('集合已更新，请重新加载');
       }
       final entries = page['items'] as List;
+      if (!_hasPlaybackMembers(page)) {
+        throw const FormatException('Core 未提供集合的本地播放信息，请更新 Core');
+      }
       if (entries.map((v) => (v as Map)['entity_id']).toSet().length !=
               entries.length ||
           (page['next_offset'] == null &&
@@ -309,15 +395,18 @@ class CollectionStore extends ChangeNotifier {
         throw StateError('集合结果不完整');
       }
       page['offline'] = false;
+      await _persistState(pages: {...pages, id: page});
+      if (!_current(generation) || mutation != _mutation) {
+        return pages[id] ?? page;
+      }
       pages[id] = page;
-      _saveCache();
       _notify();
       return page;
-    } on SocketException {
-      if (!_current(generation) || cached == null) rethrow;
-      return {...cached, 'offline': true};
-    } on TimeoutException {
-      if (!_current(generation) || cached == null) rethrow;
+    } catch (e) {
+      if (!_current(generation) || cached == null || fresh) rethrow;
+      online = false;
+      error = e.toString();
+      _notify();
       return {...cached, 'offline': true};
     }
   }
@@ -338,20 +427,34 @@ class CollectionStore extends ChangeNotifier {
     _check(data, generation);
     if (refreshAfter) {
       _mutation++;
+      var nextItems = items;
+      var nextPages = Map<int, JsonMap>.of(pages);
+      var nextLayout = layout;
+      var nextSettings = settings;
       if (data['collection'] is Map) {
-        final summary = _map(data['collection']);
-        final id = summary['id'] as int;
-        items = [...items.where((v) => v['id'] != id), summary];
-        pages[id] = data;
+        final acknowledged = _map(data['collection']);
+        final id = acknowledged['id'] as int;
+        nextItems = [...items.where((v) => v['id'] != id), acknowledged];
+        nextPages[id] = data;
       } else if (data['sections'] is List) {
-        layout = data;
+        nextLayout = data;
       } else if (data['management_enabled'] is bool) {
-        settings = data;
+        nextSettings = data;
       }
+      await _persistState(
+        items: nextItems,
+        pages: nextPages,
+        layout: nextLayout,
+        settings: nextSettings,
+      );
+      if (!_current(generation)) return data;
+      items = nextItems;
+      pages
+        ..clear()
+        ..addAll(nextPages);
+      layout = nextLayout;
+      settings = nextSettings;
       _notify();
-      _saveCache();
-      // Saving is complete at acknowledgement; background revalidation must
-      // not keep the editor waiting for unrelated pages or slow readers.
       unawaited(refresh());
     }
     return data;
@@ -390,17 +493,24 @@ class CollectionStore extends ChangeNotifier {
     );
     _check(result, generation);
     _mutation++;
-    items = items.where((item) => item['id'] != id).toList();
-    pages.remove(id);
-    _demand.remove(id);
-    layout = {
+    final nextItems = items.where((item) => item['id'] != id).toList();
+    final nextPages = Map<int, JsonMap>.of(pages)..remove(id);
+    final nextLayout = {
       ...layout,
       'sections': (layout['sections'] as List? ?? [])
           .where((s) => (s as Map)['collection_id'] != id)
           .toList(),
     };
+    await _persistState(items: nextItems, pages: nextPages, layout: nextLayout);
+    if (!_current(generation)) return;
+    items = nextItems;
+    pages
+      ..clear()
+      ..addAll(nextPages);
+    layout = nextLayout;
+    _demand.remove(id);
     _notify();
-    await refresh();
+    unawaited(refresh());
   }
 
   Future<JsonMap> resetRules(int id, int revision) =>
@@ -454,36 +564,84 @@ class CollectionStore extends ChangeNotifier {
     return found;
   }
 
-  static Future<File> _cacheFile(String identity) async {
-    final dir = Directory(
-      '${(await getApplicationSupportDirectory()).path}/collections',
-    );
-    await dir.create(recursive: true);
-    return File('${dir.path}/${sha256.convert(utf8.encode(identity))}.json');
+  Future<void> _persistState({
+    List<JsonMap>? items,
+    JsonMap? settings,
+    JsonMap? schema,
+    JsonMap? layout,
+    Map<int, JsonMap>? pages,
+  }) {
+    if (!persist || _identity == null) return Future.value();
+    final identity = _identity!;
+    final data = {
+      'items': items ?? this.items,
+      'settings': settings ?? this.settings,
+      'schema': schema ?? this.schema,
+      'layout': layout ?? this.layout,
+      'pages': (pages ?? this.pages).map((k, v) => MapEntry('$k', v)),
+    };
+    final payload = encodeLocalLibraryDocument(data);
+    // A failed write is reported to the synchronizer and never publishes new UI state.
+    _cacheWrites = _cacheWrites
+        .catchError((_) {})
+        .then(
+          (_) async => _database.writeEncodedDocument(
+            'collections',
+            identity,
+            await payload,
+          ),
+        );
+    return _cacheWrites;
   }
 
-  void _saveCache() {
-    if (!persist || _identity == null) return;
-    final identity = _identity!;
-    final data = jsonEncode({
-      'items': items,
-      'settings': settings,
-      'schema': schema,
-      'layout': layout,
-      'pages': pages.map((k, v) => MapEntry('$k', v)),
-    });
-    _cacheWrites = _cacheWrites
-        .then((_) async {
-          final file = await _cacheFile(identity);
-          final temp = File('${file.path}.tmp');
-          await temp.writeAsString(data, flush: true);
-          await temp.rename(file.path);
-        })
-        .catchError((_) {});
+  JsonMap? localGenreDetail(int id) {
+    for (final page in pages.values) {
+      for (final raw in page['items'] as List? ?? []) {
+        final item = _map(raw);
+        if (item['entity_type'] != 'genre' || item['entity_id'] != id) continue;
+        final genre = _map(item['data']);
+        final name = genre['name'].toString().trim().toLowerCase();
+        return {
+          'genre': genre,
+          'tracks': _tracksByRelease.values
+              .where(
+                (track) => (track['genres'] as List? ?? []).any(
+                  (tag) => tag.toString().trim().toLowerCase() == name,
+                ),
+              )
+              .toList(),
+        };
+      }
+    }
+    return null;
+  }
+
+  JsonMap localPlayPlan(int id, String version, {List<int>? entityIds}) {
+    final page = pages[id];
+    if (page == null || page['result_version'] != version) {
+      throw StateError('集合内容尚未同步到本机');
+    }
+    final tracks = <JsonMap>[];
+    final seen = <int>{};
+    for (final raw in page['items'] as List) {
+      final item = _map(raw);
+      if (entityIds != null && !entityIds.contains(item['entity_id'])) continue;
+      if (item['entity_type'] == 'track') {
+        final track = _tracksByRelease[item['entity_id']] ?? _map(item['data']);
+        if (seen.add(track['id'] as int)) tracks.add(track);
+      } else {
+        for (final release in item['playback_track_ids'] as List? ?? []) {
+          final track = _tracksByRelease[release];
+          if (track != null && seen.add(track['id'] as int)) tracks.add(track);
+        }
+      }
+    }
+    return {'tracks': tracks, 'missing_count': 0, 'source': null};
   }
 
   void reset() {
     _generation++;
+    _hydration = Future.value();
     _timer?.cancel();
     _timer = null;
     _refresh = null;
@@ -493,6 +651,7 @@ class CollectionStore extends ChangeNotifier {
     _server = null;
     _epoch = null;
     supported = false;
+    hasSnapshot = false;
     online = false;
     loading = false;
     error = null;

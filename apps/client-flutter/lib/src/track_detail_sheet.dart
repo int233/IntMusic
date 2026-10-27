@@ -14,7 +14,9 @@ class _TrackInfoPage extends StatelessWidget {
     required this.onEdit,
     required this.onManageVersions,
     this.loadMedia,
+    this.coreOnline = false,
   });
+  final bool coreOnline;
   final Future<Map<String, dynamic>> Function(int)? loadMedia;
   final String coreBaseUrl;
   final Map<String, dynamic>? detail;
@@ -63,6 +65,7 @@ class _TrackInfoPage extends StatelessWidget {
       onPlayTrack: onPlayTrack,
       onManage: onManageVersions,
       loadMedia: loadMedia,
+      coreOnline: coreOnline,
     );
     final words = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

@@ -687,6 +687,7 @@ pub(super) fn generate(
             (
                 CollectionItem {
                     entity_id: c.id,
+                    playback_track_ids: tracks.iter().map(|t| t.id).collect(),
                     entity: c.entity.clone(),
                     reason: reason.into(),
                 },

@@ -9,7 +9,9 @@ class _SongEditionsPanel extends StatefulWidget {
     required this.onPlayTrack,
     required this.onManage,
     this.loadMedia,
+    this.coreOnline = false,
   });
+  final bool coreOnline;
   final Future<Map<String, dynamic>> Function(int)? loadMedia;
   final String coreBaseUrl;
   final Map<String, dynamic> detail;
@@ -21,7 +23,6 @@ class _SongEditionsPanel extends StatefulWidget {
 }
 
 class _SongEditionsPanelState extends State<_SongEditionsPanel> {
-  Timer? _timer;
   Map<String, dynamic>? _media;
   bool _connected = false;
   bool _recordingOnly = false;
@@ -36,10 +37,6 @@ class _SongEditionsPanelState extends State<_SongEditionsPanel> {
         ? _asMap(widget.detail['media'])
         : null;
     unawaited(_refresh());
-    _timer = Timer.periodic(
-      const Duration(seconds: 5),
-      (_) => unawaited(_refresh()),
-    );
   }
 
   @override
@@ -59,12 +56,12 @@ class _SongEditionsPanelState extends State<_SongEditionsPanel> {
         widget.detail['media'] is Map) {
       _media = _asMap(widget.detail['media']);
     }
+    _connected = widget.coreOnline;
   }
 
   @override
   void dispose() {
     _generation++;
-    _timer?.cancel();
     super.dispose();
   }
 
@@ -80,15 +77,11 @@ class _SongEditionsPanelState extends State<_SongEditionsPanel> {
     try {
       final media = widget.loadMedia != null
           ? await widget.loadMedia!(id!)
-          : _asMap(
-              await CoreApiClient(
-                widget.coreBaseUrl,
-              ).getJson('/tracks/$id/media'),
-            );
+          : jsonObjectOrEmpty(widget.detail['media']);
       if (!mounted || generation != _generation) return;
       setState(() {
         _media = media;
-        _connected = true;
+        _connected = widget.coreOnline;
         _failed = false;
       });
     } catch (_) {

@@ -11,8 +11,10 @@ class RendererCommandSequences {
   int? latestTransport(String outputId) => _latestTransportByOutput[outputId];
 
   void record(String outputId, int sequence, {required bool isTransport}) {
-    _latestByOutput[outputId] = sequence;
-    if (isTransport) {
+    if (sequence > (_latestByOutput[outputId] ?? 0)) {
+      _latestByOutput[outputId] = sequence;
+    }
+    if (isTransport && sequence > (_latestTransportByOutput[outputId] ?? 0)) {
       _latestTransportByOutput[outputId] = sequence;
     }
   }

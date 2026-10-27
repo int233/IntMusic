@@ -80,6 +80,16 @@ class CoreApiClient {
 
   static int get debugPooledClientCount => _instances.length;
 
+  /// Cached status and WebSocket pongs do not prove the database is usable.
+  Future<void> probeLibraryService({
+    Duration timeout = const Duration(seconds: 2),
+  }) async {
+    final zones = await probeJson(baseUrl, '/zones', timeout: timeout);
+    if (zones is! List) {
+      throw const FormatException('Core database service is unavailable');
+    }
+  }
+
   static void retainOnly(String baseUrl) {
     final retained = normalizeBaseUrl(baseUrl);
     final staleKeys = _instances.keys

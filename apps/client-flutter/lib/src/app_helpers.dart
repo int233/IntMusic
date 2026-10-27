@@ -182,6 +182,7 @@ String? _artistArtworkUrl(
   int? width,
   int? height,
 }) {
+  if ((_intValue(artistId) ?? 0) <= 0) return null;
   final value = artistId?.toString();
   final baseUrl = coreBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
   if (value == null || value.isEmpty || baseUrl.isEmpty) {
@@ -197,6 +198,7 @@ String? _artistArtworkUrl(
 }
 
 String? _artworkUrl(String coreBaseUrl, String kind, Object? id) {
+  if ((_intValue(id) ?? 0) <= 0) return null;
   final value = id?.toString();
   if (value == null || value.isEmpty) {
     return null;

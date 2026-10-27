@@ -548,10 +548,14 @@ pub async fn collection_page(
     page.result_total = row.try_get::<i64, _>("result_total")? as u64;
     page.collection.result_total = page.result_total;
     page.missing_members = serde_json::from_str(&row.try_get::<String, _>("missing_json")?)?;
-    let jsons:Vec<String>=sqlx::query_scalar("SELECT item_json FROM collection_result_items WHERE version=?1 ORDER BY position LIMIT ?2 OFFSET ?3").bind(&version).bind(limit.clamp(1,200) as i64).bind(offset as i64).fetch_all(pool).await?;
+    let jsons:Vec<(String,String)>=sqlx::query_as("SELECT item_json,track_ids_json FROM collection_result_items WHERE version=?1 ORDER BY position LIMIT ?2 OFFSET ?3").bind(&version).bind(limit.clamp(1,200) as i64).bind(offset as i64).fetch_all(pool).await?;
     page.items = jsons
         .into_iter()
-        .map(|s| serde_json::from_str(&s).map_err(Into::into))
+        .map(|(item, tracks)| {
+            let mut item: CollectionItem = serde_json::from_str(&item)?;
+            item.playback_track_ids = serde_json::from_str(&tracks)?;
+            Ok(item)
+        })
         .collect::<Result<_>>()?;
     let next = offset as u64 + page.items.len() as u64;
     if next < page.result_total {
@@ -604,6 +608,7 @@ pub async fn browse_collection_entities(
         .take(limit.clamp(1, 200) as usize)
         .map(|c| CollectionItem {
             entity_id: c.id,
+            playback_track_ids: vec![],
             entity: c.entity,
             reason: "browse".into(),
         })
