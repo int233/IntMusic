@@ -341,7 +341,7 @@ void main() {
   test(
     'local file reaches the decoder without any Core projection or assigned song ID',
     () async {
-      final file = File('${directory.path}/local.flac');
+      final file = File.fromUri(directory.uri.resolve('local.flac'));
       await file.writeAsBytes([1, 2, 3]);
       final engine = _FileEngine();
       final player = RendererSession(createEngine: () async => engine);
