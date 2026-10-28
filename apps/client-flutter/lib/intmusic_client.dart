@@ -115,6 +115,7 @@ part 'src/dashboard_navigation.dart';
 part 'src/dashboard_artwork_cache.dart';
 part 'src/dashboard_catalog_identity.dart';
 part 'src/dashboard_sync.dart';
+part 'src/dashboard_core_refresh.dart';
 part 'src/dashboard_renderer_devices.dart';
 part 'src/dashboard_distribution.dart';
 part 'src/dashboard_connection.dart';
@@ -317,6 +318,7 @@ class _CoreDashboardState extends State<CoreDashboard>
   int _cacheCursor = 0;
   int _eventCursor = 0;
   bool _backgroundSyncBusy = false;
+  bool _coreLibraryRefreshPending = false;
   bool _detailWarmupBusy = false;
   int _detailWarmFailures = 0;
   DateTime? _detailWarmRetryAt;
@@ -379,7 +381,6 @@ class _CoreDashboardState extends State<CoreDashboard>
   String get _clientId => _deviceIdentity.id;
   String get _clientZonePrefix => 'renderer:$_clientId:';
   String get _clientOutputId => 'renderer:$_clientId:default';
-
   void _mutate(VoidCallback mutation) {
     if (mounted) {
       final previousError = _error;

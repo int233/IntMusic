@@ -7,6 +7,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart' as mobile;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import '../logging/client_log.dart';
+import 'library_json_rows.dart';
+export 'library_json_rows.dart';
 
 Future<void> configureClientCacheDatabase(Database database) async {
   await database.rawQuery('PRAGMA journal_mode = WAL');
@@ -277,9 +279,9 @@ class ClientLibraryDatabase {
     String key,
   ) async {
     final db = await open();
-    final rows = await db.query(
+    final rows = await readLibraryJsonRows(
+      db,
       'local_documents',
-      columns: ['payload'],
       where: 'namespace = ? AND document_key = ?',
       whereArgs: [namespace, key],
     );
@@ -289,9 +291,9 @@ class ClientLibraryDatabase {
 
   Future<List<Map<String, dynamic>>> readDocuments(String namespace) async {
     final db = await open();
-    final rows = await db.query(
+    final rows = await readLibraryJsonRows(
+      db,
       'local_documents',
-      columns: ['payload'],
       where: 'namespace = ?',
       whereArgs: [namespace],
     );

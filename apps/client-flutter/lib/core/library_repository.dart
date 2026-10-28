@@ -56,15 +56,17 @@ class ClientLibraryRepository {
       final cursor = _intValue(stateRows.firstOrNull?['cursor']) ?? 0;
       final eventCursor =
           _intValue(stateRows.firstOrNull?['event_cursor']) ?? 0;
-      final rows = await database.query(
+      final rows = await readLibraryJsonRows(
+        database,
         'cache_entries',
-        columns: <String>['kind', 'entity_key', 'payload'],
+        columns: <String>['kind', 'entity_key'],
         where: 'core_url = ?',
         whereArgs: <Object?>[normalized],
       );
-      final catalogRows = await database.query(
+      final catalogRows = await readLibraryJsonRows(
+        database,
         'catalog_entities',
-        columns: <String>['kind', 'entity_id', 'payload'],
+        columns: <String>['kind', 'entity_id'],
         where: 'core_url = ?',
         whereArgs: <Object?>[normalized],
         orderBy: 'kind, entity_id',
@@ -677,24 +679,19 @@ class ClientLibraryRepository {
       terms.length,
       'terms LIKE ?',
     ).join(' AND ');
-    final rows = await database.rawQuery(
-      '''
-      SELECT kind, payload
-      FROM search_index
-      WHERE core_url = ? AND $whereTerms
-      ORDER BY CASE kind
+    final rows = await readLibraryJsonRows(
+      database,
+      'search_index',
+      columns: ['kind'],
+      where: 'core_url = ? AND $whereTerms',
+      whereArgs: [normalized, ...terms.map((value) => '%$value%')],
+      orderBy: '''CASE kind
         WHEN 'track' THEN 0
         WHEN 'album' THEN 1
         WHEN 'artist' THEN 2
         ELSE 3
-      END, title COLLATE NOCASE
-      LIMIT ?
-      ''',
-      <Object?>[
-        normalized,
-        ...terms.map((value) => '%$value%'),
-        limit.clamp(1, 500),
-      ],
+      END, title COLLATE NOCASE''',
+      limit: limit.clamp(1, 500),
     );
     final result = <String, dynamic>{
       'query': query,

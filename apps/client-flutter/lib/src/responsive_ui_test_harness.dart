@@ -1,6 +1,24 @@
 part of '../intmusic_client.dart';
 
 @visibleForTesting
+Future<Map<String, dynamic>> refreshCoreConnectionForTesting(
+  State dashboard,
+  String url,
+) async {
+  final state = dashboard as _CoreDashboardState;
+  state._coreUrlController.text = url;
+  state._localPlaybackFallbackActive = true;
+  await state._run(state._refreshFromCurrentCore);
+  return {
+    'loading': state._loading,
+    'status': state._status,
+    'online': state._coreLibraryOnline,
+    'sync_pending': state._coreLibraryRefreshPending,
+    'local_playback': state._localPlaybackFallbackActive,
+  };
+}
+
+@visibleForTesting
 Future<Map<String, dynamic>> playDeviceFileForTesting(
   String path,
   RendererSession player,
