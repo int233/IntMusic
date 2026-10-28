@@ -54,6 +54,7 @@ mod auto_track_merge;
 mod catalog_identity;
 mod client_file_resolution;
 mod client_library;
+mod client_library_bindings;
 mod client_manifest_batches;
 mod client_mutations;
 mod collections;
@@ -93,6 +94,7 @@ pub(crate) use client_file_resolution::{
     normalize_client_metadata_status, reconcile_redundant_client_track,
 };
 pub use client_library::*;
+pub use client_library_bindings::*;
 pub use client_mutations::*;
 pub use collections::*;
 pub use connection::*;
